@@ -695,6 +695,16 @@ function pre_umount_final_image__899_install_fw_env_tool() {
     local root_dir="${MOUNT}"
     local uboot_src="${SRC}/cache/sources/${BOOTSOURCEDIR}"
     local fw_env_src="${uboot_src}/tools/env/fw_printenv"
+
+    # Build fw_printenv if not already available (e.g. u-boot was cached)
+    if [[ ! -f "${fw_env_src}" ]]; then
+        display_alert "A/B partition OTA" "fw_printenv not found, building from u-boot source" "info"
+        pre_package_uboot_image__build_fw_env_tool || {
+            display_alert "A/B partition OTA" "Failed to build fw_printenv" "err"
+            return 1
+        }
+    fi
+
     local fw_printenv="${root_dir}/usr/bin/fw_printenv"
     local fw_setenv="${root_dir}/usr/bin/fw_setenv"
     local fw_env_config="${root_dir}/etc/fw_env.config"
