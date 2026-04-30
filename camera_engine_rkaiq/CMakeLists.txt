@@ -2,6 +2,17 @@ cmake_minimum_required(VERSION 2.8...3.22)
 
 project(camera_engine)
 
+# Derive ARCH from CMAKE_SYSTEM_PROCESSOR if not set externally
+if (NOT ARCH)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(ARCH "aarch64")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+        set(ARCH "arm")
+    else()
+        set(ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+endif()
+
 set(RK_AIQ_IS_SUBDIR TRUE)
 
 # Pre-derive ISP_HW_VERSION from RKAIQ_TARGET_SOC so all subdirectories see it

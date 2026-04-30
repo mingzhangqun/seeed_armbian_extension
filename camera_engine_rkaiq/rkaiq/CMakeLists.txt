@@ -1396,18 +1396,6 @@ endif()
 set(RK_AIQ_STATIC_LIB_ARS)
 set(STATIC_LIB_PREFIX $<TARGET_FILE:)
 set(STATIC_LIB_SUFFIX >)
-
-# Derive ARCH from CMAKE_SYSTEM_PROCESSOR if not set externally
-if (NOT ARCH)
-    if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-        set(ARCH "aarch64")
-    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
-        set(ARCH "arm")
-    else()
-        set(ARCH "${CMAKE_SYSTEM_PROCESSOR}")
-    endif()
-endif()
-
 if(GENMESH_ONLINE AND (RKAIQ_HAVE_LDCH_V10 OR RKAIQ_HAVE_LDCH_V21 OR RKAIQ_HAVE_FEC_V10))
     set(GENMESH_LIBS genMeshLib)
     if (${CMAKE_SYSTEM_NAME} EQUAL "")
