@@ -119,6 +119,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
             -Wno-error=sign-compare
             -Wno-error=implicit-function-declaration
             -Wno-error=int-to-pointer-cast
+            -Wno-error=maybe-uninitialized
             )
     endif()
 elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
