@@ -49,7 +49,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections -Wl,-Map,librkaiq.map")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_LIST_DIR}/librkaiq.version")
     # Suppress LTO-phase maybe-uninitialized warnings (GCC 12+, -O4 enables LTO)
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wno-maybe-uninitialized")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wno-maybe-uninitialized -Wno-stringop-overread")
 
     # Flags that affects code size
     #if (NOT ARCH STREQUAL "arm")
