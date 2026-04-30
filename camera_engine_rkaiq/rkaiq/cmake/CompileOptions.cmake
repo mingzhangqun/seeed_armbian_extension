@@ -8,8 +8,6 @@ set(CMAKE_CXX_FLAGS                "${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror -fP
 set(CMAKE_CXX_FLAGS_DEBUG          "-O0 -g -gdwarf -fexceptions -funwind-tables")
 set(CMAKE_CXX_FLAGS_MINSIZEREL     "-Os -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE        "-O3 -DNDEBUG")
-message(STATUS "CompileOptions: CMAKE_C_FLAGS_RELEASE = ${CMAKE_C_FLAGS_RELEASE}")
-message(STATUS "CompileOptions: CMAKE_CXX_FLAGS_RELEASE = ${CMAKE_CXX_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -gdwarf -fexceptions -funwind-tables")
 
 set(CMAKE_C_STANDARD 11)
@@ -50,6 +48,11 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections -Wl,-Map,librkaiq.map")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_LIST_DIR}/librkaiq.version")
+    # Disable LTO during linking — GCC specs load the LTO plugin by default,
+    # which causes false-positive ODR warnings (-Werror=odr) on SoCs that use
+    # the C++ implementation (rk3588).  The code is compiled without -flto, so
+    # LTO in the link phase is unintentional.
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fno-lto")
 
     # Flags that affects code size
     #if (NOT ARCH STREQUAL "arm")
