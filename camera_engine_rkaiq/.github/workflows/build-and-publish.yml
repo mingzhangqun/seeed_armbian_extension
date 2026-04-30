@@ -1,0 +1,205 @@
+name: Build and Publish APT Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Source branch/tag for package sources'
+        required: false
+        default: 'deb_sourece'
+
+  push:
+    branches: [deb_sourece]
+
+jobs:
+  # ──────────────────────────────────────────────────
+  # 从源码构建的包（arm64 runner）
+  # ──────────────────────────────────────────────────
+  build-debs:
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fcs960k-aic-bluez
+            source_dir: FCS960K-aic-bluz
+            build_deps: >-
+              autoconf automake libtool pkg-config
+              libglib2.0-dev libdbus-1-dev libreadline-dev
+              libncurses-dev libffi-dev zlib1g-dev
+              libgettextpo-dev libexpat-dev libudev-dev libical-dev
+              libjson-c-dev libelf-dev python3-docutils
+            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
+
+          - name: hostapd-morse-tools
+            source_dir: hostapd_morse_tools
+            build_deps: libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libssl-dev libdbus-1-dev
+            build_cmd: make deb
+
+          - name: morsectrl-tools
+            source_dir: morsectrl_tools
+            build_deps: quilt libnl-3-dev libnl-genl-3-dev libnl-route-3-dev gcc-aarch64-linux-gnu
+            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
+
+          - name: wpa-supplicant-morse-tools
+            source_dir: wpa_supplicant_morese_tools
+            build_deps: libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libssl-dev libdbus-1-dev
+            build_cmd: make deb
+
+          - name: realtek-r8125-dkms
+            source_dir: realtek-r8125-dkms
+            build_deps: dh-sequence-dkms
+            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
+
+          - name: libmali-g610
+            source_dir: rk3588_gmali
+            build_deps: >-
+              meson pkg-config libstdc++6 libgbm-dev libdrm-dev
+              libx11-dev libx11-xcb-dev libx11-xcb1 libxcb-dri2-0-dev
+              libxcb-dri2-0 libxdamage-dev libxdamage1 libxext6
+              libxfixes-dev libxrandr-dev
+              libwayland-dev libwayland-client0 cmake libegl-dev
+              libgles-dev libvulkan-dev
+            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
+
+          - name: usbdevice-gadget
+            source_dir: rk35xx_usb_gadget
+            build_deps: ''
+            build_cmd: bash build-usbdevice-deb.sh
+
+          - name: camera-engine-rkaiq-rk3576
+            source_dir: camera_engine_rkaiq
+            build_deps: cmake pkg-config libdrm-dev
+            build_cmd: bash build-deb.sh rk3576
+
+          - name: camera-engine-rkaiq-rk3588
+            source_dir: camera_engine_rkaiq
+            build_deps: cmake pkg-config libdrm-dev
+            build_cmd: bash build-deb.sh rk3588
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.source_ref || 'deb_sourece' }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential devscripts debhelper \
+            dpkg-dev fakeroot ${{ matrix.build_deps }}
+
+      - name: Build ${{ matrix.name }}
+        working-directory: ${{ matrix.source_dir }}
+        run: |
+          set -euo pipefail
+          ${{ matrix.build_cmd }}
+          mkdir -p /tmp/debs
+          find .. -maxdepth 1 -name '*.deb' ! -name 'Makefile.deb' -exec cp {} /tmp/debs/ \;
+          # 也搜索子目录（make deb 可能把 deb 放在子目录）
+          find . -name '*.deb' ! -name 'Makefile.deb' -exec cp {} /tmp/debs/ \;
+          echo "Built packages:"
+          ls -lh /tmp/debs/*.deb
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-${{ matrix.name }}
+          path: /tmp/debs/*.deb
+
+  # ──────────────────────────────────────────────────
+  # 无源码的包（预编译 deb，存放在仓库中）
+  # ──────────────────────────────────────────────────
+  copy-prebuilt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.source_ref || 'deb_sourece' }}
+
+      - name: Copy prebuilt debs
+        run: |
+          mkdir -p /tmp/debs
+          # camera engine 预编译包存放在仓库 prebuilt/ 目录
+          if [[ -d prebuilt ]]; then
+            cp prebuilt/*.deb /tmp/debs/ 2>/dev/null || true
+          fi
+          echo "Prebuilt packages:"
+          ls -lh /tmp/debs/*.deb 2>/dev/null || echo "  (none)"
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-prebuilt
+          path: /tmp/debs/*.deb
+          if-no-files-found: ignore
+
+  # ──────────────────────────────────────────────────
+  # 使用 aptly 构建 apt 仓库并发布
+  # ──────────────────────────────────────────────────
+  publish-apt:
+    needs: [build-debs, copy-prebuilt]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout (for scripts)
+        uses: actions/checkout@v4
+
+      - name: Download all deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all-debs
+          pattern: debs-*
+          merge-multiple: true
+
+      - name: List collected debs
+        run: |
+          echo "=== All collected .deb files ==="
+          find /tmp/all-debs -name '*.deb' -exec basename {} \; | sort
+
+      - name: Install aptly
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aptly gnupg2
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+        env:
+          ARMBIAN_APT_GPG_PRIVATE_KEY: ${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}
+
+      - name: Publish apt repository
+        run: |
+          chmod +x scripts/*.sh
+          scripts/publish-aptly.sh /tmp/all-debs
+        env:
+          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+  # ──────────────────────────────────────────────────
+  # 部署到 GitHub Pages
+  # ──────────────────────────────────────────────────
+  deploy-pages:
+    needs: publish-apt
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
