@@ -7,11 +7,85 @@ on:
         description: 'Source branch/tag for package sources'
         required: false
         default: 'deb_sourece'
+      armbian_ref:
+        description: 'Seeed-Studio/armbian-build ref for kernel build'
+        required: false
+        default: 'seeed-main'
 
   push:
     branches: [deb_sourece]
 
 jobs:
+  # ──────────────────────────────────────────────────
+  # 内核 deb 包（通过 Armbian 框架编译）
+  # ──────────────────────────────────────────────────
+  build-kernel:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - recomputer-rk3576-devkit
+          - recomputer-rk3588-devkit
+
+    steps:
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghcActions
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout Armbian build
+        uses: actions/checkout@v4
+        with:
+          repository: Seeed-Studio/armbian-build
+          ref: ${{ inputs.armbian_ref }}
+          path: armbian-build
+          fetch-depth: 0
+
+      - name: Checkout Seeed extension
+        uses: actions/checkout@v4
+        with:
+          path: armbian-build/extensions/seeed_armbian_extension
+
+      - name: Build kernel (${{ matrix.board }})
+        run: |
+          cd armbian-build
+          ./compile.sh kernel \
+            BOARD=${{ matrix.board }} \
+            BRANCH=vendor \
+            KERNEL_CONFIGURE=no
+
+      - name: Collect debs
+        run: |
+          mkdir -p /tmp/kernel-debs
+          find armbian-build/output/debs -name 'linux-*vendor-rk35xx*.deb' \
+            -exec cp -v {} /tmp/kernel-debs/ \;
+          echo "=== Collected debs ==="
+          ls -lh /tmp/kernel-debs/
+
+      - name: Repack debs with xz compression
+        run: |
+          mkdir -p /tmp/kernel-debs-xz
+          for deb in /tmp/kernel-debs/*.deb; do
+            name=$(basename "$deb")
+            echo "Repacking $name with xz..."
+            tmpdir=$(mktemp -d)
+            dpkg-deb -R "$deb" "$tmpdir"
+            dpkg-deb -Zxz -b "$tmpdir" "/tmp/kernel-debs-xz/$name"
+            rm -rf "$tmpdir"
+          done
+          echo "=== Before (uncompressed) ==="
+          ls -lh /tmp/kernel-debs/
+          echo "=== After (xz) ==="
+          ls -lh /tmp/kernel-debs-xz/
+
+      - name: Upload kernel debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-kernel-${{ matrix.board }}
+          path: /tmp/kernel-debs-xz/*.deb
+
   # ──────────────────────────────────────────────────
   # 从源码构建的包（arm64 runner）
   # ──────────────────────────────────────────────────
@@ -140,7 +214,7 @@ jobs:
   # 使用 aptly 构建 apt 仓库并发布
   # ──────────────────────────────────────────────────
   publish-apt:
-    needs: [build-debs, copy-prebuilt]
+    needs: [build-kernel, build-debs, copy-prebuilt]
     runs-on: ubuntu-latest
     permissions:
       contents: write
