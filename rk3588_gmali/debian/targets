@@ -20,6 +20,14 @@ aarch64-linux-gnu/libmali-bifrost-g52-g2p0-gbm.so
 aarch64-linux-gnu/libmali-bifrost-g52-g2p0-wayland-gbm.so
 aarch64-linux-gnu/libmali-bifrost-g52-g2p0-without-cl-dummy-gbm.so
 aarch64-linux-gnu/libmali-bifrost-g52-g2p0-x11-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-dummy-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-dummy.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-nocl-dummy-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-wayland-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-x11-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-x11-wayland-gbm.so
+aarch64-linux-gnu/libmali-bifrost-g52-g24p0-dummy-wayland-gbm.so
 aarch64-linux-gnu/libmali-midgard-t86x-r18p0-gbm.so
 aarch64-linux-gnu/libmali-midgard-t86x-r18p0-wayland-gbm.so
 aarch64-linux-gnu/libmali-midgard-t86x-r18p0-x11-gbm.so
