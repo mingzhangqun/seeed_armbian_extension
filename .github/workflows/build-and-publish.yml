@@ -10,7 +10,7 @@ on:
       armbian_ref:
         description: 'Seeed-Studio/armbian-build ref for kernel build'
         required: false
-        default: 'seeed-main'
+        default: 'main'
 
   push:
     branches: [deb_sourece]
