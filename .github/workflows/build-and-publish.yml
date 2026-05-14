@@ -248,7 +248,7 @@ jobs:
           done
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
           # Merge into all-debs (flatten subdirectories)
-          find "${TMPDIR}" -name '*.deb' -exec cp -v {} /tmp/all-debs/ \;
+          find "${TMPDIR}" -name '*.deb' -exec cp -vn {} /tmp/all-debs/ \;
 
       - name: List all debs (final)
         run: |
