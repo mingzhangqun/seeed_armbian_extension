@@ -178,8 +178,12 @@ jobs:
             tar -xf "${archive}" -C "${TMPDIR}"
           done
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
-          # Merge into all-debs (flatten subdirectories)
-          find "${TMPDIR}" -name '*.deb' -exec cp -vn {} /tmp/all-debs/ \;
+          # Only copy selected packages from SDK
+          SDK_PACKAGES="libmali"
+          for pkg in ${SDK_PACKAGES}; do
+            count=$(find "${TMPDIR}" -name "${pkg}*.deb" -exec cp -vn {} /tmp/all-debs/ \; | wc -l)
+            echo "  Copied ${count} debs matching '${pkg}'"
+          done
 
       - name: List all debs (final)
         run: |
