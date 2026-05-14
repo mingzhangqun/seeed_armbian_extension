@@ -56,7 +56,7 @@ Applied at image build time:
 - SSH brute-force mitigation through fail2ban on the sshd service
 - SSH daemon hardening with reduced authentication retries
 - Terrapin mitigation by disabling \`chacha20-poly1305@openssh.com\` and Encrypt-then-MAC algorithms
-- SSH service masked by default (users can run \`sudo systemctl unmask ssh.service ssh.socket; sudo systemctl enable --now ssh\` after local login)
+- SSH service disabled by default (users can run `sudo systemctl enable --now ssh` after local login)
 - DHCP client data minimization for dhclient and systemd-networkd defaults
 
 Already provided by Armbian first boot:
@@ -76,11 +76,11 @@ EOF
 	for unit in ssh.service ssh.socket sshd.service; do
 		if chroot_sdcard test -f "/lib/systemd/system/${unit}" || chroot_sdcard test -f "/etc/systemd/system/${unit}"; then
 			found_ssh_unit="yes"
-			chroot_sdcard systemctl --no-reload mask "${unit}" || display_alert "${board_label}" "Failed to mask ${unit}" "warn"
+			chroot_sdcard systemctl --no-reload disable "${unit}" || display_alert "${board_label}" "Failed to disable ${unit}" "warn"
 		fi
 	done
 	if [[ "${found_ssh_unit}" == "no" ]]; then
-		display_alert "${board_label}" "No ssh service unit found in image; skipping mask" "warn"
+		display_alert "${board_label}" "No ssh service unit found in image; skipping disable" "warn"
 	fi
 
 	if chroot_sdcard test -f /lib/systemd/system/fail2ban.service || chroot_sdcard test -f /etc/systemd/system/fail2ban.service; then
