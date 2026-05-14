@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mingzq <north_sea@qq.com>
+Date: Wed, 14 May 2026 03:30:00 +0000
+Subject: arm64: dts: rockchip: add opp-supported-hw for rk3576 GPU OPP table
+
+The reComputer RK3576 DevKit uses a base RK3576 (bin 0). The GPU OPP
+table in rk3576.dtsi has `rockchip,supported-hw` set for bin-based
+matching, but the generic OPP entries (300-900 MHz) lack the
+`opp-supported-hw` property. This causes the OPP framework to reject
+all entries and GPU runs at a fixed ~100 MHz without devfreq.
+
+Override the generic GPU OPPs in the board DTS with
+`opp-supported-hw = <0x01 0xffff>` to match bin 0, enabling proper
+GPU frequency scaling from 300 MHz to 900 MHz.
+
+Signed-off-by: mingzq <north_sea@qq.com>
+---
+ arch/arm64/boot/dts/rockchip/rk3576-recomputer-rk3576-devkit.dts | 77 ++++++++++
+ 1 file changed, 77 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/rockchip/rk3576-recomputer-rk3576-devkit.dts b/arch/arm64/boot/dts/rockchip/rk3576-recomputer-rk3576-devkit.dts
+index 28afce0731f7..37282924a1bd 100644
+--- a/arch/arm64/boot/dts/rockchip/rk3576-recomputer-rk3576-devkit.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-recomputer-rk3576-devkit.dts
+@@ -369,6 +369,83 @@ &gpu {
+ 	status = "okay";
+ };
+
++/*
++ * Override base GPU OPPs to add opp-supported-hw for bin 0.
++ * Without this the OPP framework rejects all OPPs because
++ * rockchip,supported-hw is set (bin-based matching) but the
++ * generic OPP entries lack opp-supported-hw.
++ */
++&gpu_opp_table {
++	/delete-node/ opp-300000000;
++	/delete-node/ opp-400000000;
++	/delete-node/ opp-500000000;
++	/delete-node/ opp-600000000;
++	/delete-node/ opp-700000000;
++	/delete-node/ opp-800000000;
++	/delete-node/ opp-900000000;
++
++	opp-300000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <300000000>;
++		opp-microvolt = <712500 712500 875000>;
++	};
++	opp-400000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <400000000>;
++		opp-microvolt = <712500 712500 875000>;
++	};
++	opp-500000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <500000000>;
++		opp-microvolt = <712500 712500 875000>;
++	};
++	opp-600000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <600000000>;
++		opp-microvolt = <712500 712500 875000>;
++	};
++	opp-700000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <700000000>;
++		opp-microvolt = <712500 712500 875000>;
++		opp-microvolt-L0 = <750000 750000 875000>;
++		opp-microvolt-L1 = <750000 750000 875000>;
++		opp-microvolt-L2 = <737500 737500 875000>;
++		opp-microvolt-L3 = <725000 725000 875000>;
++		opp-microvolt-L4 = <725000 725000 875000>;
++	};
++	opp-800000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <800000000>;
++		opp-microvolt = <812500 812500 875000>;
++		opp-microvolt-L1 = <812500 812500 875000>;
++		opp-microvolt-L2 = <800000 800000 875000>;
++		opp-microvolt-L3 = <787500 787500 875000>;
++		opp-microvolt-L4 = <775000 775000 875000>;
++		opp-microvolt-L5 = <762500 762500 875000>;
++		opp-microvolt-L6 = <750000 750000 875000>;
++		opp-microvolt-L7 = <737500 737500 875000>;
++		opp-microvolt-L8 = <725000 725000 875000>;
++		opp-microvolt-L9 = <725000 725000 875000>;
++		opp-microvolt-L10 = <725000 725000 875000>;
++	};
++	opp-900000000 {
++		opp-supported-hw = <0x01 0xffff>;
++		opp-hz = /bits/ 64 <900000000>;
++		opp-microvolt = <875000 875000 875000>;
++		opp-microvolt-L1 = <875000 875000 875000>;
++		opp-microvolt-L2 = <862500 862500 875000>;
++		opp-microvolt-L3 = <850000 850000 875000>;
++		opp-microvolt-L4 = <837500 837500 875000>;
++		opp-microvolt-L5 = <825000 825000 875000>;
++		opp-microvolt-L6 = <812500 812500 875000>;
++		opp-microvolt-L7 = <800000 800000 875000>;
++		opp-microvolt-L8 = <787500 787500 875000>;
++		opp-microvolt-L9 = <775000 775000 875000>;
++		opp-microvolt-L10 = <762500 762500 875000>;
++	};
++};
++
+ &iep {
+ 	status = "okay";
+ };
+--
+2.43.0
