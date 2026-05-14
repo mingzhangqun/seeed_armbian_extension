@@ -11,6 +11,10 @@ on:
         description: 'Seeed-Studio/armbian-build ref for kernel build'
         required: false
         default: 'main'
+      sdk_debs_release:
+        description: 'Release tag containing SDK deb packages (leave empty to skip)'
+        required: false
+        default: 'rockchip-sdk-debs'
 
   push:
     branches: [deb_sourece]
@@ -26,7 +30,6 @@ jobs:
       matrix:
         board:
           - recomputer-rk3576-devkit
-          - recomputer-rk3588-devkit
 
     steps:
       - name: Maximize disk space
@@ -123,17 +126,6 @@ jobs:
           - name: realtek-r8125-dkms
             source_dir: realtek-r8125-dkms
             build_deps: dh-sequence-dkms
-            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
-
-          - name: libmali-g610
-            source_dir: rk3588_gmali
-            build_deps: >-
-              meson pkg-config libstdc++6 libgbm-dev libdrm-dev
-              libx11-dev libx11-xcb-dev libx11-xcb1 libxcb-dri2-0-dev
-              libxcb-dri2-0 libxdamage-dev libxdamage1 libxext6
-              libxfixes-dev libxrandr-dev
-              libwayland-dev libwayland-client0 cmake libegl-dev
-              libgles-dev libvulkan-dev
             build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
 
           - name: usbdevice-gadget
@@ -236,6 +228,33 @@ jobs:
         run: |
           echo "=== All collected .deb files ==="
           find /tmp/all-debs -name '*.deb' -exec basename {} \; | sort
+
+      - name: Download SDK debs from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_RELEASE_TAG: ${{ inputs.sdk_debs_release || 'rockchip-sdk-debs' }}
+        run: |
+          echo "=== Downloading SDK debs from Release: ${SDK_RELEASE_TAG} ==="
+          TMPDIR=$(mktemp -d)
+          gh release download "${SDK_RELEASE_TAG}" \
+            --repo "${{ github.repository }}" \
+            --dir "${TMPDIR}" \
+            --pattern '*.tar.xz' \
+            --clobber || { echo "WARNING: Release ${SDK_RELEASE_TAG} not found, skipping SDK debs"; exit 0; }
+          echo "Extracting archives..."
+          for archive in "${TMPDIR}"/*.tar.xz; do
+            echo "  Extracting: $(basename "${archive}")"
+            tar -xf "${archive}" -C "${TMPDIR}"
+          done
+          echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
+          # Merge into all-debs (flatten subdirectories)
+          find "${TMPDIR}" -name '*.deb' -exec cp -v {} /tmp/all-debs/ \;
+
+      - name: List all debs (final)
+        run: |
+          echo "=== Final .deb list ==="
+          find /tmp/all-debs -name '*.deb' -exec basename {} \; | sort
+          echo "Total: $(find /tmp/all-debs -name '*.deb' | wc -l)"
 
       - name: Install aptly
         run: |
