@@ -39,6 +39,9 @@ function pre_update_initramfs__301_config_fit_ota_script(){
 }
 function pre_umount_final_image__901_create_ota_payload_pkg() {
 
+    if [[ "${OTA_ENABLE}" != "yes" ]]; then
+        return 0
+    fi
 
     display_alert "pre_umount_final_image__901 Extracting partition images from loop device" "Detecting and extracting partitions from ${LOOP}" "info"
 
