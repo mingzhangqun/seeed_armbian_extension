@@ -1,0 +1,29 @@
+From: Seeed Studio <support@seeed.cc>
+Date: Fri, 16 May 2026 00:00:00 +0000
+Subject: drm/panfrost: increase job timeout for 4K workloads on Mali-G52
+
+Mali-G52 is a mid-range GPU that may take longer than 500ms to complete
+complex jobs at 4K resolution (3840x2160). Increase JOB_TIMEOUT_MS from
+500 to 2000 to avoid spurious gpu sched timeout errors on high-resolution
+displays.
+
+Signed-off-by: Seeed Studio <support@seeed.cc>
+---
+ drivers/gpu/drm/panfrost/panfrost_job.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/panfrost/panfrost_job.c b/drivers/gpu/drm/panfrost/panfrost_job.c
+index f4c752bc0d90..0f9069ba9144 100644
+--- a/drivers/gpu/drm/panfrost/panfrost_job.c
++++ b/drivers/gpu/drm/panfrost/panfrost_job.c
+@@ -22,7 +22,7 @@
+ #include "panfrost_mmu.h"
+ #include "panfrost_dump.h"
+
+-#define JOB_TIMEOUT_MS 500
++#define JOB_TIMEOUT_MS 3000
+
+ #define job_write(dev, reg, data) writel(data, dev->iomem + (reg))
+ #define job_read(dev, reg) readl(dev->iomem + (reg))
+--
+2.43.0
