@@ -47,29 +47,31 @@ DUIDType=link-layer
 EOF
 
 	install -d -m 0755 "${security_doc_dir}"
-	cat > "${security_doc_dir}/README.md" <<-EOF
-# ${board_label} Security Hardening
+	local board_title="${board_label} Security Hardening"
+	cat > "${security_doc_dir}/README.md" <<-'EOF'
+	# BOARD_TITLE_PLACEHOLDER
 
-This image adds board-scoped hardening for Seeed reComputer RK3576/RK3588 builds.
+	This image adds board-scoped hardening for Seeed reComputer RK3576/RK3588 builds.
 
-Applied at image build time:
-- SSH brute-force mitigation through fail2ban on the sshd service
-- SSH daemon hardening with reduced authentication retries
-- Terrapin mitigation by disabling \`chacha20-poly1305@openssh.com\` and Encrypt-then-MAC algorithms
-- SSH service disabled by default (users can run `sudo systemctl enable --now ssh` after local login)
-- DHCP client data minimization for dhclient and systemd-networkd defaults
+	Applied at image build time:
+	- SSH brute-force mitigation through fail2ban on the sshd service
+	- SSH daemon hardening with reduced authentication retries
+	- Terrapin mitigation by disabling `chacha20-poly1305@openssh.com` and Encrypt-then-MAC algorithms
+	- SSH service disabled by default (users can run `sudo systemctl enable --now ssh` after local login)
+	- DHCP client data minimization for dhclient and systemd-networkd defaults
 
-Already provided by Armbian first boot:
-- Unique \`/etc/machine-id\`
-- Regenerated SSH host keys on first boot
+	Already provided by Armbian first boot:
+	- Unique `/etc/machine-id`
+	- Regenerated SSH host keys on first boot
 
-Not implemented at board-image layer:
-- Web UI login throttling
-- Web session timeout / auto logout
-- OTA payload signing / encryption workflow
-- HTTPS certificate provisioning for application services
-- Full DoS detection or traffic monitoring as a dedicated network appliance feature
-EOF
+	Not implemented at board-image layer:
+	- Web UI login throttling
+	- Web session timeout / auto logout
+	- OTA payload signing / encryption workflow
+	- HTTPS certificate provisioning for application services
+	- Full DoS detection or traffic monitoring as a dedicated network appliance feature
+	EOF
+	sed -i "s|BOARD_TITLE_PLACEHOLDER|${board_title}|" "${security_doc_dir}/README.md"
 
 	local unit found_ssh_unit
 	found_ssh_unit="no"
