@@ -6,7 +6,7 @@ on:
       source_ref:
         description: 'Source branch/tag for package sources'
         required: false
-        default: 'deb_sourece'
+        default: 'deb_source'
       armbian_ref:
         description: 'Seeed-Studio/armbian-build ref for kernel build'
         required: false
@@ -17,7 +17,7 @@ on:
         default: 'rockchip-sdk-debs'
 
   push:
-    branches: [deb_sourece]
+    branches: [deb_source]
 
 jobs:
   # ──────────────────────────────────────────────────
@@ -93,7 +93,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.source_ref || 'deb_sourece' }}
+          ref: ${{ github.event.inputs.source_ref || 'deb_source' }}
 
       - name: Install build dependencies
         run: |
@@ -129,7 +129,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.source_ref || 'deb_sourece' }}
+          ref: ${{ github.event.inputs.source_ref || 'deb_source' }}
 
       - name: Copy prebuilt debs
         run: |
