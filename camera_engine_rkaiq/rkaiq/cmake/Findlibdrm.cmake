@@ -10,6 +10,7 @@ find_path(LIBDRM_INCLUDE_DIR
     include
     PATH_SUFFIXES
     drm
+    libdrm
 )
 
 find_path(LIBDRM_XF86DRM_INCLUDE_DIR
@@ -62,7 +63,7 @@ if(libdrm_FOUND OR libdrm_rockchip_FOUND)
         set(LIBDRM_CFLAGS "-DHAS_LIBDRM -DHAS_LIBDRM_ROCKCHIP")
     else()
         set(LIBDRM_LIBRARIES    ${LIBDRM_LIBRARY})
-        set(LIBDRM_INCLUDE_DIRS ${LIBDRM_INCLUDE_DIR})
+        set(LIBDRM_INCLUDE_DIRS ${LIBDRM_XF86DRM_INCLUDE_DIR} ${LIBDRM_INCLUDE_DIR})
 		set(LIBDRM_CFLAGS "-DHAS_LIBDRM" "-I${LIBDRM_INCLUDE_DIRS}")
     endif()
 
