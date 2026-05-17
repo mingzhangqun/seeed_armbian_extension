@@ -22,6 +22,7 @@ esac
 
 # Get version from source
 VERSION=$(grep 'RK_AIQ_VERSION_REAL_V' rkaiq/RkAiqVersion.h | head -1 | sed 's/.*"\(.*\)".*/\1/' | tr -d 'v')
+DEB_RELEASE="${DEB_RELEASE:-1}"
 
 echo "=== Building camera-engine-rkaiq-${SOC} ==="
 echo "SoC: ${SOC}"
@@ -41,6 +42,7 @@ for template in debian/control.in debian/changelog.in debian/rules.in \
     sed -e "s/@SOC@/${SOC}/g" \
         -e "s/@VERSION@/${VERSION}/g" \
         -e "s/@IQDIR@/${IQDIR}/g" \
+        -e "s/@DEB_RELEASE@/${DEB_RELEASE}/g" \
         "${template}" > "${out}"
     echo "  Generated: ${out}"
 done

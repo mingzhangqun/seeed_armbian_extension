@@ -1,4 +1,4 @@
-camera-engine-rkaiq-@SOC@ (@VERSION@-1) unstable; urgency=low
+camera-engine-rkaiq-@SOC@ (@VERSION@-@DEB_RELEASE@) unstable; urgency=low
 
   * Build from source at tag linux-6.1-stan-rkr4
 
