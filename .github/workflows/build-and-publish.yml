@@ -152,28 +152,18 @@ jobs:
 
           - name: morsectrl-tools
             source_dir: morsectrl_tools
-            build_deps: quilt libnl-3-dev libnl-genl-3-dev libnl-route-3-dev gcc-aarch64-linux-gnu
+            build_deps: quilt pkg-config libnl-3-dev libnl-genl-3-dev libnl-route-3-dev gcc-aarch64-linux-gnu
             build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
-
-          - name: realtek-r8125-dkms
-            source_dir: realtek-r8125-dkms
-            build_deps: dh-sequence-dkms
-            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
-
-          - name: usbdevice-gadget
-            source_dir: rk35xx_usb_gadget
-            build_deps: ''
-            build_cmd: bash build-usbdevice-deb.sh
 
           - name: camera-engine-rkaiq-rk3576
             source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev
-            build_cmd: bash build-deb.sh rk3576
+            build_deps: cmake pkg-config libdrm-dev vim-common
+            build_cmd: DEB_RELEASE=1+bookworm1 bash build-deb.sh rk3576
 
           - name: camera-engine-rkaiq-rk3588
             source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev
-            build_cmd: bash build-deb.sh rk3588
+            build_deps: cmake pkg-config libdrm-dev vim-common
+            build_cmd: DEB_RELEASE=1+bookworm1 bash build-deb.sh rk3588
 
           - name: libmali-rk3576
             source_dir: rk3588_gmali
@@ -210,6 +200,14 @@ jobs:
             DEBEMAIL="ci@seeed.cc" DEBFULLNAME="CI" dch -l +bookworm "Rebuilt for Debian Bookworm"
             echo "Version suffix added:"
             head -1 debian/changelog
+          fi
+
+      - name: Fix DRM include path for Bookworm
+        if: contains(matrix.source_dir, 'camera_engine_rkaiq')
+        run: |
+          # Bookworm Docker lacks /usr/include/drm/; link to libdrm headers
+          if [ ! -d /usr/include/drm ] && [ -d /usr/include/libdrm ]; then
+            ln -s /usr/include/libdrm /usr/include/drm
           fi
 
       - name: Build ${{ matrix.name }} (Bookworm)
@@ -293,6 +291,20 @@ jobs:
           path: /tmp/debs-prebuilt
           pattern: debs-prebuilt
           merge-multiple: true
+
+      - name: Copy distro-agnostic Noble debs to Bookworm
+        run: |
+          # Noble-only packages (DKMS, shell scripts) work on Bookworm too
+          copied=0
+          for deb in /tmp/debs-noble/*.deb; do
+            [ -f "${deb}" ] || continue
+            pkg_name=$(basename "${deb}" | sed 's/_.*//')
+            if ! find /tmp/debs-bookworm -name "${pkg_name}_*.deb" -print -quit | grep -q .; then
+              cp -vn "${deb}" /tmp/debs-bookworm/ && copied=$((copied + 1))
+              echo "  Copied to Bookworm: $(basename "${deb}")"
+            fi
+          done
+          echo "Copied ${copied} distro-agnostic debs from Noble to Bookworm"
 
       - name: List collected debs
         run: |
