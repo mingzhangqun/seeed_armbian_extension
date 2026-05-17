@@ -193,12 +193,20 @@ jobs:
             tar -xf "${archive}" -C "${TMPDIR}"
           done
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
-          # Only copy selected packages from SDK
-          SDK_PACKAGES="libmali"
-          for pkg in ${SDK_PACKAGES}; do
-            count=$(find "${TMPDIR}" -name "${pkg}*.deb" -exec cp -vn {} /tmp/all-debs/ \; | wc -l)
-            echo "  Copied ${count} debs matching '${pkg}'"
-          done
+          # Exclude SDK debs that conflict with CI-built packages
+          EXCLUDE_PKGS=$(find /tmp/all-debs -name '*.deb' -exec basename {} \; | sed 's/_.*//' | sort -u)
+          echo "CI-built packages (will exclude from SDK): ${EXCLUDE_PKGS}"
+          copied=0; skipped=0
+          while IFS= read -r deb; do
+            pkg_name=$(basename "${deb}" | sed 's/_.*//')
+            if echo "${EXCLUDE_PKGS}" | grep -qxF "${pkg_name}"; then
+              echo "  SKIP (conflicts with CI build): $(basename "${deb}")"
+              skipped=$((skipped + 1))
+            else
+              cp -vn "${deb}" /tmp/all-debs/ && copied=$((copied + 1))
+            fi
+          done < <(find "${TMPDIR}" -name '*.deb')
+          echo "  Copied ${copied} SDK debs, skipped ${skipped} conflicting"
 
       - name: List all debs (final)
         run: |
