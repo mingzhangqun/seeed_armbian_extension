@@ -70,7 +70,7 @@ jobs:
           cd armbian-build/cache/sources/seeed_armbian_extension/main
           git init
           git config user.email "ci@example.com" && git config user.name "CI"
-          git add -A && git commit -q -m "ci pre-seed"
+          git add -A && git commit --allow-empty -q -m "ci pre-seed"
 
       - name: Install build dependencies
         run: |
