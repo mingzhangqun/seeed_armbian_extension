@@ -7,10 +7,6 @@ on:
         description: 'Source branch/tag for package sources'
         required: false
         default: 'deb_source'
-      armbian_ref:
-        description: 'armbian-build ref (passed to kernel workflow if build_kernel=true)'
-        required: false
-        default: 'main'
       sdk_debs_release:
         description: 'Release tag containing SDK deb packages (leave empty to skip)'
         required: false
@@ -20,6 +16,10 @@ on:
         required: false
         type: boolean
         default: false
+      armbian_ref:
+        description: 'armbian-build ref (passed to kernel workflow if build_kernel=true)'
+        required: false
+        default: 'main'
       kernel_board:
         description: 'Board for kernel build (if build_kernel is true)'
         required: false

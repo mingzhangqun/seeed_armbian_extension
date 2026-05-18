@@ -57,18 +57,6 @@ jobs:
           path: armbian-build
           fetch-depth: 1
 
-      - name: Checkout extension
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          path: extension
-
-      - name: Link extension into armbian-build
-        run: |
-          mkdir -p armbian-build/userpatches/extensions
-          ln -s "$(pwd)/extension" \
-            armbian-build/userpatches/extensions/seeed_armbian_extension
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -88,8 +76,7 @@ jobs:
             BOARD="${BOARD}" \
             BRANCH=vendor \
             RELEASE=bookworm \
-            KERNEL_CONFIGURE=no \
-            ENABLE_SEEED_RK_EXTENSION=yes
+            KERNEL_CONFIGURE=no
 
       - name: List kernel debs
         run: |
