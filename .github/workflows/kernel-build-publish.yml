@@ -1,0 +1,226 @@
+name: Build and Publish Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: 'Board name'
+        required: true
+        type: choice
+        options:
+          - recomputer-rk3576-devkit
+          - recomputer-rk3588-devkit
+      branch:
+        description: 'Kernel branch (legacy/current/edge)'
+        required: false
+        default: 'current'
+      armbian_ref:
+        description: 'Seeed-Studio/armbian-build ref'
+        required: false
+        default: 'main'
+      extension_ref:
+        description: 'Extension repo ref (empty = default branch)'
+        required: false
+        default: ''
+
+  repository_dispatch:
+    types: [trigger-kernel-build]
+
+# ──────────────────────────────────────────────────
+# Kernel build via Armbian framework
+# ./compile.sh kernel BOARD=xxx BRANCH=xxx
+# Output: output/debs/*.deb
+# ──────────────────────────────────────────────────
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Determine board
+        id: params
+        env:
+          INPUT_BOARD: ${{ inputs.board || '' }}
+          INPUT_BRANCH: ${{ inputs.branch || '' }}
+          INPUT_ARMBIAN_REF: ${{ inputs.armbian_ref || '' }}
+          PAYLOAD_BOARD: ${{ github.event.client_payload.board || '' }}
+          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch || '' }}
+          PAYLOAD_ARMBIAN_REF: ${{ github.event.client_payload.armbian_ref || '' }}
+        run: |
+          # Use dispatch inputs first, fall back to repository_dispatch payload
+          BOARD="${INPUT_BOARD:-${PAYLOAD_BOARD:-recomputer-rk3576-devkit}}"
+          BRANCH="${INPUT_BRANCH:-${PAYLOAD_BRANCH:-current}}"
+          ARMBIAN_REF="${INPUT_ARMBIAN_REF:-${PAYLOAD_ARMBIAN_REF:-main}}"
+          echo "board=${BOARD}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "armbian_ref=${ARMBIAN_REF}" >> "$GITHUB_OUTPUT"
+          echo "Building: BOARD=${BOARD} BRANCH=${BRANCH} ARMBIAN_REF=${ARMBIAN_REF}"
+
+      - name: Checkout armbian-build
+        uses: actions/checkout@v4
+        with:
+          repository: Seeed-Studio/armbian-build
+          ref: ${{ steps.params.outputs.armbian_ref }}
+          path: armbian-build
+          fetch-depth: 1
+
+      - name: Checkout extension
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          path: extension
+
+      - name: Link extension into armbian-build
+        run: |
+          mkdir -p armbian-build/userpatches/extensions
+          ln -s "$(pwd)/extension" \
+            armbian-build/userpatches/extensions/seeed_armbian_extension
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev \
+            python3 device-tree-compiler swig \
+            cpio rsync curl wget git \
+            dwarves
+
+      - name: Compile kernel
+        working-directory: armbian-build
+        env:
+          BOARD: ${{ steps.params.outputs.board }}
+          BRANCH: ${{ steps.params.outputs.branch }}
+        run: |
+          ./compile.sh kernel BOARD="${BOARD}" BRANCH="${BRANCH}"
+
+      - name: List kernel debs
+        run: |
+          echo "=== Built kernel packages ==="
+          find armbian-build/output/debs -name '*.deb' -exec ls -lh {} \;
+
+      - name: Upload kernel debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-debs
+          path: armbian-build/output/debs/**/*.deb
+
+  # ──────────────────────────────────────────────────
+  # Incremental publish: only replaces kernel debs
+  # Downloads cached userspace debs from Release, adds
+  # new kernel debs, re-publishes the entire apt repo.
+  # ──────────────────────────────────────────────────
+  publish-kernel:
+    needs: build-kernel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download kernel debs
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-debs
+          path: /tmp/kernel-debs
+          merge-multiple: true
+
+      - name: Download cached userspace debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/userspace-noble /tmp/userspace-bookworm
+          gh release download userspace-debs-cache \
+            --repo "${{ github.repository }}" \
+            --dir /tmp/cache \
+            --clobber 2>/dev/null \
+            || { echo "No userspace cache found, will publish kernel-only"; exit 0; }
+
+          if [ -f /tmp/cache/noble-debs.tar.xz ]; then
+            tar -xf /tmp/cache/noble-debs.tar.xz -C /tmp/userspace-noble
+            echo "Restored $(find /tmp/userspace-noble -name '*.deb' | wc -l) Noble userspace debs"
+          fi
+          if [ -f /tmp/cache/bookworm-debs.tar.xz ]; then
+            tar -xf /tmp/cache/bookworm-debs.tar.xz -C /tmp/userspace-bookworm
+            echo "Restored $(find /tmp/userspace-bookworm -name '*.deb' | wc -l) Bookworm userspace debs"
+          fi
+
+      - name: Remove old kernel debs from cache
+        run: |
+          for dir in /tmp/userspace-noble /tmp/userspace-bookworm; do
+            find "${dir}" -type f \( \
+              -name 'linux-image-*' \
+              -o -name 'linux-headers-*' \
+              -o -name 'linux-dtb-*' \
+              -o -name 'linux-source-*' \
+            \) -print -delete
+          done
+
+      - name: Add new kernel debs
+        run: |
+          cp -v /tmp/kernel-debs/*.deb /tmp/userspace-noble/
+          cp -v /tmp/kernel-debs/*.deb /tmp/userspace-bookworm/
+          echo "=== Final Noble debs ==="
+          find /tmp/userspace-noble -name '*.deb' | sort
+          echo "=== Final Bookworm debs ==="
+          find /tmp/userspace-bookworm -name '*.deb' | sort
+
+      - name: Install aptly
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aptly gnupg2
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+        env:
+          ARMBIAN_APT_GPG_PRIVATE_KEY: ${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}
+
+      - name: Publish apt repository
+        run: |
+          chmod +x scripts/*.sh
+          scripts/publish-aptly.sh /tmp/userspace-noble /tmp/userspace-bookworm
+        env:
+          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+      - name: Update kernel debs cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TMPDIR=$(mktemp -d)
+          cp /tmp/kernel-debs/*.deb "${TMPDIR}/"
+          cd "${TMPDIR}"
+          tar -cf kernel-debs.tar.xz -I 'xz -9' *.deb
+          gh release create kernel-debs-cache kernel-debs.tar.xz \
+            --repo "${{ github.repository }}" \
+            --title "Kernel debs cache" \
+            --notes "Latest kernel debs (auto-updated by CI)" \
+          || gh release upload kernel-debs-cache kernel-debs.tar.xz \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  # ──────────────────────────────────────────────────
+  # Deploy to GitHub Pages
+  # ──────────────────────────────────────────────────
+  deploy-pages:
+    needs: publish-kernel
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
