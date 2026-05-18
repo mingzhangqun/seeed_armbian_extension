@@ -68,7 +68,9 @@ jobs:
           mkdir -p armbian-build/cache/sources/seeed_armbian_extension/main
           cp -a extension/. armbian-build/cache/sources/seeed_armbian_extension/main/
           cd armbian-build/cache/sources/seeed_armbian_extension/main
-          git init && git add -A && git commit -q -m "ci pre-seed"
+          git init
+          git config user.email "ci@example.com" && git config user.name "CI"
+          git add -A && git commit -q -m "ci pre-seed"
 
       - name: Install build dependencies
         run: |
