@@ -8,13 +8,24 @@ on:
         required: false
         default: 'deb_source'
       armbian_ref:
-        description: 'Seeed-Studio/armbian-build ref for kernel build'
+        description: 'armbian-build ref (passed to kernel workflow if build_kernel=true)'
         required: false
         default: 'main'
       sdk_debs_release:
         description: 'Release tag containing SDK deb packages (leave empty to skip)'
         required: false
         default: 'rockchip-sdk-debs'
+      build_kernel:
+        description: 'Trigger kernel build after publish'
+        required: false
+        type: boolean
+        default: false
+      kernel_board:
+        description: 'Board for kernel build (if build_kernel is true)'
+        required: false
+        type: choice
+        options:
+          - recomputer-rk3576-devkit
 
   push:
     branches: [deb_source]
@@ -364,6 +375,25 @@ jobs:
             echo "Merged ${copied} prebuilt debs into Noble directory"
           fi
 
+      - name: Download cached kernel debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/kernel-cache
+          gh release download kernel-debs-cache \
+            --repo "${{ github.repository }}" \
+            --dir /tmp/kernel-cache \
+            --clobber 2>/dev/null \
+            || { echo "No kernel cache found, skipping kernel debs"; exit 0; }
+          if [ -f /tmp/kernel-cache/kernel-debs.tar.xz ]; then
+            tar -xf /tmp/kernel-cache/kernel-debs.tar.xz -C /tmp/kernel-cache
+            echo "=== Cached kernel debs ==="
+            find /tmp/kernel-cache -name '*.deb' -exec basename {} \;
+            cp -v /tmp/kernel-cache/*.deb /tmp/debs-noble/
+            cp -v /tmp/kernel-cache/*.deb /tmp/debs-bookworm/
+            echo "Added $(find /tmp/kernel-cache -name '*.deb' | wc -l) cached kernel debs"
+          fi
+
       - name: List all debs (final)
         run: |
           echo "=== Final Noble .deb list ==="
@@ -396,6 +426,31 @@ jobs:
         with:
           path: public
 
+      - name: Cache userspace debs for kernel workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/cache-out
+          # Noble: exclude kernel debs
+          mkdir -p /tmp/cache-out/noble
+          find /tmp/debs-noble -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
+            -exec cp {} /tmp/cache-out/noble/ \;
+          cd /tmp/cache-out/noble && tar -cf ../noble-debs.tar.xz -I 'xz -9' *.deb
+          # Bookworm: exclude kernel debs
+          mkdir -p /tmp/cache-out/bookworm
+          find /tmp/debs-bookworm -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
+            -exec cp {} /tmp/cache-out/bookworm/ \;
+          cd /tmp/cache-out/bookworm && tar -cf ../bookworm-debs.tar.xz -I 'xz -9' *.deb
+          # Upload to Release
+          cd /tmp/cache-out
+          gh release create userspace-debs-cache noble-debs.tar.xz bookworm-debs.tar.xz \
+            --repo "${{ github.repository }}" \
+            --title "Userspace debs cache" \
+            --notes "Latest userspace debs (auto-updated by CI)" \
+          || gh release upload userspace-debs-cache noble-debs.tar.xz bookworm-debs.tar.xz \
+            --repo "${{ github.repository }}" \
+            --clobber
+
   # ──────────────────────────────────────────────────
   # 部署到 GitHub Pages
   # ──────────────────────────────────────────────────
@@ -413,3 +468,15 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # ──────────────────────────────────────────────────
+  # Optionally trigger kernel build after deploy
+  # ──────────────────────────────────────────────────
+  kernel:
+    needs: deploy-pages
+    if: ${{ inputs.build_kernel == true }}
+    uses: ./.github/workflows/kernel-build-publish.yml
+    with:
+      board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
+      armbian_ref: ${{ inputs.armbian_ref || 'main' }}
+    secrets: inherit
