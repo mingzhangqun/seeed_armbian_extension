@@ -9,7 +9,6 @@ on:
         type: choice
         options:
           - recomputer-rk3576-devkit
-          - recomputer-rk3588-devkit
       branch:
         description: 'Kernel branch (legacy/current/edge)'
         required: false
@@ -23,8 +22,20 @@ on:
         required: false
         default: ''
 
-  repository_dispatch:
-    types: [trigger-kernel-build]
+  workflow_call:
+    inputs:
+      board:
+        required: true
+        type: string
+      branch:
+        required: false
+        type: string
+        default: 'current'
+      armbian_ref:
+        required: false
+        type: string
+        default: 'main'
+    secrets: inherit
 
 # ──────────────────────────────────────────────────
 # Kernel build via Armbian framework
@@ -39,21 +50,14 @@ jobs:
       - name: Determine board
         id: params
         env:
-          INPUT_BOARD: ${{ inputs.board || '' }}
-          INPUT_BRANCH: ${{ inputs.branch || '' }}
-          INPUT_ARMBIAN_REF: ${{ inputs.armbian_ref || '' }}
-          PAYLOAD_BOARD: ${{ github.event.client_payload.board || '' }}
-          PAYLOAD_BRANCH: ${{ github.event.client_payload.branch || '' }}
-          PAYLOAD_ARMBIAN_REF: ${{ github.event.client_payload.armbian_ref || '' }}
+          INPUT_BOARD: ${{ inputs.board || 'recomputer-rk3576-devkit' }}
+          INPUT_BRANCH: ${{ inputs.branch || 'current' }}
+          INPUT_ARMBIAN_REF: ${{ inputs.armbian_ref || 'main' }}
         run: |
-          # Use dispatch inputs first, fall back to repository_dispatch payload
-          BOARD="${INPUT_BOARD:-${PAYLOAD_BOARD:-recomputer-rk3576-devkit}}"
-          BRANCH="${INPUT_BRANCH:-${PAYLOAD_BRANCH:-current}}"
-          ARMBIAN_REF="${INPUT_ARMBIAN_REF:-${PAYLOAD_ARMBIAN_REF:-main}}"
-          echo "board=${BOARD}" >> "$GITHUB_OUTPUT"
-          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "armbian_ref=${ARMBIAN_REF}" >> "$GITHUB_OUTPUT"
-          echo "Building: BOARD=${BOARD} BRANCH=${BRANCH} ARMBIAN_REF=${ARMBIAN_REF}"
+          echo "board=${INPUT_BOARD}" >> "$GITHUB_OUTPUT"
+          echo "branch=${INPUT_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "armbian_ref=${INPUT_ARMBIAN_REF}" >> "$GITHUB_OUTPUT"
+          echo "Building: BOARD=${INPUT_BOARD} BRANCH=${INPUT_BRANCH} ARMBIAN_REF=${INPUT_ARMBIAN_REF}"
 
       - name: Checkout armbian-build
         uses: actions/checkout@v4

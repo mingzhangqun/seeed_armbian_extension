@@ -26,7 +26,6 @@ on:
         type: choice
         options:
           - recomputer-rk3576-devkit
-          - recomputer-rk3588-devkit
       kernel_branch:
         description: 'Kernel branch (if build_kernel is true)'
         required: false
@@ -477,23 +476,12 @@ jobs:
   # ──────────────────────────────────────────────────
   # Optionally trigger kernel build after deploy
   # ──────────────────────────────────────────────────
-  trigger-kernel:
+  kernel:
     needs: deploy-pages
     if: ${{ inputs.build_kernel == true }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Trigger kernel build via repository_dispatch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          KERNEL_BOARD: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
-          KERNEL_BRANCH: ${{ inputs.kernel_branch || 'current' }}
-          ARMBIAN_REF: ${{ inputs.armbian_ref || 'main' }}
-        run: |
-          echo "Triggering kernel build: board=${KERNEL_BOARD} branch=${KERNEL_BRANCH} ref=${ARMBIAN_REF}"
-          gh api repos/${{ github.repository }}/dispatches \
-            -f event_type=trigger-kernel-build \
-            -f "client_payload[board]=${KERNEL_BOARD}" \
-            -f "client_payload[branch]=${KERNEL_BRANCH}" \
-            -f "client_payload[armbian_ref]=${ARMBIAN_REF}"
+    uses: ./.github/workflows/kernel-build-publish.yml
+    with:
+      board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
+      branch: ${{ inputs.kernel_branch || 'current' }}
+      armbian_ref: ${{ inputs.armbian_ref || 'main' }}
+    secrets: inherit
