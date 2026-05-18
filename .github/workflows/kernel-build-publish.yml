@@ -35,7 +35,11 @@ on:
         required: false
         type: string
         default: 'main'
-    secrets: inherit
+    secrets:
+      ARMBIAN_APT_GPG_PRIVATE_KEY:
+        required: true
+      ARMBIAN_APT_GPG_KEY_ID:
+        required: true
 
 # ──────────────────────────────────────────────────
 # Kernel build via Armbian framework
