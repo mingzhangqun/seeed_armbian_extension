@@ -26,10 +26,6 @@ on:
         type: choice
         options:
           - recomputer-rk3576-devkit
-      kernel_branch:
-        description: 'Kernel branch (e.g. rk-6.1-rkr5.1)'
-        required: false
-        default: 'rk-6.1-rkr5.1'
 
   push:
     branches: [deb_source]
@@ -482,6 +478,5 @@ jobs:
     uses: ./.github/workflows/kernel-build-publish.yml
     with:
       board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
-      branch: ${{ inputs.kernel_branch || 'current' }}
       armbian_ref: ${{ inputs.armbian_ref || 'main' }}
     secrets: inherit
