@@ -17,10 +17,6 @@ on:
         description: 'Seeed-Studio/armbian-build ref'
         required: false
         default: 'main'
-      extension_ref:
-        description: 'Extension repo ref (empty = default branch)'
-        required: false
-        default: ''
 
   workflow_call:
     inputs:
