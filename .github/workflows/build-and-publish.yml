@@ -411,8 +411,6 @@ jobs:
       - name: Import GPG key
         run: |
           echo "${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
-        env:
-          ARMBIAN_APT_GPG_PRIVATE_KEY: ${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}
 
       - name: Publish apt repository
         run: |
@@ -435,12 +433,12 @@ jobs:
           mkdir -p /tmp/cache-out/noble
           find /tmp/debs-noble -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
             -exec cp {} /tmp/cache-out/noble/ \;
-          cd /tmp/cache-out/noble && tar -cf ../noble-debs.tar.xz -I 'xz -9' *.deb
+          cd /tmp/cache-out/noble && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then tar -cf ../noble-debs.tar.xz -I 'xz -9' "${deb_files[@]}"; fi
           # Bookworm: exclude kernel debs
           mkdir -p /tmp/cache-out/bookworm
           find /tmp/debs-bookworm -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
             -exec cp {} /tmp/cache-out/bookworm/ \;
-          cd /tmp/cache-out/bookworm && tar -cf ../bookworm-debs.tar.xz -I 'xz -9' *.deb
+          cd /tmp/cache-out/bookworm && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then tar -cf ../bookworm-debs.tar.xz -I 'xz -9' "${deb_files[@]}"; fi
           # Upload to Release
           cd /tmp/cache-out
           gh release create userspace-debs-cache noble-debs.tar.xz bookworm-debs.tar.xz \
