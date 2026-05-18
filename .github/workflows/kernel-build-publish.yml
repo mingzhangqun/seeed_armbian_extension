@@ -128,16 +128,18 @@ jobs:
           path: /tmp/kernel-debs
           merge-multiple: true
 
-      - name: Download cached userspace debs
+      - name: Download cached userspace debs (required)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p /tmp/userspace-noble /tmp/userspace-bookworm
-          gh release download userspace-debs-cache \
-            --repo "${{ github.repository }}" \
-            --dir /tmp/cache \
-            --clobber 2>/dev/null \
-            || { echo "No userspace cache found, will publish kernel-only"; exit 0; }
+          mkdir -p /tmp/cache /tmp/userspace-noble /tmp/userspace-bookworm
+          if ! gh release download userspace-debs-cache \
+              --repo "${{ github.repository }}" \
+              --dir /tmp/cache \
+              --clobber 2>/dev/null; then
+            echo "::error::userspace-debs-cache Release not found. Run the main build workflow first to create it."
+            exit 1
+          fi
 
           if [ -f /tmp/cache/noble-debs.tar.xz ]; then
             tar -xf /tmp/cache/noble-debs.tar.xz -C /tmp/userspace-noble

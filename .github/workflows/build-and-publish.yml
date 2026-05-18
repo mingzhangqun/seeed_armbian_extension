@@ -393,10 +393,10 @@ jobs:
           if [ -f /tmp/kernel-cache/kernel-debs.tar.xz ]; then
             tar -xf /tmp/kernel-cache/kernel-debs.tar.xz -C /tmp/kernel-cache
             echo "=== Cached kernel debs ==="
-            find /tmp/kernel-cache -name '*.deb' -not -name '*.tar.xz' -exec basename {} \;
+            find /tmp/kernel-cache -name '*.deb' -exec basename {} \;
             cp -v /tmp/kernel-cache/*.deb /tmp/debs-noble/
             cp -v /tmp/kernel-cache/*.deb /tmp/debs-bookworm/
-            echo "Added $(find /tmp/kernel-cache -name '*.deb' -not -name '*.tar.xz' | wc -l) cached kernel debs"
+            echo "Added $(find /tmp/kernel-cache -name '*.deb' | wc -l) cached kernel debs"
           fi
 
       - name: List all debs (final)
