@@ -63,14 +63,16 @@ jobs:
           repository: ${{ github.repository }}
           path: extension
 
-      - name: Pre-seed extension into armbian-build cache
+      - name: Link extension into armbian-build
         run: |
-          mkdir -p armbian-build/cache/sources/seeed_armbian_extension/main
-          cp -a extension/. armbian-build/cache/sources/seeed_armbian_extension/main/
-          cd armbian-build/cache/sources/seeed_armbian_extension/main
-          git init
-          git config user.email "ci@example.com" && git config user.name "CI"
-          git add -A && git commit --allow-empty -q -m "ci pre-seed"
+          # userpatches/extensions/ for auto-discovery by Armbian framework
+          mkdir -p armbian-build/userpatches/extensions
+          ln -s "$(pwd)/extension" \
+            armbian-build/userpatches/extensions/seeed_armbian_extension
+          # extensions/ for sub-extension references (${SRC}/extensions/seeed_armbian_extension/...)
+          mkdir -p armbian-build/extensions
+          ln -s "$(pwd)/extension" \
+            armbian-build/extensions/seeed_armbian_extension
 
       - name: Install build dependencies
         run: |
@@ -91,8 +93,7 @@ jobs:
             BOARD="${BOARD}" \
             BRANCH=vendor \
             RELEASE=bookworm \
-            KERNEL_CONFIGURE=no \
-            ENABLE_SEEED_RK_EXTENSION=yes
+            KERNEL_CONFIGURE=no
 
       - name: List kernel debs
         run: |
