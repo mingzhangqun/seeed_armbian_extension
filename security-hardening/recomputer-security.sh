@@ -22,13 +22,37 @@ EOF
 bantime = 1h
 findtime = 10m
 maxretry = 5
-backend = systemd
+backend = auto
 
 [sshd]
 enabled = true
 port = ssh
 logpath = %(sshd_log)s
 EOF
+
+	install -d -m 0755 "${SDCARD}/etc/security"
+	cat > "${SDCARD}/etc/security/faillock.conf" <<-'EOF'
+# Seeed reComputer login lockout policy:
+# - lock account after 5 consecutive failed passwords
+# - auto-unlock after 60 seconds
+deny = 5
+unlock_time = 60
+EOF
+
+	# Inject pam_faillock into common-auth (preauth + authfail + authsucc)
+	local common_auth="${SDCARD}/etc/pam.d/common-auth"
+	if [[ -f "${common_auth}" ]] && ! grep -q 'pam_faillock' "${common_auth}"; then
+		sed -i '1i auth    required                    pam_faillock.so preauth silent' "${common_auth}"
+		sed -i '/^auth.*pam_unix.so/a auth    [default=die]               pam_faillock.so authfail\nauth    sufficient                 pam_faillock.so authsucc' "${common_auth}"
+		display_alert "Security hardening" "pam_faillock injected into common-auth" "info"
+	fi
+
+	# Inject pam_faillock into common-account
+	local common_account="${SDCARD}/etc/pam.d/common-account"
+	if [[ -f "${common_account}" ]] && ! grep -q 'pam_faillock' "${common_account}"; then
+		sed -i '/^account.*pam_unix.so/i account required                   pam_faillock.so' "${common_account}"
+		display_alert "Security hardening" "pam_faillock injected into common-account" "info"
+	fi
 
 	install -d -m 0755 "${SDCARD}/etc/dhcp"
 	cat > "${SDCARD}/etc/dhcp/dhclient.conf" <<-'EOF'
@@ -57,6 +81,7 @@ EOF
 	- SSH brute-force mitigation through fail2ban on the sshd service
 	- SSH daemon hardening with reduced authentication retries
 	- Terrapin mitigation by disabling `chacha20-poly1305@openssh.com` and Encrypt-then-MAC algorithms
+	- PAM faillock: 5 failed login attempts → account locked for 60 seconds (GUI, console, SSH)
 	- SSH service disabled by default (users can run `sudo systemctl enable --now ssh` after local login)
 	- DHCP client data minimization for dhclient and systemd-networkd defaults
 
