@@ -27,9 +27,9 @@ on:
         options:
           - recomputer-rk3576-devkit
       kernel_branch:
-        description: 'Kernel branch (if build_kernel is true)'
+        description: 'Kernel branch (e.g. rk-6.1-rkr5.1)'
         required: false
-        default: 'current'
+        default: 'rk-6.1-rkr5.1'
 
   push:
     branches: [deb_source]

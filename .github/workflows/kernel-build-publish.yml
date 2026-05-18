@@ -10,9 +10,9 @@ on:
         options:
           - recomputer-rk3576-devkit
       branch:
-        description: 'Kernel branch (legacy/current/edge)'
+        description: 'Kernel branch (e.g. rk-6.1-rkr5.1, legacy, current, edge)'
         required: false
-        default: 'current'
+        default: 'rk-6.1-rkr5.1'
       armbian_ref:
         description: 'Seeed-Studio/armbian-build ref'
         required: false
@@ -30,7 +30,7 @@ on:
       branch:
         required: false
         type: string
-        default: 'current'
+        default: 'rk-6.1-rkr5.1'
       armbian_ref:
         required: false
         type: string
