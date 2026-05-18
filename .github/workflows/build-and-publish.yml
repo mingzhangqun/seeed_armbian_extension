@@ -170,7 +170,8 @@ jobs:
             source_dir: rk3588_gmali
             build_deps: >-
               meson pkg-config python3 libgbm-dev libdrm-dev libx11-dev
-              libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxdamage-dev
+              libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-dri3-dev
+              libxcb-present-dev libxcb-xfixes0-dev libxdamage-dev
               libxext-dev libwayland-dev
             build_cmd: bash build-deb.sh bifrost-g52
 
