@@ -19,7 +19,7 @@ EOF
 	install -d -m 0755 "${SDCARD}/etc/fail2ban/jail.d"
 	cat > "${SDCARD}/etc/fail2ban/jail.d/recomputer-sshd.conf" <<-'EOF'
 [DEFAULT]
-bantime = 1h
+bantime = 10m
 findtime = 10m
 maxretry = 5
 backend = auto
@@ -42,7 +42,7 @@ EOF
 	# Inject pam_faillock into common-auth (preauth + authfail + authsucc)
 	local common_auth="${SDCARD}/etc/pam.d/common-auth"
 	if [[ -f "${common_auth}" ]] && ! grep -q 'pam_faillock' "${common_auth}"; then
-		sed -i '1i auth    required                    pam_faillock.so preauth silent' "${common_auth}"
+		sed -i '1i auth    required                    pam_faillock.so preauth' "${common_auth}"
 		sed -i '/^auth.*pam_unix.so/a auth    [default=die]               pam_faillock.so authfail\nauth    sufficient                 pam_faillock.so authsucc' "${common_auth}"
 		display_alert "Security hardening" "pam_faillock injected into common-auth" "info"
 	fi
@@ -52,6 +52,14 @@ EOF
 	if [[ -f "${common_account}" ]] && ! grep -q 'pam_faillock' "${common_account}"; then
 		sed -i '/^account.*pam_unix.so/i account required                   pam_faillock.so' "${common_account}"
 		display_alert "Security hardening" "pam_faillock injected into common-account" "info"
+	fi
+
+	# Bypass faillock for SSH: replace @include with inline auth/account stack
+	local sshd_pam="${SDCARD}/etc/pam.d/sshd"
+	if [[ -f "${sshd_pam}" ]] && grep -q '@include common-auth' "${sshd_pam}"; then
+		sed -i 's|^@include common-auth|auth\t[success=1 default=ignore]\tpam_unix.so nullok\nauth\trequisite\t\t\tpam_deny.so\nauth\trequired\t\t\tpam_permit.so|' "${sshd_pam}"
+		sed -i 's|^@include common-account|account\t[success=1 new_authtok_reqd=done default=ignore]\tpam_unix.so\naccount\trequisite\t\t\tpam_deny.so\naccount\trequired\t\t\tpam_permit.so|' "${sshd_pam}"
+		display_alert "Security hardening" "sshd PAM bypasses faillock (IP-level ban only via fail2ban)" "info"
 	fi
 
 	install -d -m 0755 "${SDCARD}/etc/dhcp"
@@ -78,10 +86,10 @@ EOF
 	This image adds board-scoped hardening for Seeed reComputer RK3576/RK3588 builds.
 
 	Applied at image build time:
-	- SSH brute-force mitigation through fail2ban on the sshd service
+	- SSH brute-force mitigation through fail2ban (IP-level ban, 10m)
 	- SSH daemon hardening with reduced authentication retries
 	- Terrapin mitigation by disabling `chacha20-poly1305@openssh.com` and Encrypt-then-MAC algorithms
-	- PAM faillock: 5 failed login attempts → account locked for 60 seconds (GUI, console, SSH)
+	- PAM faillock: 5 failed login attempts → account locked for 60 seconds (GUI, console)
 	- SSH service disabled by default (users can run `sudo systemctl enable --now ssh` after local login)
 	- DHCP client data minimization for dhclient and systemd-networkd defaults
 
