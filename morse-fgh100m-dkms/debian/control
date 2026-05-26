@@ -1,0 +1,17 @@
+Source: morse-fgh100m-dkms
+Section: contrib/kernel
+Priority: optional
+Maintainer: Seeed Studio <techsupport@seeed.cc>
+Build-Depends: debhelper (>=11~), dkms (<< 3.0.3-3~) | dh-sequence-dkms
+Standards-Version: 4.6.2.1
+
+Package: morse-fgh100m-dkms
+Architecture: any
+Multi-Arch: foreign
+Depends: dkms (>= 1.95), ${misc:Depends}
+Description: Morse Micro FG-H100M HaLow WiFi driver in DKMS format
+ This package provides the source code for the Morse Micro FG-H100M
+ IEEE 802.11ah (HaLow) WiFi driver to be built with DKMS.
+ .
+ Kernel sources or headers are required to compile this module.
+ The driver supports SPI-connected Morse Micro MM6108/MM8108 chips.

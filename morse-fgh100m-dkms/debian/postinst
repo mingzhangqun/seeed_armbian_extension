@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+NAME=morse-fgh100m
+PACKAGE_NAME=$NAME-dkms
+DEB_NAME=$(echo $PACKAGE_NAME | sed 's,_,-,')
+CVERSION=$(dpkg-query -W -f='${Version}' $DEB_NAME | awk -F "-" '{print $1}' | cut -d: -f2)
+ARCH=$(dpkg --print-architecture)
+
+dkms_configure () {
+	for POSTINST in /usr/lib/dkms/common.postinst "/usr/share/$PACKAGE_NAME/postinst"; do
+		if [ -f "$POSTINST" ]; then
+			"$POSTINST" "$NAME" "$CVERSION" "/usr/share/$PACKAGE_NAME" "$ARCH" "$2"
+			return $?
+		fi
+		echo "WARNING: $POSTINST does not exist." >&2
+	done
+	echo "ERROR: DKMS version is too old and $PACKAGE_NAME was not" >&2
+	echo "built with legacy DKMS support." >&2
+	return 1
+}
+
+case "$1" in
+	configure)
+		dkms_configure
+	;;
+	abort-upgrade|abort-remove|abort-deconfigure)
+	;;
+	*)
+		echo "postinst called with unknown argument \`$1'" >&2
+		exit 1
+	;;
+esac
+
+#DEBHELPER#
+
+exit 0

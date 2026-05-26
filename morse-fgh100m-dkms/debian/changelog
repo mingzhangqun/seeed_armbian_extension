@@ -1,0 +1,6 @@
+morse-fgh100m-dkms (1.16.4-1) stable; urgency=medium
+
+  * Initial DKMS package for Morse Micro FG-H100M HaLow WiFi driver
+  * Driver version rel_1_16_4_2025_Sep_18
+
+ -- Seeed Studio <techsupport@seeed.cc>  Mon, 26 May 2026 10:00:00 +0800
