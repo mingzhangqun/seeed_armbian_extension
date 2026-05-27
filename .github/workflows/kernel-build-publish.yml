@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p /tmp/cache /tmp/userspace-noble /tmp/userspace-bookworm
+          mkdir -p /tmp/cache /tmp/userspace
           if ! gh release download userspace-debs-cache \
               --repo "${{ github.repository }}" \
               --dir /tmp/cache \
@@ -126,34 +126,25 @@ jobs:
             exit 1
           fi
 
-          if [ -f /tmp/cache/noble-debs.tar.xz ]; then
-            tar -xf /tmp/cache/noble-debs.tar.xz -C /tmp/userspace-noble
-            echo "Restored $(find /tmp/userspace-noble -name '*.deb' | wc -l) Noble userspace debs"
-          fi
-          if [ -f /tmp/cache/bookworm-debs.tar.xz ]; then
-            tar -xf /tmp/cache/bookworm-debs.tar.xz -C /tmp/userspace-bookworm
-            echo "Restored $(find /tmp/userspace-bookworm -name '*.deb' | wc -l) Bookworm userspace debs"
+          if [ -f /tmp/cache/userspace-debs.tar.xz ]; then
+            tar -xf /tmp/cache/userspace-debs.tar.xz -C /tmp/userspace
+            echo "Restored $(find /tmp/userspace -name '*.deb' | wc -l) userspace debs"
           fi
 
       - name: Remove old kernel debs from cache
         run: |
-          for dir in /tmp/userspace-noble /tmp/userspace-bookworm; do
-            find "${dir}" -type f \( \
-              -name 'linux-image-*' \
-              -o -name 'linux-headers-*' \
-              -o -name 'linux-dtb-*' \
-              -o -name 'linux-source-*' \
-            \) -print -delete
-          done
+          find /tmp/userspace -type f \( \
+            -name 'linux-image-*' \
+            -o -name 'linux-headers-*' \
+            -o -name 'linux-dtb-*' \
+            -o -name 'linux-source-*' \
+          \) -print -delete
 
       - name: Add new kernel debs
         run: |
-          cp -v /tmp/kernel-debs/*.deb /tmp/userspace-noble/
-          cp -v /tmp/kernel-debs/*.deb /tmp/userspace-bookworm/
-          echo "=== Final Noble debs ==="
-          find /tmp/userspace-noble -name '*.deb' | sort
-          echo "=== Final Bookworm debs ==="
-          find /tmp/userspace-bookworm -name '*.deb' | sort
+          cp -v /tmp/kernel-debs/*.deb /tmp/userspace/
+          echo "=== Final debs ==="
+          find /tmp/userspace -name '*.deb' | sort
 
       - name: Install aptly
         run: |
@@ -167,7 +158,7 @@ jobs:
       - name: Publish apt repository
         run: |
           chmod +x scripts/*.sh
-          scripts/publish-aptly.sh /tmp/userspace-noble /tmp/userspace-bookworm
+          scripts/publish-aptly.sh /tmp/userspace /tmp/userspace
         env:
           ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
 

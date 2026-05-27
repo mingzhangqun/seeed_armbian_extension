@@ -32,10 +32,13 @@ on:
 
 jobs:
   # ──────────────────────────────────────────────────
-  # 从源码构建的包 — Noble (arm64 runner)
+  # Build all packages on Debian Bookworm (oldest supported).
+  # Binaries are forward-compatible with newer distros (trixie, noble, etc.)
   # ──────────────────────────────────────────────────
   build-debs:
     runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:bookworm
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +46,7 @@ jobs:
           - name: fcs960k-aic-bluez
             source_dir: FCS960K-aic-bluz
             build_deps: >-
-              autoconf automake libtool pkg-config
+              autoconf automake libtool pkg-config flex bison
               libglib2.0-dev libdbus-1-dev libreadline-dev
               libncurses-dev libffi-dev zlib1g-dev
               libgettextpo-dev libexpat-dev libudev-dev libical-dev
@@ -57,7 +60,7 @@ jobs:
 
           - name: morsectrl-tools
             source_dir: morsectrl_tools
-            build_deps: quilt libnl-3-dev libnl-genl-3-dev libnl-route-3-dev gcc-aarch64-linux-gnu
+            build_deps: quilt pkg-config libnl-3-dev libnl-genl-3-dev libnl-route-3-dev gcc-aarch64-linux-gnu
             build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
 
           - name: wpa-supplicant-morse-tools
@@ -82,89 +85,13 @@ jobs:
 
           - name: camera-engine-rkaiq-rk3576
             source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev
+            build_deps: cmake pkg-config libdrm-dev vim-common
             build_cmd: bash build-deb.sh rk3576
 
           - name: camera-engine-rkaiq-rk3588
             source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev
+            build_deps: cmake pkg-config libdrm-dev vim-common
             build_cmd: bash build-deb.sh rk3588
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.source_ref || 'deb_source' }}
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential devscripts debhelper \
-            dpkg-dev fakeroot ${{ matrix.build_deps }}
-
-      - name: Build ${{ matrix.name }} (Noble)
-        working-directory: ${{ matrix.source_dir }}
-        run: |
-          set -euo pipefail
-          ${{ matrix.build_cmd }}
-          mkdir -p /tmp/debs
-          find .. -maxdepth 1 -name '*.deb' ! -name 'Makefile.deb' -exec cp {} /tmp/debs/ \;
-          find . -name '*.deb' ! -name 'Makefile.deb' -exec cp {} /tmp/debs/ \;
-          echo "Built packages (Noble):"
-          ls -lh /tmp/debs/*.deb
-
-      - name: Upload debs (Noble)
-        uses: actions/upload-artifact@v4
-        with:
-          name: debs-noble-${{ matrix.name }}
-          path: /tmp/debs/*.deb
-
-  # ──────────────────────────────────────────────────
-  # Bookworm-specific builds (packages with glibc/t64 deps)
-  # ──────────────────────────────────────────────────
-  build-debs-bookworm:
-    runs-on: ubuntu-24.04-arm
-    container:
-      image: debian:bookworm
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: fcs960k-aic-bluez
-            source_dir: FCS960K-aic-bluz
-            build_deps: >-
-              autoconf automake libtool pkg-config flex bison
-              libglib2.0-dev libdbus-1-dev libreadline-dev
-              libncurses-dev libffi-dev zlib1g-dev
-              libgettextpo-dev libexpat-dev libudev-dev libical-dev
-              libjson-c-dev libelf-dev python3-docutils
-            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
-
-          - name: wpa-supplicant-morse-tools
-            source_dir: wpa_supplicant_morese_tools
-            build_deps: libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libssl-dev libdbus-1-dev
-            build_cmd: make deb
-
-          - name: hostapd-morse-tools
-            source_dir: hostapd_morse_tools
-            build_deps: libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libssl-dev libdbus-1-dev
-            build_cmd: make deb
-
-          - name: morsectrl-tools
-            source_dir: morsectrl_tools
-            build_deps: quilt pkg-config libnl-3-dev libnl-genl-3-dev libnl-route-3-dev gcc-aarch64-linux-gnu
-            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
-
-          - name: camera-engine-rkaiq-rk3576
-            source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev vim-common
-            build_cmd: DEB_RELEASE=1+bookworm1 bash build-deb.sh rk3576
-
-          - name: camera-engine-rkaiq-rk3588
-            source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev vim-common
-            build_cmd: DEB_RELEASE=1+bookworm1 bash build-deb.sh rk3588
 
     steps:
       - name: Checkout
@@ -179,16 +106,7 @@ jobs:
             build-essential devscripts debhelper \
             dpkg-dev fakeroot ${{ matrix.build_deps }}
 
-      - name: Add Bookworm version suffix
-        working-directory: ${{ matrix.source_dir }}
-        run: |
-          if [ -f debian/changelog ]; then
-            DEBEMAIL="ci@seeed.cc" DEBFULLNAME="CI" dch -l +bookworm "Rebuilt for Debian Bookworm"
-            echo "Version suffix added:"
-            head -1 debian/changelog
-          fi
-
-      - name: Fix DRM include path for Bookworm
+      - name: Fix DRM include path
         if: contains(matrix.source_dir, 'camera_engine_rkaiq')
         run: |
           # Bookworm Docker lacks /usr/include/drm/; link to libdrm headers
@@ -196,8 +114,7 @@ jobs:
             ln -s /usr/include/libdrm /usr/include/drm
           fi
 
-      - name: Build ${{ matrix.name }} (Bookworm)
-        shell: bash
+      - name: Build ${{ matrix.name }}
         working-directory: ${{ matrix.source_dir }}
         run: |
           set -euo pipefail
@@ -205,20 +122,21 @@ jobs:
           mkdir -p /tmp/debs
           find .. -maxdepth 1 -name '*.deb' ! -name 'Makefile.deb' -exec cp {} /tmp/debs/ \;
           find . -name '*.deb' ! -name 'Makefile.deb' -exec cp {} /tmp/debs/ \;
-          echo "Built packages (Bookworm):"
+          echo "Built packages:"
           ls -lh /tmp/debs/*.deb
 
-      - name: Upload debs (Bookworm)
+      - name: Upload debs
         uses: actions/upload-artifact@v4
         with:
-          name: debs-bookworm-${{ matrix.name }}
+          name: debs-${{ matrix.name }}
           path: /tmp/debs/*.deb
 
   # ──────────────────────────────────────────────────
-  # 使用 aptly 构建 apt 仓库并发布
+  # Publish APT repository (aptly + GitHub Pages)
+  # Single set of debs published to both stable and bookworm dists.
   # ──────────────────────────────────────────────────
   publish-apt:
-    needs: [build-debs, build-debs-bookworm]
+    needs: [build-debs]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -229,18 +147,11 @@ jobs:
       - name: Checkout (for scripts)
         uses: actions/checkout@v4
 
-      - name: Download Noble debs
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: /tmp/debs-noble
-          pattern: debs-noble-*
-          merge-multiple: true
-
-      - name: Download Bookworm debs
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/debs-bookworm
-          pattern: debs-bookworm-*
+          path: /tmp/debs
+          pattern: debs-*
           merge-multiple: true
 
       - name: Checkout prebuilt debs
@@ -250,12 +161,12 @@ jobs:
           sparse-checkout: prebuilt
           path: deb-source
 
-      - name: Merge prebuilt debs into Noble
+      - name: Merge prebuilt debs
         run: |
           if [[ -d deb-source/prebuilt ]]; then
             copied=$(find deb-source/prebuilt -name '*.deb' | wc -l)
-            cp -vn deb-source/prebuilt/*.deb /tmp/debs-noble/ 2>/dev/null || true
-            echo "Merged ${copied} prebuilt debs into Noble directory"
+            cp -vn deb-source/prebuilt/*.deb /tmp/debs/ 2>/dev/null || true
+            echo "Merged ${copied} prebuilt debs"
           else
             echo "No prebuilt directory found, skipping"
           fi
@@ -278,8 +189,7 @@ jobs:
             tar -xf "${archive}" -C "${TMPDIR}"
           done
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
-          # SDK debs go into Noble; distro-agnostic ones are later copied to Bookworm
-          EXCLUDE_PKGS=$(find /tmp/debs-noble -name '*.deb' -exec basename {} \; | sed 's/_.*//' | sort -u)
+          EXCLUDE_PKGS=$(find /tmp/debs -name '*.deb' -exec basename {} \; | sed 's/_.*//' | sort -u)
           echo "CI-built packages (will exclude from SDK): ${EXCLUDE_PKGS}"
           copied=0; skipped=0; seen_pkgs=""
           while IFS= read -r deb; do
@@ -291,40 +201,30 @@ jobs:
               echo "  SKIP (duplicate in SDK): $(basename "${deb}")"
               skipped=$((skipped + 1))
             else
-              cp -vn "${deb}" /tmp/debs-noble/ && copied=$((copied + 1))
+              cp -vn "${deb}" /tmp/debs/ && copied=$((copied + 1))
               seen_pkgs="${seen_pkgs}${pkg_name}"$'\n'
             fi
           done < <(find "${TMPDIR}" -name '*.deb')
           echo "  Copied ${copied} SDK debs, skipped ${skipped} conflicting"
 
-      - name: Repackage SDK libmali for multi-distro
+      - name: Fix cross-distro dependencies
         run: |
-          # SDK libmali debs depend on libgcc1 which was removed in trixie.
-          # Replace with libgcc-s1 (available in bookworm, trixie, and noble).
-          for deb in /tmp/debs-noble/libmali-*.deb; do
+          # Replace libgcc1 with libgcc-s1 (libgcc1 removed in trixie,
+          # libgcc-s1 available in bookworm, trixie, noble).
+          fixed=0
+          for deb in /tmp/debs/*.deb; do
             [ -f "${deb}" ] || continue
-            echo "Repackaging: $(basename "${deb}")"
-            tmpdir=$(mktemp -d)
-            dpkg-deb -R "${deb}" "${tmpdir}"
-            sed -i 's/libgcc1 (>= 1:4.2)/libgcc-s1/' "${tmpdir}/DEBIAN/control"
-            dpkg-deb -b "${tmpdir}" "${deb}"
-            rm -rf "${tmpdir}"
-            echo "  Fixed: libgcc1 -> libgcc-s1"
-          done
-
-      - name: Copy distro-agnostic Noble debs to Bookworm
-        run: |
-          # Packages without Bookworm-specific builds (DKMS, shell scripts, SDK, prebuilt)
-          copied=0
-          for deb in /tmp/debs-noble/*.deb; do
-            [ -f "${deb}" ] || continue
-            pkg_name=$(basename "${deb}" | sed 's/_.*//')
-            if ! find /tmp/debs-bookworm -name "${pkg_name}_*.deb" -print -quit | grep -q .; then
-              cp -vn "${deb}" /tmp/debs-bookworm/ && copied=$((copied + 1))
-              echo "  Copied to Bookworm: $(basename "${deb}")"
+            if dpkg-deb -f "${deb}" depends 2>/dev/null | grep -q 'libgcc1'; then
+              echo "Fixing deps: $(basename "${deb}")"
+              tmpdir=$(mktemp -d)
+              dpkg-deb -R "${deb}" "${tmpdir}"
+              sed -i 's/libgcc1 (>= 1:4.2)/libgcc-s1/g' "${tmpdir}/DEBIAN/control"
+              dpkg-deb -b "${tmpdir}" "${deb}"
+              rm -rf "${tmpdir}"
+              fixed=$((fixed + 1))
             fi
           done
-          echo "Copied ${copied} distro-agnostic debs from Noble to Bookworm"
+          echo "Fixed ${fixed} packages"
 
       - name: Download cached kernel debs
         env:
@@ -340,19 +240,15 @@ jobs:
             tar -xf /tmp/kernel-cache/kernel-debs.tar.xz -C /tmp/kernel-cache
             echo "=== Cached kernel debs ==="
             find /tmp/kernel-cache -name '*.deb' -exec basename {} \;
-            cp -v /tmp/kernel-cache/*.deb /tmp/debs-noble/
-            cp -v /tmp/kernel-cache/*.deb /tmp/debs-bookworm/
+            cp -v /tmp/kernel-cache/*.deb /tmp/debs/
             echo "Added $(find /tmp/kernel-cache -name '*.deb' | wc -l) cached kernel debs"
           fi
 
       - name: List all debs (final)
         run: |
-          echo "=== Final Noble .deb list ==="
-          find /tmp/debs-noble -name '*.deb' -exec basename {} \; | sort
-          echo "Total Noble: $(find /tmp/debs-noble -name '*.deb' | wc -l)"
-          echo "=== Final Bookworm .deb list ==="
-          find /tmp/debs-bookworm -name '*.deb' -exec basename {} \; | sort
-          echo "Total Bookworm: $(find /tmp/debs-bookworm -name '*.deb' | wc -l)"
+          echo "=== Final .deb list ==="
+          find /tmp/debs -name '*.deb' -exec basename {} \; | sort
+          echo "Total: $(find /tmp/debs -name '*.deb' | wc -l)"
 
       - name: Install aptly
         run: |
@@ -366,7 +262,8 @@ jobs:
       - name: Publish apt repository
         run: |
           chmod +x scripts/*.sh
-          scripts/publish-aptly.sh /tmp/debs-noble /tmp/debs-bookworm
+          # Publish same debs to both stable and bookworm dists for backward compat
+          scripts/publish-aptly.sh /tmp/debs /tmp/debs
         env:
           ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
 
@@ -380,28 +277,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p /tmp/cache-out
-          # Noble: exclude kernel debs
-          mkdir -p /tmp/cache-out/noble
-          find /tmp/debs-noble -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
-            -exec cp {} /tmp/cache-out/noble/ \;
-          cd /tmp/cache-out/noble && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then tar -cf ../noble-debs.tar.xz -I 'xz -9' "${deb_files[@]}"; fi
-          # Bookworm: exclude kernel debs
-          mkdir -p /tmp/cache-out/bookworm
-          find /tmp/debs-bookworm -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
-            -exec cp {} /tmp/cache-out/bookworm/ \;
-          cd /tmp/cache-out/bookworm && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then tar -cf ../bookworm-debs.tar.xz -I 'xz -9' "${deb_files[@]}"; fi
-          # Upload to Release
+          # Exclude kernel debs from userspace cache
+          find /tmp/debs -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
+            -exec cp {} /tmp/cache-out/ \;
+          cd /tmp/cache-out && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then
+            tar -cf userspace-debs.tar.xz -I 'xz -9' "${deb_files[@]}"
+          fi
           cd /tmp/cache-out
-          gh release create userspace-debs-cache noble-debs.tar.xz bookworm-debs.tar.xz \
+          gh release create userspace-debs-cache userspace-debs.tar.xz \
             --repo "${{ github.repository }}" \
             --title "Userspace debs cache" \
             --notes "Latest userspace debs (auto-updated by CI)" \
-          || gh release upload userspace-debs-cache noble-debs.tar.xz bookworm-debs.tar.xz \
+          || gh release upload userspace-debs-cache userspace-debs.tar.xz \
             --repo "${{ github.repository }}" \
             --clobber
 
   # ──────────────────────────────────────────────────
-  # 部署到 GitHub Pages
+  # Deploy to GitHub Pages
   # ──────────────────────────────────────────────────
   deploy-pages:
     needs: publish-apt
