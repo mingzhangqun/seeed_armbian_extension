@@ -115,6 +115,7 @@ jobs:
           fi
 
       - name: Build ${{ matrix.name }}
+        shell: bash
         working-directory: ${{ matrix.source_dir }}
         run: |
           set -euo pipefail
