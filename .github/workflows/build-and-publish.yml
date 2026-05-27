@@ -231,38 +231,10 @@ jobs:
           path: /tmp/debs/*.deb
 
   # ──────────────────────────────────────────────────
-  # 无源码的包（预编译 deb，存放在仓库中）
-  # ──────────────────────────────────────────────────
-  copy-prebuilt:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.source_ref || 'deb_source' }}
-
-      - name: Copy prebuilt debs
-        run: |
-          mkdir -p /tmp/debs
-          # camera engine 预编译包存放在仓库 prebuilt/ 目录
-          if [[ -d prebuilt ]]; then
-            cp prebuilt/*.deb /tmp/debs/ 2>/dev/null || true
-          fi
-          echo "Prebuilt packages:"
-          ls -lh /tmp/debs/*.deb 2>/dev/null || echo "  (none)"
-
-      - name: Upload debs
-        uses: actions/upload-artifact@v4
-        with:
-          name: debs-prebuilt
-          path: /tmp/debs/*.deb
-          if-no-files-found: ignore
-
-  # ──────────────────────────────────────────────────
   # 使用 aptly 构建 apt 仓库并发布
   # ──────────────────────────────────────────────────
   publish-apt:
-    needs: [build-debs, build-debs-bookworm, copy-prebuilt]
+    needs: [build-debs, build-debs-bookworm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -287,35 +259,22 @@ jobs:
           pattern: debs-bookworm-*
           merge-multiple: true
 
-      - name: Download prebuilt debs
-        uses: actions/download-artifact@v4
+      - name: Checkout prebuilt debs
+        uses: actions/checkout@v4
         with:
-          path: /tmp/debs-prebuilt
-          pattern: debs-prebuilt
-          merge-multiple: true
+          ref: ${{ github.event.inputs.source_ref || 'deb_source' }}
+          sparse-checkout: prebuilt
+          path: deb-source
 
-      - name: Copy distro-agnostic Noble debs to Bookworm
+      - name: Merge prebuilt debs into Noble
         run: |
-          # Noble-only packages (DKMS, shell scripts) work on Bookworm too
-          copied=0
-          for deb in /tmp/debs-noble/*.deb; do
-            [ -f "${deb}" ] || continue
-            pkg_name=$(basename "${deb}" | sed 's/_.*//')
-            if ! find /tmp/debs-bookworm -name "${pkg_name}_*.deb" -print -quit | grep -q .; then
-              cp -vn "${deb}" /tmp/debs-bookworm/ && copied=$((copied + 1))
-              echo "  Copied to Bookworm: $(basename "${deb}")"
-            fi
-          done
-          echo "Copied ${copied} distro-agnostic debs from Noble to Bookworm"
-
-      - name: List collected debs
-        run: |
-          echo "=== Noble .deb files ==="
-          find /tmp/debs-noble -name '*.deb' -exec basename {} \; | sort
-          echo "=== Bookworm .deb files ==="
-          find /tmp/debs-bookworm -name '*.deb' -exec basename {} \; | sort
-          echo "=== Prebuilt .deb files ==="
-          find /tmp/debs-prebuilt -name '*.deb' -exec basename {} \; | sort
+          if [[ -d deb-source/prebuilt ]]; then
+            copied=$(find deb-source/prebuilt -name '*.deb' | wc -l)
+            cp -vn deb-source/prebuilt/*.deb /tmp/debs-noble/ 2>/dev/null || true
+            echo "Merged ${copied} prebuilt debs into Noble directory"
+          else
+            echo "No prebuilt directory found, skipping"
+          fi
 
       - name: Download SDK debs from Release
         env:
@@ -335,7 +294,7 @@ jobs:
             tar -xf "${archive}" -C "${TMPDIR}"
           done
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
-          # SDK debs go into Noble only (they are architecture-neutral or Noble-compatible)
+          # SDK debs go into Noble; distro-agnostic ones are later copied to Bookworm
           EXCLUDE_PKGS=$(find /tmp/debs-noble -name '*.deb' -exec basename {} \; | sed 's/_.*//' | sort -u)
           echo "CI-built packages (will exclude from SDK): ${EXCLUDE_PKGS}"
           copied=0; skipped=0; seen_pkgs=""
@@ -354,14 +313,19 @@ jobs:
           done < <(find "${TMPDIR}" -name '*.deb')
           echo "  Copied ${copied} SDK debs, skipped ${skipped} conflicting"
 
-      - name: Merge prebuilt debs into Noble
+      - name: Copy distro-agnostic Noble debs to Bookworm
         run: |
-          # Prebuilt debs (SDK, camera engine, etc.) are Noble-compatible
-          if [[ -d /tmp/debs-prebuilt ]]; then
-            copied=$(find /tmp/debs-prebuilt -name '*.deb' | wc -l)
-            cp -vn /tmp/debs-prebuilt/*.deb /tmp/debs-noble/ 2>/dev/null || true
-            echo "Merged ${copied} prebuilt debs into Noble directory"
-          fi
+          # Packages without Bookworm-specific builds (DKMS, shell scripts, SDK, prebuilt)
+          copied=0
+          for deb in /tmp/debs-noble/*.deb; do
+            [ -f "${deb}" ] || continue
+            pkg_name=$(basename "${deb}" | sed 's/_.*//')
+            if ! find /tmp/debs-bookworm -name "${pkg_name}_*.deb" -print -quit | grep -q .; then
+              cp -vn "${deb}" /tmp/debs-bookworm/ && copied=$((copied + 1))
+              echo "  Copied to Bookworm: $(basename "${deb}")"
+            fi
+          done
+          echo "Copied ${copied} distro-agnostic debs from Noble to Bookworm"
 
       - name: Download cached kernel debs
         env:
