@@ -270,7 +270,7 @@ jobs:
           gh release download "${SDK_RELEASE_TAG}" \
             --repo "${{ github.repository }}" \
             --dir "${TMPDIR}" \
-            --pattern '*.tar.xz' \
+            --pattern '*arm64*.tar.xz' \
             --clobber || { echo "WARNING: Release ${SDK_RELEASE_TAG} not found, skipping SDK debs"; exit 0; }
           echo "Extracting archives..."
           for archive in "${TMPDIR}"/*.tar.xz; do
