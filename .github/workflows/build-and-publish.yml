@@ -65,6 +65,11 @@ jobs:
             build_deps: libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libssl-dev libdbus-1-dev
             build_cmd: make deb
 
+          - name: morse-fgh100m-dkms
+            source_dir: morse-fgh100m-dkms
+            build_deps: dh-sequence-dkms
+            build_cmd: DEB_BUILD_OPTIONS="noddebs" dpkg-buildpackage -us -uc -b
+
           - name: realtek-r8125-dkms
             source_dir: realtek-r8125-dkms
             build_deps: dh-sequence-dkms
