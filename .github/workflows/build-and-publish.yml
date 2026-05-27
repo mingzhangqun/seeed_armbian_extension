@@ -297,6 +297,21 @@ jobs:
           done < <(find "${TMPDIR}" -name '*.deb')
           echo "  Copied ${copied} SDK debs, skipped ${skipped} conflicting"
 
+      - name: Repackage SDK libmali for multi-distro
+        run: |
+          # SDK libmali debs depend on libgcc1 which was removed in trixie.
+          # Replace with libgcc-s1 (available in bookworm, trixie, and noble).
+          for deb in /tmp/debs-noble/libmali-*.deb; do
+            [ -f "${deb}" ] || continue
+            echo "Repackaging: $(basename "${deb}")"
+            tmpdir=$(mktemp -d)
+            dpkg-deb -R "${deb}" "${tmpdir}"
+            sed -i 's/libgcc1 (>= 1:4.2)/libgcc-s1/' "${tmpdir}/DEBIAN/control"
+            dpkg-deb -b "${tmpdir}" "${deb}"
+            rm -rf "${tmpdir}"
+            echo "  Fixed: libgcc1 -> libgcc-s1"
+          done
+
       - name: Copy distro-agnostic Noble debs to Bookworm
         run: |
           # Packages without Bookworm-specific builds (DKMS, shell scripts, SDK, prebuilt)
