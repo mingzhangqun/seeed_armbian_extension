@@ -263,8 +263,7 @@ jobs:
       - name: Publish apt repository
         run: |
           chmod +x scripts/*.sh
-          # Publish same debs to both stable and bookworm dists for backward compat
-          scripts/publish-aptly.sh /tmp/debs /tmp/debs
+          scripts/publish-aptly.sh /tmp/debs
         env:
           ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
 

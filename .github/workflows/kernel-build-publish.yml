@@ -158,7 +158,7 @@ jobs:
       - name: Publish apt repository
         run: |
           chmod +x scripts/*.sh
-          scripts/publish-aptly.sh /tmp/userspace /tmp/userspace
+          scripts/publish-aptly.sh /tmp/userspace
         env:
           ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
 
