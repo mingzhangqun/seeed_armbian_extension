@@ -1,0 +1,119 @@
+From 437a17ebd42b5c8234be9d61d48fbce804177f57 Mon Sep 17 00:00:00 2001
+From: mingzq <north_sea@qq.com>
+Date: Mon, 1 Jun 2026 07:14:23 +0000
+Subject: [PATCH] net: r8169: add device tree based LED configuration for r8125
+
+Read r8125 LED register/value pairs from the PCIe controller DT
+"realtek,led-data" property, instead of hardcoding in the shared
+driver path.
+
+Walk up the device parent chain to find the PCIe platform device's
+of_node, since PCI devices on Rockchip platforms do not have their
+of_node set directly.
+
+Extract the LED config logic into a helper function to avoid
+duplication between rtl_wol_enable_rx() and rtl_hw_start_8125_common().
+---
+ .../rk3588-recomputer-rk3588-devkit.dts       | 10 +++++
+ drivers/net/ethernet/realtek/r8169_main.c     | 39 +++++++++++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/rockchip/rk3588-recomputer-rk3588-devkit.dts b/arch/arm64/boot/dts/rockchip/rk3588-recomputer-rk3588-devkit.dts
+index 918c7c3430de..90827ecf7ed6 100644
+--- a/arch/arm64/boot/dts/rockchip/rk3588-recomputer-rk3588-devkit.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3588-recomputer-rk3588-devkit.dts
+@@ -893,6 +893,11 @@ &combphy2_psu {
+ /* phy1 - right ethernet port PCIE20_1_TXP */
+ &pcie2x1l0 {
+ 	reset-gpios = <&gpio4 RK_PA5 GPIO_ACTIVE_HIGH>;
++	/* r8125 Ethernet LED configuration:
++	 * LED0 (yellow): blink on traffic at all link speeds
++	 * LED3 (green): solid on at all link speeds
++	 */
++	realtek,led-data = <0x18 0x022B 0x96 0x002B>;
+ 	vpcie3v3-supply = <&vcc5v0_usb_eth>;
+ 	status = "okay";
+ };
+@@ -907,6 +912,11 @@ &pcie2x1l1 {
+ /* phy0 - left ethernet port PCIE20_0_TXP */
+ &pcie2x1l2 {
+ 	reset-gpios = <&gpio3 RK_PD0 GPIO_ACTIVE_HIGH>;
++	/* r8125 Ethernet LED configuration:
++	 * LED0 (yellow): blink on traffic at all link speeds
++	 * LED3 (green): solid on at all link speeds
++	 */
++	realtek,led-data = <0x18 0x022B 0x96 0x002B>;
+ 	vpcie3v3-supply = <&vcc5v0_usb_eth>;
+ 	status = "okay";
+ };
+diff --git a/drivers/net/ethernet/realtek/r8169_main.c b/drivers/net/ethernet/realtek/r8169_main.c
+index 75836c0e91cf..71145f8553e0 100644
+--- a/drivers/net/ethernet/realtek/r8169_main.c
++++ b/drivers/net/ethernet/realtek/r8169_main.c
+@@ -25,6 +25,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/pm_runtime.h>
++#include <linux/of.h>
+ #include <linux/bitfield.h>
+ #include <linux/prefetch.h>
+ #include <linux/ipv6.h>
+@@ -2554,6 +2555,7 @@ static void rtl_enable_rxdvgate(struct rtl8169_private *tp)
+ 	rtl_wait_txrx_fifo_empty(tp);
+ }
+ 
++static void rtl8125_apply_dt_led_config(struct rtl8169_private *tp);
+ static void rtl_wol_enable_rx(struct rtl8169_private *tp)
+ {
+ 	if (tp->mac_version >= RTL_GIGA_MAC_VER_25)
+@@ -2562,6 +2564,42 @@ static void rtl_wol_enable_rx(struct rtl8169_private *tp)
+ 
+ 	if (tp->mac_version >= RTL_GIGA_MAC_VER_40)
+ 		rtl_disable_rxdvgate(tp);
++	rtl8125_apply_dt_led_config(tp);
++}
++
++/* Apply DT-based LED configuration for RTL8125.
++ * Walk up the device parent chain to find the PCIe platform
++ * device's of_node with the "realtek,led-data" property.
++ * Property format: realtek,led-data = <reg val reg val ...>;
++ */
++static void rtl8125_apply_dt_led_config(struct rtl8169_private *tp)
++{
++	struct device_node *np = NULL;
++	struct device *d = &tp->pci_dev->dev;
++	u32 *led_data;
++	int count, i;
++
++	while (d && !np) {
++		np = d->of_node;
++		d = d->parent;
++	}
++
++	if (!np)
++		return;
++
++	count = of_property_count_u32_elems(np, "realtek,led-data");
++	if (count < 2 || count % 2 != 0)
++		return;
++
++	led_data = kmalloc_array(count, sizeof(u32), GFP_KERNEL);
++	if (!led_data)
++		return;
++
++	if (!of_property_read_u32_array(np, "realtek,led-data", led_data, count)) {
++		for (i = 0; i < count; i += 2)
++			RTL_W16(tp, (int)led_data[i], (u16)led_data[i + 1]);
++	}
++	kfree(led_data);
+ }
+ 
+ static void rtl_prepare_power_down(struct rtl8169_private *tp)
+@@ -3690,6 +3728,7 @@ static void rtl_hw_start_8125_common(struct rtl8169_private *tp)
+ 		rtl8125a_config_eee_mac(tp);
+ 
+ 	rtl_disable_rxdvgate(tp);
++	rtl8125_apply_dt_led_config(tp);
+ }
+ 
+ static void rtl_hw_start_8125a_2(struct rtl8169_private *tp)
