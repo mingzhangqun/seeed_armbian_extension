@@ -108,7 +108,7 @@ EOF
 
 	local unit found_ssh_unit
 	found_ssh_unit="no"
-	for unit in ssh.service ssh.socket sshd.service; do
+	for unit in ssh.service ssh.socket; do
 		if chroot_sdcard test -f "/lib/systemd/system/${unit}" || chroot_sdcard test -f "/etc/systemd/system/${unit}"; then
 			found_ssh_unit="yes"
 			chroot_sdcard systemctl --no-reload disable "${unit}" || display_alert "${board_label}" "Failed to disable ${unit}" "warn"
