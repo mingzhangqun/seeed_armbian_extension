@@ -1,0 +1,24 @@
+#!/bin/bash
+# Ensure SSH can start after power-loss corruption.
+# Installed as ExecStartPre for ssh.service via systemd drop-in.
+mkdir -p /run/sshd
+
+# Check if sshd_config is corrupted (0x00 filled, 0xFF filled, or truncated).
+# Note: sshd -t treats 0x00 bytes as whitespace and returns success,
+# so we must also check for null-byte corruption explicitly.
+config_broken=0
+if ! /usr/sbin/sshd -t 2>/dev/null; then
+	config_broken=1
+elif grep -qPal '\x00' /etc/ssh/sshd_config 2>/dev/null; then
+	config_broken=1
+fi
+
+if [[ $config_broken -eq 1 ]]; then
+	# Restore sshd_config from dpkg default
+	cp /usr/share/openssh/sshd_config /etc/ssh/sshd_config
+	# Regenerate host keys if missing or empty
+	for key in /etc/ssh/ssh_host_*_key; do
+		[ -s "$key" ] || { rm -f "$key" "$key".pub; ssh-keygen -A; break; }
+	done
+	sync
+fi

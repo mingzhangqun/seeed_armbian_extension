@@ -31,3 +31,8 @@ if [[ "yes" == "yes" ]]; then
 	display_alert "Security hardening" "Enable security hardening extension recomputer-security" "info"
 	enable_extension "seeed_armbian_extension/security-hardening/recomputer-security"
 fi
+
+if [[ "yes" == "yes" ]]; then
+	display_alert "Firstlogin protection" "Enable firstlogin power-loss protection" "info"
+	enable_extension "seeed_armbian_extension/firstlogin-protection/firstlogin-protection"
+fi
