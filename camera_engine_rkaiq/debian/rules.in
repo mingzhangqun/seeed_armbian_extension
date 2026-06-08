@@ -27,8 +27,5 @@ override_dh_auto_install:
 	install -d -m 0755 debian/camera-engine-rkaiq-@SOC@/lib/systemd/system
 	install -m 0644 debian/rkaiq_3A.service debian/camera-engine-rkaiq-@SOC@/lib/systemd/system/
 
-override_dh_shlibdeps:
-override_dh_strip:
-
 override_dh_auto_clean:
 	rm -rf build/
