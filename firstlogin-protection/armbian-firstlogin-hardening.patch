@@ -1,13 +1,14 @@
---- /home/mingzq/armbian/build/packages/bsp/common/usr/lib/armbian/armbian-firstlogin	2026-06-05 10:59:16.436028001 +0000
-+++ /home/mingzq/armbian/seeed_armbian_extension.w/firstlogin-protection/armbian-firstlogin	2026-06-06 09:38:55.068730557 +0000
-@@ -15,6 +15,14 @@
+--- a/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
++++ b/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
+@@ -15,6 +15,15 @@
  
  . /etc/armbian-release
  
 +# Atomic write helper: mv tmp to dest with sync
 +atomic_write() {
-+	local tmp="$1" dest="$2" mode="${3:-}"
-+	[[ -n "$mode" ]] && chmod "$mode" "$tmp"
++	local dest="$1" mode="${2:-}"
++	local tmp="${dest}.tmp"
++	[[ -n "$mode" ]] && chmod "$mode" "$tmp" || chmod --reference="$dest" "$tmp" 2>/dev/null
 +	mv -f "$tmp" "$dest"
 +	sync -f "$dest" 2>/dev/null || sync "$dest" 2>/dev/null
 +}
@@ -15,7 +16,7 @@
  check_abort() {
  
  	echo -e "\nDisabling user account creation procedure\n"
-@@ -117,9 +125,8 @@
+@@ -117,9 +126,8 @@
  
  						DEVICE_NAME=${wlan_index}
  						DEVTYPE=wifis
@@ -23,11 +24,11 @@
 -						chmod 600 /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml
 -						#Enable Wlan, disable Eth
 +						echo -e "$(createYAML)" > /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml.tmp
-+						atomic_write /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml.tmp /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml 600
++						atomic_write /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml 600
  						PRESET_NET_ETHERNET_ENABLED=0
  						netplan apply > /dev/null 2>&1
  
-@@ -131,9 +138,8 @@
+@@ -131,9 +139,8 @@
  
  						DEVICE_NAME=${eth_index}
  						DEVTYPE=ethernets
@@ -35,11 +36,11 @@
 -						chmod 600 /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml
 -						# Enable Eth, disable Wlan
 +						echo -e "$(createYAML)" > /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml.tmp
-+						atomic_write /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml.tmp /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml 600
++						atomic_write /etc/netplan/30-${DEVTYPE}${CONFIG_NAME}.yaml 600
  						PRESET_NET_WIFI_ENABLED=0
  						netplan apply > /dev/null 2>&1
  				fi
-@@ -260,7 +266,9 @@
+@@ -260,7 +267,9 @@
  
  	# change shell for future users
  	sed -i "s|^SHELL=.*|SHELL=${SHELL_PATH}|" /etc/default/useradd
@@ -49,7 +50,7 @@
  
  }
  
-@@ -340,7 +348,7 @@
+@@ -340,7 +349,7 @@
  						done
  
  						# generate config
@@ -58,17 +59,17 @@
  						# Created by Armbian firstlogin script
  						network:
  						  wifis:
-@@ -351,7 +359,8 @@
+@@ -351,7 +360,8 @@
  						        "$SSID":
  						         password: "${password}"
  						EOF
 -						chmod 600 /etc/netplan/30-wifis-dhcp.yaml
 +						chmod 600 /etc/netplan/30-wifis-dhcp.yaml.tmp
-+						atomic_write /etc/netplan/30-wifis-dhcp.yaml.tmp /etc/netplan/30-wifis-dhcp.yaml
++						atomic_write /etc/netplan/30-wifis-dhcp.yaml
  
  						# apply to netplan
  						systemctl daemon-reload
-@@ -422,6 +431,7 @@
+@@ -422,6 +432,7 @@
  			jq '.timezone, .country, .country_code' |
  			while read -r TIMEZONE; do
  				read -r COUNTRY
@@ -76,7 +77,7 @@
  				echo "${TIMEZONE},${COUNTRY},${COUNTRYCODE}" | tr --delete '"\n'
  			done
  	)
-@@ -485,25 +495,28 @@
+@@ -485,25 +496,28 @@
  		timedatectl set-timezone "${TZDATA}"
  		dpkg-reconfigure --frontend=noninteractive tzdata > /dev/null 2>&1
  
@@ -91,7 +92,7 @@
 -		sed -i 's/# '"${LOCALES}"'/'"${LOCALES}"'/' /etc/locale.gen
 +		# generate locales (atomic write for locale.gen)
 +		if sed 's/# '"${LOCALES}"'/'"${LOCALES}"'/' /etc/locale.gen > /etc/locale.gen.tmp; then
-+			atomic_write /etc/locale.gen.tmp /etc/locale.gen
++			atomic_write /etc/locale.gen
 +		fi
  		echo -e "Generating locales: \x1B[92m${LOCALES}\x1B[0m"
  		locale-gen "${LOCALES}" > /dev/null 2>&1
@@ -120,7 +121,7 @@
  
  	fi
  }
-@@ -535,6 +548,15 @@
+@@ -535,6 +549,15 @@
  add_user() {
  	read -r -t 0 _
  	REPEATS=3
@@ -136,7 +137,7 @@
  	while [ -f "/root/.not_logged_in_yet" ]; do
  		[[ -z "${PRESET_USER_NAME}" ]] && echo -e "\nPlease provide a username (eg. your first name): \c"
  		if [ -z "$PRESET_USER_NAME" ];then
-@@ -549,8 +571,13 @@
+@@ -549,8 +572,13 @@
  
  		RealUserName="$(echo "$username" | tr '[:upper:]' '[:lower:]' | tr -d -c '[:alnum:]')"
  		[ -z "$RealUserName" ] && return
@@ -151,7 +152,7 @@
  
  	# Set default user login icon
  	set_user_icon "$RealUserName"
-@@ -586,7 +613,10 @@
+@@ -586,7 +614,10 @@
  				RealName="$PRESET_DEFAULT_REALNAME"
  			fi
  
@@ -163,7 +164,7 @@
  
  			# download and add SSH key if defined
  			if [[ -n "${PRESET_USER_KEY}" ]]; then
-@@ -623,10 +653,33 @@
+@@ -623,10 +654,33 @@
  			[ -z "$RealName" ] && RealName="$RealUserName"
  			echo -e "\nDear \e[0;92m${RealName}\x1B[0m, your account \e[0;92m${RealUserName}\x1B[0m has been created and is sudo enabled."
  			echo -e "Please use this account for your daily work from now on.\n"
@@ -185,7 +186,7 @@
 +@includedir /etc/sudoers.d
 +SUEOF
 +				chmod 440 /etc/sudoers.tmp
-+				atomic_write /etc/sudoers.tmp /etc/sudoers
++				atomic_write /etc/sudoers
 +			fi
  			# set up profile sync daemon on desktop systems
  			if command -v psd > /dev/null 2>&1; then
@@ -194,12 +195,12 @@
 +				if ! grep -q "psd-overlay-helper" /etc/sudoers 2>/dev/null; then
 +					cp -p /etc/sudoers /etc/sudoers.tmp
 +					echo "${RealUserName} ALL=(ALL) NOPASSWD: /usr/bin/psd-overlay-helper" >> /etc/sudoers.tmp
-+					atomic_write /etc/sudoers.tmp /etc/sudoers
++					atomic_write /etc/sudoers
 +				fi
  				touch /home/"${RealUserName}"/.activate_psd
  				chown "$RealUserName":"$RealUserName" /home/"${RealUserName}"/.activate_psd
  			fi
-@@ -635,7 +688,7 @@
+@@ -635,7 +689,7 @@
  			echo -e "Rejected - \e[0;31mpasswords do not match.\x1B[0m Try again [${REPEATS}]."
  			REPEATS=$((REPEATS - 1))
  		fi
@@ -208,7 +209,7 @@
  	done
  
  }
-@@ -665,7 +718,7 @@
+@@ -665,7 +719,7 @@
  }
  
  
@@ -217,7 +218,7 @@
  
  	. /root/.not_logged_in_yet
  
-@@ -676,9 +729,11 @@
+@@ -676,9 +730,11 @@
  
  	do_firstrun_automated_network_configuration
  
@@ -230,7 +231,7 @@
  	systemctl daemon-reload
  
  	declare desktop_dm="none"
-@@ -864,11 +919,15 @@
+@@ -864,11 +920,15 @@
  
  	trap check_abort INT
  
@@ -248,7 +249,7 @@
  	trap - INT TERM EXIT
  
  	# ask user to select automated locales or not
-@@ -880,8 +939,15 @@
+@@ -880,8 +940,15 @@
  		printf "\nYou selected \e[0;91mZSH\x1B[0m as your default shell. If you want to use it right away, please logout and login! \n\n"
  	fi
  
@@ -256,7 +257,7 @@
 -	sed -e '/^#AcceptEnv LANG/ s/^#//' -i /etc/ssh/sshd_config
 +	# re-enable passing locale environment via ssh and allow root password login (atomic write)
 +	if sed -e '/^#AcceptEnv LANG/ s/^#//' -e 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config > /etc/ssh/sshd_config.tmp; then
-+		atomic_write /etc/ssh/sshd_config.tmp /etc/ssh/sshd_config
++		atomic_write /etc/ssh/sshd_config
 +	fi
 +	# Delete marker BEFORE restarting sshd.  If the script is running
 +	# over an SSH session, `systemctl restart ssh.service` kills the
@@ -266,7 +267,7 @@
  	# restart sshd daemon
  	systemctl restart ssh.service
  
-@@ -1044,3 +1110,8 @@
+@@ -1044,3 +1111,8 @@
  if [[ -f /root/provisioning.sh ]]; then
  	. /root/provisioning.sh
  fi

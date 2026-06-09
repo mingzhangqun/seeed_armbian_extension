@@ -1,6 +1,6 @@
---- a/packages/bsp/common/usr/lib/armbian/armbian-firstrun	2026-06-05 05:52:19.620693792 +0000
-+++ b/packages/bsp/common/usr/lib/armbian/armbian-firstrun	2026-06-05 05:52:19.632694047 +0000
-@@ -60,12 +60,18 @@
+--- a/packages/bsp/common/usr/lib/armbian/armbian-firstrun
++++ b/packages/bsp/common/usr/lib/armbian/armbian-firstrun
+@@ -60,12 +60,19 @@
  	# get rid of purple background color in newt apps whiptail, partimage, debconf ... Reverting to Debian look.
  	[[ -f /etc/newt/palette ]] && sed -e 's/magenta/blue/g' -i /etc/newt/palette
  
@@ -16,8 +16,9 @@
 +		if sed -e "s/^ethaddr=.*/ethaddr=${mac0}/" \
 +		       -e "s/^eth1addr=.*/eth1addr=${mac1}/" \
 +		       /boot/armbianEnv.txt > /boot/armbianEnv.txt.tmp; then
++			chmod --reference=/boot/armbianEnv.txt /boot/armbianEnv.txt.tmp
++			sync /boot/armbianEnv.txt.tmp
 +			mv /boot/armbianEnv.txt.tmp /boot/armbianEnv.txt
-+			sync /boot/armbianEnv.txt
 +		else
 +			rm -f /boot/armbianEnv.txt.tmp
 +		fi
