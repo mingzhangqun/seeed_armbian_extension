@@ -1,6 +1,8 @@
+diff --git a/packages/bsp/common/usr/lib/armbian/armbian-firstlogin b/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
+index 620a4fca6..1d8268494 100755
 --- a/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
 +++ b/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
-@@ -15,6 +15,15 @@
+@@ -15,6 +15,19 @@
  
  . /etc/armbian-release
  
@@ -8,7 +10,11 @@
 +atomic_write() {
 +	local dest="$1" mode="${2:-}"
 +	local tmp="${dest}.tmp"
-+	[[ -n "$mode" ]] && chmod "$mode" "$tmp" || chmod --reference="$dest" "$tmp" 2>/dev/null
++	if [[ -n "$mode" ]]; then
++		chmod "$mode" "$tmp"
++	elif [[ -e "$dest" ]]; then
++		chmod --reference="$dest" "$tmp"
++	fi
 +	mv -f "$tmp" "$dest"
 +	sync -f "$dest" 2>/dev/null || sync "$dest" 2>/dev/null
 +}
@@ -16,7 +22,7 @@
  check_abort() {
  
  	echo -e "\nDisabling user account creation procedure\n"
-@@ -117,9 +126,8 @@
+@@ -117,9 +130,8 @@ do_firstrun_automated_network_configuration()
  
  						DEVICE_NAME=${wlan_index}
  						DEVTYPE=wifis
@@ -28,7 +34,7 @@
  						PRESET_NET_ETHERNET_ENABLED=0
  						netplan apply > /dev/null 2>&1
  
-@@ -131,9 +139,8 @@
+@@ -131,9 +143,8 @@ do_firstrun_automated_network_configuration()
  
  						DEVICE_NAME=${eth_index}
  						DEVTYPE=ethernets
@@ -40,7 +46,7 @@
  						PRESET_NET_WIFI_ENABLED=0
  						netplan apply > /dev/null 2>&1
  				fi
-@@ -260,7 +267,9 @@
+@@ -260,7 +271,9 @@ set_shell() {
  
  	# change shell for future users
  	sed -i "s|^SHELL=.*|SHELL=${SHELL_PATH}|" /etc/default/useradd
@@ -50,7 +56,7 @@
  
  }
  
-@@ -340,7 +349,7 @@
+@@ -340,7 +353,7 @@ set_timezone_and_locales() {
  						done
  
  						# generate config
@@ -59,7 +65,7 @@
  						# Created by Armbian firstlogin script
  						network:
  						  wifis:
-@@ -351,7 +360,8 @@
+@@ -351,7 +364,8 @@ set_timezone_and_locales() {
  						        "$SSID":
  						         password: "${password}"
  						EOF
@@ -69,7 +75,7 @@
  
  						# apply to netplan
  						systemctl daemon-reload
-@@ -422,6 +432,7 @@
+@@ -422,6 +436,7 @@ set_timezone_and_locales() {
  			jq '.timezone, .country, .country_code' |
  			while read -r TIMEZONE; do
  				read -r COUNTRY
@@ -77,7 +83,7 @@
  				echo "${TIMEZONE},${COUNTRY},${COUNTRYCODE}" | tr --delete '"\n'
  			done
  	)
-@@ -485,25 +496,28 @@
+@@ -485,25 +500,28 @@ set_timezone_and_locales() {
  		timedatectl set-timezone "${TZDATA}"
  		dpkg-reconfigure --frontend=noninteractive tzdata > /dev/null 2>&1
  
@@ -121,7 +127,7 @@
  
  	fi
  }
-@@ -535,6 +549,15 @@
+@@ -535,6 +553,15 @@ add_profile_sync_settings() {
  add_user() {
  	read -r -t 0 _
  	REPEATS=3
@@ -137,7 +143,7 @@
  	while [ -f "/root/.not_logged_in_yet" ]; do
  		[[ -z "${PRESET_USER_NAME}" ]] && echo -e "\nPlease provide a username (eg. your first name): \c"
  		if [ -z "$PRESET_USER_NAME" ];then
-@@ -549,8 +572,13 @@
+@@ -549,8 +576,13 @@ add_user() {
  
  		RealUserName="$(echo "$username" | tr '[:upper:]' '[:lower:]' | tr -d -c '[:alnum:]')"
  		[ -z "$RealUserName" ] && return
@@ -152,7 +158,7 @@
  
  	# Set default user login icon
  	set_user_icon "$RealUserName"
-@@ -586,7 +614,10 @@
+@@ -586,7 +618,10 @@ add_user() {
  				RealName="$PRESET_DEFAULT_REALNAME"
  			fi
  
@@ -164,7 +170,7 @@
  
  			# download and add SSH key if defined
  			if [[ -n "${PRESET_USER_KEY}" ]]; then
-@@ -623,10 +654,33 @@
+@@ -623,10 +658,33 @@ add_user() {
  			[ -z "$RealName" ] && RealName="$RealUserName"
  			echo -e "\nDear \e[0;92m${RealName}\x1B[0m, your account \e[0;92m${RealUserName}\x1B[0m has been created and is sudo enabled."
  			echo -e "Please use this account for your daily work from now on.\n"
@@ -200,7 +206,7 @@
  				touch /home/"${RealUserName}"/.activate_psd
  				chown "$RealUserName":"$RealUserName" /home/"${RealUserName}"/.activate_psd
  			fi
-@@ -635,7 +689,7 @@
+@@ -635,7 +693,7 @@ add_user() {
  			echo -e "Rejected - \e[0;31mpasswords do not match.\x1B[0m Try again [${REPEATS}]."
  			REPEATS=$((REPEATS - 1))
  		fi
@@ -209,7 +215,7 @@
  	done
  
  }
-@@ -665,7 +719,7 @@
+@@ -665,7 +723,7 @@ set_user_icon() {
  }
  
  
@@ -218,7 +224,7 @@
  
  	. /root/.not_logged_in_yet
  
-@@ -676,9 +730,11 @@
+@@ -676,9 +734,11 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
  
  	do_firstrun_automated_network_configuration
  
@@ -231,7 +237,7 @@
  	systemctl daemon-reload
  
  	declare desktop_dm="none"
-@@ -864,11 +920,15 @@
+@@ -864,11 +924,15 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
  
  	trap check_abort INT
  
@@ -249,7 +255,7 @@
  	trap - INT TERM EXIT
  
  	# ask user to select automated locales or not
-@@ -880,8 +940,15 @@
+@@ -880,8 +944,15 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
  		printf "\nYou selected \e[0;91mZSH\x1B[0m as your default shell. If you want to use it right away, please logout and login! \n\n"
  	fi
  
@@ -267,7 +273,7 @@
  	# restart sshd daemon
  	systemctl restart ssh.service
  
-@@ -1044,3 +1111,8 @@
+@@ -1044,3 +1115,8 @@ fi
  if [[ -f /root/provisioning.sh ]]; then
  	. /root/provisioning.sh
  fi
@@ -275,4 +281,4 @@
 +# All configuration complete - safe to remove firstlogin marker now
 +# This must be the last operation to ensure power-loss during any
 +# step above will cause firstlogin to re-run on next boot.
-+rm -f /root/.not_logged_in_yet
++[[ -n "$(tty)" ]] && rm -f /root/.not_logged_in_yet
