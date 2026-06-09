@@ -40,6 +40,24 @@ function post_family_tweaks__seeed_firstrun_atomic_mac() {
 	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
 }
 
+# Patch bootscript: armbianEnv.txt corruption detection with .bak fallback.
+# Replaces flag-based approach with rootdev check, derives fallback rootdev
+# from boot source devnum instead of hardcoding mmcblk0.
+function post_family_tweaks__seeed_bootscript_corruption_detection() {
+	local patch_dir
+	patch_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+	local patch_file="${patch_dir}/bootscript-armbianenv-corruption-detection.patch"
+	local target="${SRC}/config/bootscripts/boot-seeed-rk35xx.cmd"
+
+	if [[ ! -f "$patch_file" ]]; then
+		display_alert "Bootscript protection" "Corruption detection patch not found: $patch_file" "warn"
+		return 1
+	fi
+
+	display_alert "Bootscript protection" "Patching bootscript for armbianEnv.txt corruption detection" "info"
+	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
+}
+
 # Install SSH power-loss protection.
 # Adds a systemd drop-in that runs ssh-protect as ExecStartPre for ssh.service.
 # If sshd -t fails (corrupted config or host keys), the script regenerates keys.
