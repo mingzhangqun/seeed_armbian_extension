@@ -1,6 +1,8 @@
+diff --git a/packages/bsp/common/usr/lib/armbian/armbian-firstrun b/packages/bsp/common/usr/lib/armbian/armbian-firstrun
+index e50131dfa..a29c3b2cb 100755
 --- a/packages/bsp/common/usr/lib/armbian/armbian-firstrun
 +++ b/packages/bsp/common/usr/lib/armbian/armbian-firstrun
-@@ -60,12 +60,19 @@
+@@ -60,12 +60,20 @@ case "$1" in
  	# get rid of purple background color in newt apps whiptail, partimage, debconf ... Reverting to Debian look.
  	[[ -f /etc/newt/palette ]] && sed -e 's/magenta/blue/g' -i /etc/newt/palette
  
@@ -15,10 +17,11 @@
 +		generate_random_mac; mac1="$MACADDR"
 +		if sed -e "s/^ethaddr=.*/ethaddr=${mac0}/" \
 +		       -e "s/^eth1addr=.*/eth1addr=${mac1}/" \
-+		       /boot/armbianEnv.txt > /boot/armbianEnv.txt.tmp; then
-+			chmod --reference=/boot/armbianEnv.txt /boot/armbianEnv.txt.tmp
-+			sync /boot/armbianEnv.txt.tmp
-+			mv /boot/armbianEnv.txt.tmp /boot/armbianEnv.txt
++		       /boot/armbianEnv.txt > /boot/armbianEnv.txt.tmp \
++		   && chmod --reference=/boot/armbianEnv.txt /boot/armbianEnv.txt.tmp \
++		   && sync /boot/armbianEnv.txt.tmp \
++		   && mv /boot/armbianEnv.txt.tmp /boot/armbianEnv.txt; then
++			:
 +		else
 +			rm -f /boot/armbianEnv.txt.tmp
 +		fi
