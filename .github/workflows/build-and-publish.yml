@@ -83,15 +83,9 @@ jobs:
             build_deps: ''
             build_cmd: bash build-usbdevice-deb.sh
 
-          - name: camera-engine-rkaiq-rk3576
-            source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev vim-common
-            build_cmd: bash build-deb.sh rk3576
-
-          - name: camera-engine-rkaiq-rk3588
-            source_dir: camera_engine_rkaiq
-            build_deps: cmake pkg-config libdrm-dev vim-common
-            build_cmd: bash build-deb.sh rk3588
+          # camera-engine-rkaiq-rk3576 and camera-engine-rkaiq-rk3588 are
+          # distributed as prebuilt binaries (closed-source 3A algorithm .a
+          # files). See prebuilt/ on the deb_source branch.
 
     steps:
       - name: Checkout
@@ -105,14 +99,6 @@ jobs:
           apt-get install -y \
             build-essential devscripts debhelper \
             dpkg-dev fakeroot ${{ matrix.build_deps }}
-
-      - name: Fix DRM include path
-        if: contains(matrix.source_dir, 'camera_engine_rkaiq')
-        run: |
-          # Bookworm Docker lacks /usr/include/drm/; link to libdrm headers
-          if [ ! -d /usr/include/drm ] && [ -d /usr/include/libdrm ]; then
-            ln -s /usr/include/libdrm /usr/include/drm
-          fi
 
       - name: Build ${{ matrix.name }}
         shell: bash
