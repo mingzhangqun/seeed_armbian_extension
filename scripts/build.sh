@@ -17,6 +17,7 @@ DESKTOP_TIER="mid"
 
 # Build mode
 BUILD_KERNEL_ONLY="no"
+BUILD_UBOOT_ONLY="no"
 BUILD_MINIMAL="no"
 BUILD_DESKTOP="yes"
 
@@ -27,6 +28,8 @@ CRYPTROOT_ENABLE="no"
 RK_AUTO_DECRYP="no"
 RK_SECURE_UBOOT_ENABLE="no"
 RK_OPTEE_BOOT_ENABLE="no"
+
+RK_COMPILE_USBPLUG="no"
 
 CRYPTROOT_PASSPHRASE="${CRYPTROOT_PASSPHRASE:-}"
 
@@ -50,7 +53,9 @@ Profiles (feature sets, default: plain desktop build):
 Options:
   Build mode:
   --kernel                    Build kernel only (skip u-boot, rootfs, image)
+  --uboot                     Build u-boot only (skip kernel, rootfs, image)
   --minimal                   Build minimal system (no desktop)
+  --usbplug                   Compile usbplug from source (Maskrom recovery for new SPI flash)
 
   Build config:
   -b, --board BOARD           Board name (default: recomputer-rk3576-devkit)
@@ -153,7 +158,17 @@ while [[ $# -gt 0 ]]; do
             BUILD_MINIMAL="no"
             shift
             ;;
+        --uboot)
+            BUILD_UBOOT_ONLY="yes"
+            shift
+            ;;
         --minimal)
+            BUILD_MINIMAL="yes"
+            BUILD_DESKTOP="no"
+            shift
+            ;;
+        --usbplug)
+            RK_COMPILE_USBPLUG="yes"
             BUILD_MINIMAL="yes"
             BUILD_DESKTOP="no"
             shift
@@ -217,6 +232,9 @@ done
 if [[ "$BUILD_KERNEL_ONLY" == "yes" && "$BUILD_MINIMAL" == "yes" ]]; then
     die "--kernel and --minimal are mutually exclusive."
 fi
+if [[ "$BUILD_KERNEL_ONLY" == "yes" && "$BUILD_UBOOT_ONLY" == "yes" ]]; then
+    die "--kernel and --uboot are mutually exclusive."
+fi
 if [[ "$BUILD_KERNEL_ONLY" == "yes" && -n "$PROFILE" ]]; then
     warn "--kernel mode ignores profile '$PROFILE' (kernel only build)."
     PROFILE=""
@@ -254,6 +272,8 @@ cd "$SCRIPT_DIR"
 echo "==========================================="
 if [[ "$BUILD_KERNEL_ONLY" == "yes" ]]; then
     echo " Mode           : kernel only"
+elif [[ "$BUILD_UBOOT_ONLY" == "yes" ]]; then
+    echo " Mode           : u-boot only"
 elif [[ "$BUILD_MINIMAL" == "yes" ]]; then
     echo " Mode           : minimal (no desktop)"
 else
@@ -271,6 +291,9 @@ if [[ "$OTA_ENABLE" == "yes" || "$CRYPTROOT_ENABLE" == "yes" ]]; then
     echo " Secure Boot    : $RK_SECURE_UBOOT_ENABLE"
     echo " OP-TEE         : $RK_OPTEE_BOOT_ENABLE"
 fi
+if [[ "$RK_COMPILE_USBPLUG" == "yes" ]]; then
+    echo " USBPLUG        : compiled from source (Maskrom recovery)"
+fi
 echo "==========================================="
 
 # ── Construct build args ────────────────────────────────────────────────────
@@ -283,6 +306,16 @@ if [[ "$BUILD_KERNEL_ONLY" == "yes" ]]; then
         KERNEL_CONFIGURE="$KERNEL_CONFIGURE"
         ENABLE_SEEED_RK_EXTENSION="$ENABLE_SEEED_RK_EXTENSION"
     )
+elif [[ "$BUILD_UBOOT_ONLY" == "yes" ]]; then
+    BUILD_CMD=(./compile.sh uboot)
+    BUILD_CMD+=(
+        BOARD="$BOARD"
+        BRANCH="$BRANCH"
+        RELEASE="$RELEASE"
+        ENABLE_SEEED_RK_EXTENSION="$ENABLE_SEEED_RK_EXTENSION"
+        KERNEL_CONFIGURE="$KERNEL_CONFIGURE"
+    )
+    [[ "$RK_COMPILE_USBPLUG" == "yes" ]] && BUILD_CMD+=(RK_COMPILE_USBPLUG=yes)
 else
     BUILD_CMD=(./compile.sh)
     BUILD_CMD+=(
@@ -311,6 +344,7 @@ else
     [[ "$RK_AUTO_DECRYP" == "yes" ]] && BUILD_CMD+=(RK_AUTO_DECRYP=yes)
     [[ "$RK_SECURE_UBOOT_ENABLE" == "yes" ]] && BUILD_CMD+=(RK_SECURE_UBOOT_ENABLE=yes)
     [[ "$RK_OPTEE_BOOT_ENABLE" == "yes" ]] && BUILD_CMD+=(RK_OPTEE_BOOT_ENABLE=yes)
+    [[ "$RK_COMPILE_USBPLUG" == "yes" ]] && BUILD_CMD+=(RK_COMPILE_USBPLUG=yes)
 fi
 
 # ── Execute or dry-run ──────────────────────────────────────────────────────
