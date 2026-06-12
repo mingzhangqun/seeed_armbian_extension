@@ -21,25 +21,6 @@ function post_family_tweaks__seeed_firstlogin_install() {
 	display_alert "Firstlogin protection" "Patching armbian-firstlogin with hardening" "info"
 	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
 }
-
-# Patch armbian-firstrun: use atomic write for armbianEnv.txt MAC randomization.
-# Prevents armbianEnv.txt corruption (zero-filled) from power loss during
-# first boot. Replaces non-atomic sed -i with tmp→sync→mv pattern.
-function post_family_tweaks__seeed_firstrun_atomic_mac() {
-	local patch_dir
-	patch_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-	local patch_file="${patch_dir}/armbian-firstrun-atomic-mac.patch"
-	local target="${SDCARD}/usr/lib/armbian/armbian-firstrun"
-
-	if [[ ! -f "$patch_file" ]]; then
-		display_alert "Firstrun protection" "Atomic MAC patch not found: $patch_file" "warn"
-		return 1
-	fi
-
-	display_alert "Firstrun protection" "Patching armbian-firstrun for atomic MAC write" "info"
-	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
-}
-
 # Patch bootscript: armbianEnv.txt corruption detection with .bak fallback.
 # Replaces flag-based approach with rootdev check, derives fallback rootdev
 # from boot source devnum instead of hardcoding mmcblk0.
