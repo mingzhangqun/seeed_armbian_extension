@@ -16,6 +16,24 @@ function post_family_tweaks__seeed_armbian_common_atomic_write() {
 	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
 }
 
+# Patch armbian-firstrun: use shared atomic_write() for MAC address write.
+# Replaces inline sed/chmod/sync/mv chain with the shared atomic_write()
+# function from armbian-common.
+function post_family_tweaks__seeed_firstrun_atomic_write() {
+	local patch_dir
+	patch_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+	local patch_file="${patch_dir}/armbian-firstrun-atomic-write.patch"
+	local target="${SDCARD}/usr/lib/armbian/armbian-firstrun"
+
+	if [[ ! -f "$patch_file" ]]; then
+		display_alert "armbian-firstrun" "Patch not found: $patch_file" "warn"
+		return 1
+	fi
+
+	display_alert "armbian-firstrun" "Using shared atomic_write() for MAC write" "info"
+	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
+}
+
 # Patch armbian-firstlogin with power-loss protection.
 # Applies on top of the stock firstlogin, adding:
 #  1. Source armbian-common for shared atomic_write()
