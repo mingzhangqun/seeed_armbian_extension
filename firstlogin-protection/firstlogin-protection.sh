@@ -1,12 +1,31 @@
+# Patch armbian-common: extract atomic_write() as a shared library.
+# Must be applied BEFORE armbian-firstlogin patch, since firstlogin now
+# sources armbian-common for atomic_write() instead of defining it inline.
+function post_family_tweaks__seeed_armbian_common_atomic_write() {
+	local patch_dir
+	patch_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+	local patch_file="${patch_dir}/armbian-common-atomic-write.patch"
+	local target="${SDCARD}/usr/lib/armbian/armbian-common"
+
+	if [[ ! -f "$patch_file" ]]; then
+		display_alert "armbian-common" "Patch not found: $patch_file" "warn"
+		return 1
+	fi
+
+	display_alert "armbian-common" "Adding atomic_write() shared library" "info"
+	patch --no-backup-if-mismatch -s "$target" < "$patch_file"
+}
+
 # Patch armbian-firstlogin with power-loss protection.
 # Applies on top of the stock firstlogin, adding:
-#  1. Move .not_logged_in_yet deletion to end of script for re-run safety
-#  2. Atomic writes (tmp→sync→mv) for sshd_config, locale.gen, /etc/default/locale,
-#     netplan configs, sudoers
-#  3. Idempotent locale exports and sudoers append
-#  4. Prevent infinite loop when user already exists in automated mode
-#  5. Skip adduser when user already exists (power-loss re-run)
-#  6. Sudoers corruption repair, PermitRootLogin yes, add_user guard
+#  1. Source armbian-common for shared atomic_write()
+#  2. Move .not_logged_in_yet deletion to end of script for re-run safety
+#  3. Atomic writes (tmp→sync→mv) for sshd_config, locale.gen, /etc/default/locale,
+#     netplan configs, sudoers, useradd, adduser.conf
+#  4. Idempotent locale exports and sudoers append
+#  5. Prevent infinite loop when user already exists in automated mode
+#  6. Skip adduser when user already exists (power-loss re-run)
+#  7. Sudoers corruption repair, add_user guard
 function post_family_tweaks__seeed_firstlogin_install() {
 	local patch_dir
 	patch_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
