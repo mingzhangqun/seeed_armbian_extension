@@ -1,5 +1,5 @@
 diff --git a/packages/bsp/common/usr/lib/armbian/armbian-firstlogin b/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
-index 620a4fca6..c0659315f 100755
+index 620a4fca6..14042761b 100755
 --- a/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
 +++ b/packages/bsp/common/usr/lib/armbian/armbian-firstlogin
 @@ -14,6 +14,7 @@
@@ -169,7 +169,7 @@ index 620a4fca6..c0659315f 100755
  
  			# download and add SSH key if defined
  			if [[ -n "${PRESET_USER_KEY}" ]]; then
-@@ -623,10 +652,36 @@ add_user() {
+@@ -623,10 +652,18 @@ add_user() {
  			[ -z "$RealName" ] && RealName="$RealUserName"
  			echo -e "\nDear \e[0;92m${RealName}\x1B[0m, your account \e[0;92m${RealUserName}\x1B[0m has been created and is sudo enabled."
  			echo -e "Please use this account for your daily work from now on.\n"
@@ -177,38 +177,20 @@ index 620a4fca6..c0659315f 100755
 +			# .not_logged_in_yet is NOT deleted here - moved to end of script
 +			# to ensure all subsequent configuration (timezone, SSH, desktop)
 +			# completes before marking firstlogin as done
-+			# Validate sudoers before modifying (detect power-loss corruption)
-+			if ! grep -q '^root\s\+ALL' /etc/sudoers 2>/dev/null; then
-+				# sudoers corrupted (power-loss), restore from dpkg default
-+				local _f="/etc/sudoers"
-+				# Note: quoted heredoc tag ('SUEOF') disables shell variable expansion;
-+				# all content is literal — do not add $VAR references inside without unquoting.
-+				cat > "${_f}.tmp" << 'SUEOF'
-+Defaults	env_reset
-+Defaults	mail_badpass
-+Defaults	secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-+
-+root	ALL=(ALL:ALL) ALL
-+%sudo	ALL=(ALL:ALL) ALL
-+
-+@includedir /etc/sudoers.d
-+SUEOF
-+				atomic_write "${_f}.tmp" "${_f}" 440
-+			fi
  			# set up profile sync daemon on desktop systems
  			if command -v psd > /dev/null 2>&1; then
 -				echo -e "${RealUserName} ALL=(ALL) NOPASSWD: /usr/bin/psd-overlay-helper" >> /etc/sudoers
-+				# Add psd-overlay-helper to sudoers (atomic write, idempotent)
-+				if ! grep -q "psd-overlay-helper" /etc/sudoers 2>/dev/null; then
-+					local _f="/etc/sudoers"
-+					cp -p "${_f}" "${_f}.tmp"
-+					echo "${RealUserName} ALL=(ALL) NOPASSWD: /usr/bin/psd-overlay-helper" >> "${_f}.tmp"
-+					atomic_write "${_f}.tmp" "${_f}"
-+				fi
++				# Grant psd-overlay-helper NOPASSWD via a sudoers drop-in (atomic write).
++				# Using /etc/sudoers.d/ avoids touching /etc/sudoers directly: power-loss
++				# recovery is simply "no drop-in" → re-run recreates it, and there is no
++				# need to restore or validate any dist version of /etc/sudoers.
++				local _f="/etc/sudoers.d/armbian-firstlogin-psd"
++				echo "${RealUserName} ALL=(ALL) NOPASSWD: /usr/bin/psd-overlay-helper" > "${_f}.tmp"
++				atomic_write "${_f}.tmp" "${_f}" 440
  				touch /home/"${RealUserName}"/.activate_psd
  				chown "$RealUserName":"$RealUserName" /home/"${RealUserName}"/.activate_psd
  			fi
-@@ -635,7 +690,7 @@ add_user() {
+@@ -635,7 +672,7 @@ add_user() {
  			echo -e "Rejected - \e[0;31mpasswords do not match.\x1B[0m Try again [${REPEATS}]."
  			REPEATS=$((REPEATS - 1))
  		fi
@@ -217,7 +199,7 @@ index 620a4fca6..c0659315f 100755
  	done
  
  }
-@@ -665,7 +720,7 @@ set_user_icon() {
+@@ -665,7 +702,7 @@ set_user_icon() {
  }
  
  
@@ -226,7 +208,7 @@ index 620a4fca6..c0659315f 100755
  
  	. /root/.not_logged_in_yet
  
-@@ -676,9 +731,11 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
+@@ -676,9 +713,11 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
  
  	do_firstrun_automated_network_configuration
  
@@ -239,7 +221,7 @@ index 620a4fca6..c0659315f 100755
  	systemctl daemon-reload
  
  	declare desktop_dm="none"
-@@ -864,11 +921,15 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
+@@ -864,11 +903,15 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
  
  	trap check_abort INT
  
@@ -257,7 +239,7 @@ index 620a4fca6..c0659315f 100755
  	trap - INT TERM EXIT
  
  	# ask user to select automated locales or not
-@@ -880,8 +941,16 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
+@@ -880,8 +923,16 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
  		printf "\nYou selected \e[0;91mZSH\x1B[0m as your default shell. If you want to use it right away, please logout and login! \n\n"
  	fi
  
@@ -276,7 +258,7 @@ index 620a4fca6..c0659315f 100755
  	# restart sshd daemon
  	systemctl restart ssh.service
  
-@@ -1044,3 +1113,8 @@ fi
+@@ -1044,3 +1095,8 @@ fi
  if [[ -f /root/provisioning.sh ]]; then
  	. /root/provisioning.sh
  fi

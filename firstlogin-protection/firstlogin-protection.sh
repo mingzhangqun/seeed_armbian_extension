@@ -39,11 +39,12 @@ function post_family_tweaks__seeed_firstrun_atomic_write() {
 #  1. Source armbian-common for shared atomic_write()
 #  2. Move .not_logged_in_yet deletion to end of script for re-run safety
 #  3. Atomic writes (tmp→sync→mv) for sshd_config, locale.gen, /etc/default/locale,
-#     netplan configs, sudoers, useradd, adduser.conf
-#  4. Idempotent locale exports and sudoers append
+#     netplan configs, sudoers.d drop-in, useradd, adduser.conf
+#  4. Idempotent locale exports
 #  5. Prevent infinite loop when user already exists in automated mode
 #  6. Skip adduser when user already exists (power-loss re-run)
-#  7. Sudoers corruption repair, add_user guard
+#  7. psd-overlay-helper NOPASSWD via /etc/sudoers.d drop-in (no /etc/sudoers edits,
+#     power-loss safe, follows current RealUserName)
 function post_family_tweaks__seeed_firstlogin_install() {
 	local patch_dir
 	patch_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
