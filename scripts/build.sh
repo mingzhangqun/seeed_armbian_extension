@@ -29,7 +29,7 @@ RK_AUTO_DECRYP="no"
 RK_SECURE_UBOOT_ENABLE="no"
 RK_OPTEE_BOOT_ENABLE="no"
 
-RK_COMPILE_USBPLUG="no"
+RK_COMPILE_USBPLUG="yes"
 
 CRYPTROOT_PASSPHRASE="${CRYPTROOT_PASSPHRASE:-}"
 
@@ -55,7 +55,7 @@ Options:
   --kernel                    Build kernel only (skip u-boot, rootfs, image)
   --uboot                     Build u-boot only (skip kernel, rootfs, image)
   --minimal                   Build minimal system (no desktop)
-  --usbplug                   Compile usbplug from source (Maskrom recovery for new SPI flash)
+  --no-usbplug                Skip usbplug recompile (use rkbin blob; old SPI flash only)
 
   Build config:
   -b, --board BOARD           Board name (default: recomputer-rk3576-devkit)
@@ -167,10 +167,8 @@ while [[ $# -gt 0 ]]; do
             BUILD_DESKTOP="no"
             shift
             ;;
-        --usbplug)
-            RK_COMPILE_USBPLUG="yes"
-            BUILD_MINIMAL="yes"
-            BUILD_DESKTOP="no"
+        --no-usbplug)
+            RK_COMPILE_USBPLUG="no"
             shift
             ;;
         -b|--board)
@@ -264,6 +262,17 @@ if [[ "$CLEAR_ROOTFS_CACHE" == "yes" ]]; then
     echo "Rootfs cache cleared."
 fi
 
+# RK_COMPILE_USBPLUG requires uboot_custom_postprocess to actually run, but
+# U-Boot is an Armbian artifact: cache hit skips postprocess entirely, so
+# usbplug/spi_nor.img would not be regenerated. Force U-Boot rebuild by
+# clearing the board's U-Boot deb cache unless --no-usbplug is given.
+if [[ "$RK_COMPILE_USBPLUG" == "yes" ]]; then
+    echo "Clearing U-Boot artifact cache for $BOARD (RK_COMPILE_USBPLUG requires postprocess)..."
+    rm -f output/debs/linux-u-boot-${BOARD}-*.deb
+    rm -f output/packages-hashed/u-boot-${BOARD}-*.tar 2>/dev/null
+    echo "U-Boot cache cleared."
+fi
+
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
 [[ -f compile.sh ]] || die "compile.sh not found in $SCRIPT_DIR"
@@ -293,6 +302,8 @@ if [[ "$OTA_ENABLE" == "yes" || "$CRYPTROOT_ENABLE" == "yes" ]]; then
 fi
 if [[ "$RK_COMPILE_USBPLUG" == "yes" ]]; then
     echo " USBPLUG        : compiled from source (Maskrom recovery)"
+else
+    echo " USBPLUG        : rkbin blob (--no-usbplug)"
 fi
 echo "==========================================="
 
