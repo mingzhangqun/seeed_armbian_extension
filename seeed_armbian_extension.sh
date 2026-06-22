@@ -36,3 +36,11 @@ if [[ "yes" == "yes" ]]; then
 	display_alert "Firstlogin protection" "Enable firstlogin power-loss protection" "info"
 	enable_extension "seeed_armbian_extension/firstlogin-protection/firstlogin-protection"
 fi
+
+# RK3576/RK3588 U-Boot SPL loader hooks: boot_merger + optional usbplug recompile
+# for Maskrom recovery on new SPI flash boards. Hook functions are inert for SoCs
+# they don't handle (they fall back to upstream mkimage behavior).
+if [[ "yes" == "yes" ]]; then
+	display_alert "RK U-Boot postprocess" "Enable rk-uboot-postprocess hooks" "info"
+	enable_extension "seeed_armbian_extension/rk-uboot-postprocess/rk-uboot-postprocess"
+fi
