@@ -306,15 +306,26 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
-  # ──────────────────────────────────────────────────
-  # Optionally trigger kernel build after deploy
-  # ──────────────────────────────────────────────────
-  kernel:
-    needs: deploy-pages
-    if: ${{ inputs.build_kernel == true }}
-    uses: ./.github/workflows/kernel-build-publish.yml
-    with:
-      board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
-      build_uboot: true
-      armbian_ref: ${{ inputs.armbian_ref || 'main' }}
-    secrets: inherit
+      - name: Trigger kernel build
+        # Chain via `gh workflow run` instead of a reusable workflow_call job
+        # — the latter causes startup_failure on this repo for a reason that
+        # doesn't reproduce elsewhere. The kernel workflow's dispatch inputs
+        # are build_rk3576/build_rk3588/build_uboot booleans; we map
+        # kernel_board to the matching flag.
+        if: ${{ inputs.build_kernel == true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KERNEL_BOARD: ${{ inputs.kernel_board }}
+          ARMBIAN_REF: ${{ inputs.armbian_ref || 'main' }}
+        run: |
+          set -eu
+          args=(--repo "${REPO}" --ref main)
+          case "${KERNEL_BOARD}" in
+            recomputer-rk3576-devkit) args+=(-f build_rk3576=true  -f build_rk3588=false) ;;
+            recomputer-rk3588-devkit) args+=(-f build_rk3576=false -f build_rk3588=true)  ;;
+            *) echo "::error::Unknown kernel_board '${KERNEL_BOARD}'"; exit 1 ;;
+          esac
+          args+=(-f build_uboot=true -f "armbian_ref=${ARMBIAN_REF}")
+          gh workflow run kernel-build-publish.yml "${args[@]}"
+          echo "Kernel workflow triggered for ${KERNEL_BOARD}."
