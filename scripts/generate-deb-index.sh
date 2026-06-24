@@ -1,0 +1,238 @@
+#!/bin/bash
+#
+# generate-deb-index.sh — 生成按类别分组的 deb 包索引页面 (HTML)
+#
+# 用法: ./scripts/generate-deb-index.sh <debs-dir> <output-html>
+#
+# 环境变量:
+#   REPO_URL              — 仓库根 URL (如 https://mingzhangqun.github.io/seeed_armbian_extension)
+#   GITHUB_REPOSITORY     — GitHub Actions 自动提供 (owner/repo)
+#   GITHUB_RUN_ID         — 用于页面底部链接到本次构建
+#
+
+set -euo pipefail
+
+DEBS_DIR="${1:?Usage: $0 <debs-dir> <output-html>}"
+OUTPUT_HTML="${2:?Usage: $0 <debs-dir> <output-html>}"
+
+if [[ ! -d "$DEBS_DIR" ]]; then
+    echo "ERROR: debs directory '$DEBS_DIR' not found" >&2
+    exit 1
+fi
+
+# ── Resolve repo URL ─────────────────────────────────────────────────────────
+REPO_URL="${REPO_URL:-}"
+if [[ -z "$REPO_URL" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+    OWNER="${GITHUB_REPOSITORY%%/*}"
+    REPO_NAME="${GITHUB_REPOSITORY#*/}"
+    REPO_URL="https://${OWNER}.github.io/${REPO_NAME}"
+fi
+
+# ── Classify a deb by package name ───────────────────────────────────────────
+classify() {
+    local name="$1"
+    case "$name" in
+        linux-image-*|linux-headers-*|linux-dtb-*|linux-source-*|linux-libc-dev-*)
+            echo "Kernel"
+            ;;
+        # Armbian convention: linux-u-boot-${BOARD}_* — no extra dash between
+        # "linux-u-boot" and the board name.
+        linux-u-boot-recomputer-rk3576-devkit*)
+            echo "U-Boot (rk3576)"
+            ;;
+        linux-u-boot-recomputer-rk3588-devkit*)
+            echo "U-Boot (rk3588)"
+            ;;
+        armbian-ota*|recomputer-*ota*)
+            echo "OTA / Recovery"
+            ;;
+        camera-engine-rkaiq*)
+            echo "Camera (rkaiq)"
+            ;;
+        fcs960k-aic-bluez*|hostapd-morse-tools*|morsectrl-tools*|\
+        wpa-supplicant-morse-tools*|morse-fgh100m-dkms*|morse-*)
+            echo "Morse Wi-Fi"
+            ;;
+        realtek-r8125-dkms*)
+            echo "Realtek Ethernet"
+            ;;
+        usbdevice-gadget*|rk35xx-usb-gadget*)
+            echo "USB Gadget"
+            ;;
+        linux-firmware-rk3576*|linux-firmware-rk3588*)
+            echo "Rockchip Firmware"
+            ;;
+        libmali-*|librga-*|rockchip-*|rkaiq*|rknpu*|rknn*|mpp*|rga*)
+            echo "Rockchip SDK"
+            ;;
+        armbian-*|armbian-firmware*)
+            echo "Armbian"
+            ;;
+        *)
+            echo "Other"
+            ;;
+    esac
+}
+
+# ── Category order & display ─────────────────────────────────────────────────
+CATEGORY_ORDER=(
+    "Kernel"
+    "U-Boot (rk3576)"
+    "U-Boot (rk3588)"
+    "Rockchip Firmware"
+    "Camera (rkaiq)"
+    "Morse Wi-Fi"
+    "Realtek Ethernet"
+    "USB Gadget"
+    "OTA / Recovery"
+    "Rockchip SDK"
+    "Armbian"
+    "Other"
+)
+
+# ── Collect debs into per-category lists ─────────────────────────────────────
+declare -A entries=()
+total=0
+
+while IFS= read -r deb; do
+    [[ -z "$deb" ]] && continue
+    filename=$(basename "$deb")
+    # Strip _<version>_<arch>.deb to get package name
+    pkgname=$(printf '%s' "$filename" | sed -E 's/_[0-9].*_(arm64|armhf|all|amd64)\.deb$//')
+    category=$(classify "$pkgname")
+
+    # Extract metadata (Package, Version, Architecture, Description, Installed-Size)
+    metadata=$(dpkg-deb -f "$deb")
+    version=$(printf '%s' "$metadata" | awk '/^Version:/{sub(/^Version: /,""); print; exit}')
+    arch=$(printf '%s' "$metadata" | awk '/^Architecture:/{sub(/^Architecture: /,""); print; exit}')
+    description=$(printf '%s' "$metadata" | awk '/^Description:/{sub(/^Description: /,""); print; exit}')
+    inst_size=$(printf '%s' "$metadata" | awk '/^Installed-Size:/{print $2; exit}')
+    file_size=$(stat -c%s "$deb")
+
+    # Human-readable sizes
+    file_size_h=$(numfmt --to=iec --suffix=B "$file_size" 2>/dev/null || printf '%s bytes' "$file_size")
+    inst_size_h=""
+    if [[ -n "$inst_size" ]]; then
+        inst_size_h=$(numfmt --to=iec --suffix=B "$((inst_size * 1024))" 2>/dev/null || printf '%s KB' "$inst_size")
+    fi
+
+    entries[$category]+="${filename}"$'\t'"${pkgname}"$'\t'"${version}"$'\t'"${arch}"$'\t'"${description}"$'\t'"${file_size_h}"$'\t'"${inst_size_h}"$'\n'
+    total=$((total + 1))
+done < <(find "$DEBS_DIR" -name '*.deb' -type f | sort)
+
+# ── Compute build timestamp ──────────────────────────────────────────────────
+BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+# ── Generate HTML ────────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$OUTPUT_HTML")"
+
+{
+    printf '<!DOCTYPE html>\n'
+    printf '<html lang="en">\n<head>\n'
+    printf '<meta charset="UTF-8">\n'
+    printf '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+    printf '<title>Seeed reComputer APT Repository</title>\n'
+    printf '<style>\n'
+    cat <<'EOF'
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       max-width: 1200px; margin: 0 auto; padding: 20px; color: #24292e; line-height: 1.5; }
+h1 { color: #1f2328; border-bottom: 2px solid #0969da; padding-bottom: 10px; }
+h2 { color: #1f2328; margin-top: 36px; padding-bottom: 6px; border-bottom: 1px solid #d0d7de; }
+h2 .count { color: #656d76; font-weight: normal; font-size: 0.85em; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0 24px; font-size: 14px; }
+th, td { border: 1px solid #d0d7de; padding: 6px 10px; text-align: left; vertical-align: top; }
+th { background-color: #f6f8fa; font-weight: 600; }
+tr:nth-child(even) { background-color: #f9fafb; }
+td.pkg code { background: #ddf4ff; color: #0969da; padding: 1px 5px; border-radius: 4px;
+              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+td.size, td.arch { white-space: nowrap; color: #656d76; }
+td.desc { color: #656d76; max-width: 400px; }
+code.inline { background: #f6f8fa; padding: 2px 6px; border-radius: 4px;
+              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+pre { background: #f6f8fa; padding: 14px; border-radius: 6px; overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+      border: 1px solid #d0d7de; }
+header.usage { background: #f6f8fa; padding: 16px 20px; border-radius: 8px; border: 1px solid #d0d7de; }
+.summary { display: flex; gap: 24px; margin: 12px 0 24px; flex-wrap: wrap; }
+.summary div { background: #f6f8fa; padding: 10px 16px; border-radius: 6px; border: 1px solid #d0d7de; }
+.summary strong { color: #0969da; font-size: 18px; }
+footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #d0d7de;
+         color: #656d76; font-size: 13px; }
+footer a { color: #0969da; text-decoration: none; }
+EOF
+    printf '</style>\n</head>\n<body>\n'
+    printf '<h1>Seeed reComputer APT Repository</h1>\n'
+
+    # ── Usage block ──────────────────────────────────────────────────────────
+    if [[ -n "$REPO_URL" ]]; then
+        printf '<header class="usage">\n'
+        printf '<h2 style="margin-top:0;">Usage</h2>\n'
+        printf '<pre>\n'
+        printf '# Import GPG key\n'
+        printf 'curl -fsSL %s/seeed-repo.gpg \\\n' "$REPO_URL"
+        printf '  | sudo gpg --dearmor -o /usr/share/keyrings/seeed-repo.gpg\n\n'
+        printf '# Add repository\n'
+        printf 'echo "deb [signed-by=/usr/share/keyrings/seeed-repo.gpg] %s/ stable main" \\\n' "$REPO_URL"
+        printf '  | sudo tee /etc/apt/sources.list.d/seeed.list\n\n'
+        printf '# Install packages\n'
+        printf 'sudo apt update\n'
+        printf 'sudo apt install &lt;package-name&gt;\n'
+        printf '</pre>\n'
+        printf '</header>\n'
+    fi
+
+    # ── Summary stats ────────────────────────────────────────────────────────
+    printf '<div class="summary">\n'
+    printf '<div>Total packages: <strong>%d</strong></div>\n' "$total"
+    printf '<div>Categories: <strong>%d</strong></div>\n' \
+        "$(for c in "${CATEGORY_ORDER[@]}"; do [[ -n "${entries[$c]:-}" ]] && echo "$c"; done | wc -l)"
+    printf '<div>Updated: <strong>%s</strong></div>\n' "$BUILD_DATE"
+    printf '</div>\n'
+
+    # ── Per-category tables ──────────────────────────────────────────────────
+    for category in "${CATEGORY_ORDER[@]}"; do
+        [[ -z "${entries[$category]:-}" ]] && continue
+
+        count=$(printf '%s' "${entries[$category]}" | grep -c . || true)
+        printf '<h2>%s <span class="count">(%d)</span></h2>\n' "$category" "$count"
+        printf '<table>\n'
+        printf '<tr><th>Package</th><th>Version</th><th>Arch</th><th>File</th><th>Installed</th><th>Description</th></tr>\n'
+
+        while IFS=$'\t' read -r filename pkgname version arch description file_size_h inst_size_h; do
+            [[ -z "$filename" ]] && continue
+            printf '<tr>'
+            printf '<td class="pkg"><code>%s</code></td>' "$pkgname"
+            printf '<td>%s</td>' "$version"
+            printf '<td class="arch">%s</td>' "$arch"
+            printf '<td class="size">%s</td>' "$file_size_h"
+            printf '<td class="size">%s</td>' "${inst_size_h:-—}"
+            printf '<td class="desc">%s</td>' "$description"
+            printf '</tr>\n'
+        done <<< "${entries[$category]}"
+
+        printf '</table>\n'
+    done
+
+    # ── Footer ───────────────────────────────────────────────────────────────
+    printf '<footer>\n'
+    printf 'Generated by <code class="inline">scripts/generate-deb-index.sh</code> '
+    printf 'from seeed_armbian_extension CI.<br>\n'
+    if [[ -n "${GITHUB_RUN_ID:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+        printf 'Build: <a href="https://github.com/%s/actions/runs/%s">%s</a> ' \
+            "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ID"
+        printf 'at %s\n' "$BUILD_DATE"
+    else
+        printf 'Generated at %s\n' "$BUILD_DATE"
+    fi
+    printf '</footer>\n'
+    printf '</body>\n</html>\n'
+} > "$OUTPUT_HTML"
+
+echo "Generated: $OUTPUT_HTML"
+echo "  Total packages: $total"
+echo "  Categories:"
+for category in "${CATEGORY_ORDER[@]}"; do
+    [[ -z "${entries[$category]:-}" ]] && continue
+    count=$(printf '%s' "${entries[$category]}" | grep -c . || true)
+    printf '    %-25s %d\n' "$category:" "$count"
+done

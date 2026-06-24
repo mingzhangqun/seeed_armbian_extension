@@ -3,12 +3,21 @@ name: Build and Publish Kernel
 on:
   workflow_dispatch:
     inputs:
-      board:
-        description: 'Board name'
-        required: true
-        type: choice
-        options:
-          - recomputer-rk3576-devkit
+      build_rk3576:
+        description: 'Build kernel + U-Boot for recomputer-rk3576-devkit'
+        required: false
+        type: boolean
+        default: true
+      build_rk3588:
+        description: 'Build kernel + U-Boot for recomputer-rk3588-devkit'
+        required: false
+        type: boolean
+        default: false
+      build_uboot:
+        description: 'Build U-Boot alongside the kernel for each selected board'
+        required: false
+        type: boolean
+        default: true
       armbian_ref:
         description: 'Seeed-Studio/armbian-build ref'
         required: false
@@ -16,9 +25,16 @@ on:
 
   workflow_call:
     inputs:
+      # Single-board shortcut for callers (e.g. build-and-publish.yml).
+      # When non-empty, it overrides build_rk3576/build_rk3588.
       board:
-        required: true
+        required: false
         type: string
+        default: ''
+      build_uboot:
+        required: false
+        type: boolean
+        default: true
       armbian_ref:
         required: false
         type: string
@@ -30,32 +46,105 @@ on:
         required: true
 
 # ──────────────────────────────────────────────────
-# Kernel build via Armbian framework
-# ./compile.sh kernel BOARD=xxx
-# Output: output/debs/*.deb
+# Kernel + U-Boot build via scripts/build.sh (wraps
+# armbian-build's compile.sh, sets ENABLE_SEEED_RK_EXTENSION,
+# RK_COMPILE_USBPLUG, cache invalidation, etc.)
+# Output: armbian-build/output/debs/*.deb
 # ──────────────────────────────────────────────────
 
 jobs:
-  build-kernel:
-    runs-on: ubuntu-24.04
+  # ──────────────────────────────────────────────────
+  # Build a JSON matrix of boards from the input flags.
+  # ──────────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      build_uboot: ${{ steps.gen.outputs.build_uboot }}
+      armbian_ref: ${{ steps.gen.outputs.armbian_ref }}
     steps:
-      - name: Determine board
-        id: params
+      - name: Generate matrix
+        id: gen
         env:
           INPUT_BOARD: ${{ inputs.board }}
-          INPUT_ARMBIAN_REF: ${{ inputs.armbian_ref || 'main' }}
+          INPUT_RK3576: ${{ inputs.build_rk3576 }}
+          INPUT_RK3588: ${{ inputs.build_rk3588 }}
+          INPUT_UBOOT: ${{ inputs.build_uboot }}
+          INPUT_REF: ${{ inputs.armbian_ref }}
         run: |
-          echo "board=${INPUT_BOARD}" >> "$GITHUB_OUTPUT"
-          echo "armbian_ref=${INPUT_ARMBIAN_REF}" >> "$GITHUB_OUTPUT"
-          echo "Building: BOARD=${INPUT_BOARD} ARMBIAN_REF=${INPUT_ARMBIAN_REF}"
+          set -eu
+          boards=()
+          if [[ -n "${INPUT_BOARD}" ]]; then
+            # workflow_call single-board shortcut
+            boards+=("${INPUT_BOARD}")
+          else
+            [[ "${INPUT_RK3576}" == 'true' ]] && boards+=('recomputer-rk3576-devkit')
+            [[ "${INPUT_RK3588}" == 'true' ]] && boards+=('recomputer-rk3588-devkit')
+          fi
+          if [ ${#boards[@]} -eq 0 ]; then
+            echo "::error::No boards selected (enable build_rk3576 or build_rk3588)."
+            exit 1
+          fi
+          # Reject anything that isn't a valid board slug — guards against
+          # shell injection when the value is later interpolated into run:.
+          for b in "${boards[@]}"; do
+            if [[ ! "$b" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+              echo "::error::Invalid board name: '$b'"
+              exit 1
+            fi
+          done
+          # Emit JSON array of {board: "..."} objects for the matrix
+          matrix=$(printf '%s\n' "${boards[@]}" | jq -R '{board: .}' | jq -s '.')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "build_uboot=${INPUT_UBOOT:-true}" >> "$GITHUB_OUTPUT"
+          echo "armbian_ref=${INPUT_REF:-main}" >> "$GITHUB_OUTPUT"
+          echo "Selected boards: ${boards[*]}"
+          echo "Build U-Boot: ${INPUT_UBOOT:-true}"
+
+  # ──────────────────────────────────────────────────
+  # Per-board matrix build: kernel + (optional) U-Boot
+  # ──────────────────────────────────────────────────
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        value: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout (for scripts/build.sh and extension)
+        uses: actions/checkout@v4
+
+      - name: Resolve board
+        id: board
+        env:
+          MATRIX_BOARD: ${{ matrix.value.board }}
+        run: |
+          echo "name=${MATRIX_BOARD}" >> "$GITHUB_OUTPUT"
+          echo "Resolved board: ${MATRIX_BOARD}"
 
       - name: Checkout armbian-build
         uses: actions/checkout@v4
         with:
           repository: Seeed-Studio/armbian-build
-          ref: ${{ steps.params.outputs.armbian_ref }}
+          ref: ${{ needs.prepare.outputs.armbian_ref }}
           path: armbian-build
           fetch-depth: 1
+
+      - name: Link extension and stage build.sh
+        # scripts/build.sh expects to sit next to compile.sh (it does
+        # `cd "$SCRIPT_DIR"; [[ -f compile.sh ]]`). Stage it at
+        # armbian-build/build.sh so SCRIPT_DIR resolves to armbian-build.
+        # Also symlink this repo into userpatches/extensions/ so the
+        # ENABLE_SEEED_RK_EXTENSION flag in build.sh actually finds it.
+        run: |
+          EXT_DIR="$PWD"
+          mkdir -p armbian-build/userpatches/extensions
+          ln -sfn "$EXT_DIR" armbian-build/userpatches/extensions/seeed_armbian_extension
+          cp scripts/build.sh armbian-build/build.sh
+          chmod +x armbian-build/build.sh
+          echo "Staged build.sh -> armbian-build/build.sh"
+          echo "Linked extension -> armbian-build/userpatches/extensions/seeed_armbian_extension"
 
       - name: Install build dependencies
         run: |
@@ -67,35 +156,41 @@ jobs:
             cpio rsync curl wget git \
             dwarves
 
-      - name: Compile kernel
+      - name: Compile kernel (scripts/build.sh --kernel)
         working-directory: armbian-build
         env:
-          BOARD: ${{ steps.params.outputs.board }}
+          BOARD: ${{ steps.board.outputs.name }}
         run: |
-          ./compile.sh kernel \
-            BOARD="${BOARD}" \
-            BRANCH=vendor \
-            RELEASE=bookworm \
-            KERNEL_CONFIGURE=no
+          ./build.sh --kernel -b "${BOARD}"
 
-      - name: List kernel debs
+      - name: Compile U-Boot (scripts/build.sh --uboot)
+        if: ${{ fromJson(needs.prepare.outputs.build_uboot) }}
+        working-directory: armbian-build
+        env:
+          BOARD: ${{ steps.board.outputs.name }}
         run: |
-          echo "=== Built kernel packages ==="
+          ./build.sh --uboot -b "${BOARD}"
+
+      - name: List built debs
+        env:
+          BOARD: ${{ steps.board.outputs.name }}
+        run: |
+          echo "=== Built packages for ${BOARD} ==="
           find armbian-build/output/debs -name '*.deb' -exec ls -lh {} \;
 
-      - name: Upload kernel debs
+      - name: Upload debs
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-debs
+          name: debs-${{ steps.board.outputs.name }}
           path: armbian-build/output/debs/**/*.deb
 
   # ──────────────────────────────────────────────────
-  # Incremental publish: only replaces kernel debs
-  # Downloads cached userspace debs from Release, adds
-  # new kernel debs, re-publishes the entire apt repo.
+  # Incremental publish: replaces kernel + U-Boot debs,
+  # downloads cached userspace debs from Release, then
+  # regenerates the entire apt repo + an index HTML page.
   # ──────────────────────────────────────────────────
   publish-kernel:
-    needs: build-kernel
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -106,20 +201,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download kernel debs
+      - name: Download built debs
         uses: actions/download-artifact@v4
         with:
-          name: kernel-debs
-          path: /tmp/kernel-debs
+          path: /tmp/built-debs
+          pattern: debs-*
           merge-multiple: true
 
       - name: Download cached userspace debs (required)
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           mkdir -p /tmp/cache /tmp/userspace
           if ! gh release download userspace-debs-cache \
-              --repo "${{ github.repository }}" \
+              --repo "${REPO}" \
               --dir /tmp/cache \
               --clobber 2>/dev/null; then
             echo "::error::userspace-debs-cache Release not found. Run the main build workflow first to create it."
@@ -131,18 +227,19 @@ jobs:
             echo "Restored $(find /tmp/userspace -name '*.deb' | wc -l) userspace debs"
           fi
 
-      - name: Remove old kernel debs from cache
+      - name: Remove old kernel + U-Boot debs from cache
         run: |
           find /tmp/userspace -type f \( \
             -name 'linux-image-*' \
             -o -name 'linux-headers-*' \
             -o -name 'linux-dtb-*' \
             -o -name 'linux-source-*' \
+            -o -name 'linux-u-boot-*' \
           \) -print -delete
 
-      - name: Add new kernel debs
+      - name: Add new kernel + U-Boot debs
         run: |
-          cp -v /tmp/kernel-debs/*.deb /tmp/userspace/
+          cp -v /tmp/built-debs/*.deb /tmp/userspace/
           echo "=== Final debs ==="
           find /tmp/userspace -name '*.deb' | sort
 
@@ -152,35 +249,42 @@ jobs:
           sudo apt-get install -y aptly gnupg2
 
       - name: Import GPG key
+        env:
+          GPG_KEY_B64: ${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          echo "${GPG_KEY_B64}" | base64 -d | gpg --batch --import
 
       - name: Publish apt repository
+        env:
+          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
         run: |
           chmod +x scripts/*.sh
           scripts/publish-aptly.sh /tmp/userspace
-        env:
-          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
+
+      - name: Generate deb index page
+        run: |
+          scripts/generate-deb-index.sh /tmp/userspace public/index.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: public
 
-      - name: Update kernel debs cache
+      - name: Update kernel + U-Boot debs cache
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           TMPDIR=$(mktemp -d)
-          cp /tmp/kernel-debs/*.deb "${TMPDIR}/"
+          cp /tmp/built-debs/*.deb "${TMPDIR}/"
           cd "${TMPDIR}"
           tar -cf kernel-debs.tar.xz -I 'xz -9' *.deb
           gh release create kernel-debs-cache kernel-debs.tar.xz \
-            --repo "${{ github.repository }}" \
-            --title "Kernel debs cache" \
-            --notes "Latest kernel debs (auto-updated by CI)" \
+            --repo "${REPO}" \
+            --title "Kernel + U-Boot debs cache" \
+            --notes "Latest kernel + U-Boot debs (auto-updated by CI)" \
           || gh release upload kernel-debs-cache kernel-debs.tar.xz \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             --clobber
 
   # ──────────────────────────────────────────────────

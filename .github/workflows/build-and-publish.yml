@@ -26,6 +26,7 @@ on:
         type: choice
         options:
           - recomputer-rk3576-devkit
+          - recomputer-rk3588-devkit
 
   push:
     branches: [deb_source]
@@ -162,11 +163,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SDK_RELEASE_TAG: ${{ inputs.sdk_debs_release || 'rockchip-sdk-debs' }}
+          REPO: ${{ github.repository }}
         run: |
           echo "=== Downloading SDK debs from Release: ${SDK_RELEASE_TAG} ==="
           TMPDIR=$(mktemp -d)
           gh release download "${SDK_RELEASE_TAG}" \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             --dir "${TMPDIR}" \
             --pattern '*arm64*.tar.xz' \
             --clobber || { echo "WARNING: Release ${SDK_RELEASE_TAG} not found, skipping SDK debs"; exit 0; }
@@ -216,10 +218,11 @@ jobs:
       - name: Download cached kernel debs
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           mkdir -p /tmp/kernel-cache
           gh release download kernel-debs-cache \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             --dir /tmp/kernel-cache \
             --clobber 2>/dev/null \
             || { echo "No kernel cache found, skipping kernel debs"; exit 0; }
@@ -243,15 +246,21 @@ jobs:
           sudo apt-get install -y aptly gnupg2
 
       - name: Import GPG key
+        env:
+          GPG_KEY_B64: ${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          echo "${GPG_KEY_B64}" | base64 -d | gpg --batch --import
 
       - name: Publish apt repository
+        env:
+          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
         run: |
           chmod +x scripts/*.sh
           scripts/publish-aptly.sh /tmp/debs
-        env:
-          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
+
+      - name: Generate deb index page
+        run: |
+          scripts/generate-deb-index.sh /tmp/debs public/index.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
@@ -261,21 +270,22 @@ jobs:
       - name: Cache userspace debs for kernel workflow
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           mkdir -p /tmp/cache-out
           # Exclude kernel debs from userspace cache
-          find /tmp/debs -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
+          find /tmp/debs -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' ! -name 'linux-u-boot-*' \
             -exec cp {} /tmp/cache-out/ \;
           cd /tmp/cache-out && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then
             tar -cf userspace-debs.tar.xz -I 'xz -9' "${deb_files[@]}"
           fi
           cd /tmp/cache-out
           gh release create userspace-debs-cache userspace-debs.tar.xz \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             --title "Userspace debs cache" \
             --notes "Latest userspace debs (auto-updated by CI)" \
           || gh release upload userspace-debs-cache userspace-debs.tar.xz \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             --clobber
 
   # ──────────────────────────────────────────────────
@@ -305,5 +315,6 @@ jobs:
     uses: ./.github/workflows/kernel-build-publish.yml
     with:
       board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
+      build_uboot: true
       armbian_ref: ${{ inputs.armbian_ref || 'main' }}
     secrets: inherit
