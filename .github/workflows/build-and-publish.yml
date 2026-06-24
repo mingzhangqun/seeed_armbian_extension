@@ -297,6 +297,7 @@ jobs:
     permissions:
       pages: write
       id-token: write
+      actions: write  # needed by the "Trigger kernel build" step (gh workflow run)
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
