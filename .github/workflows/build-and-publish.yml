@@ -306,15 +306,4 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
-  # ──────────────────────────────────────────────────
-  # Optionally trigger kernel build after deploy
-  # ──────────────────────────────────────────────────
-  kernel:
-    needs: deploy-pages
-    if: ${{ inputs.build_kernel == true }}
-    uses: ./.github/workflows/kernel-build-publish.yml
-    with:
-      board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
-      build_uboot: true
-      armbian_ref: ${{ inputs.armbian_ref || 'main' }}
-    secrets: inherit
+  # kernel job temporarily removed for diagnosis
