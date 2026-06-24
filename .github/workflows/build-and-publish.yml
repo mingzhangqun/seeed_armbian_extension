@@ -313,7 +313,7 @@ jobs:
     needs: deploy-pages
     if: false  # DIAG: always skip
     uses: ./.github/workflows/kernel-build-publish.yml
-    with:
+
       board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
       build_uboot: true
       armbian_ref: ${{ inputs.armbian_ref || 'main' }}
