@@ -20,13 +20,16 @@ on:
         description: 'armbian-build ref (passed to kernel workflow if build_kernel=true)'
         required: false
         default: 'main'
-      kernel_board:
-        description: 'Board for kernel build (if build_kernel is true)'
+      kernel_rk3576:
+        description: 'Build kernel for recomputer-rk3576-devkit (if build_kernel is true)'
         required: false
-        type: choice
-        options:
-          - recomputer-rk3576-devkit
-          - recomputer-rk3588-devkit
+        type: boolean
+        default: true
+      kernel_rk3588:
+        description: 'Build kernel for recomputer-rk3588-devkit (if build_kernel is true)'
+        required: false
+        type: boolean
+        default: true
 
   push:
     branches: [deb_source]
@@ -311,22 +314,23 @@ jobs:
         # Chain via `gh workflow run` instead of a reusable workflow_call job
         # — the latter causes startup_failure on this repo for a reason that
         # doesn't reproduce elsewhere. The kernel workflow's dispatch inputs
-        # are build_rk3576/build_rk3588/build_uboot booleans; we map
-        # kernel_board to the matching flag.
+        # are build_rk3576/build_rk3588 booleans; map our checkboxes to them.
         if: ${{ inputs.build_kernel == true }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          KERNEL_BOARD: ${{ inputs.kernel_board }}
+          KERNEL_RK3576: ${{ inputs.kernel_rk3576 }}
+          KERNEL_RK3588: ${{ inputs.kernel_rk3588 }}
           ARMBIAN_REF: ${{ inputs.armbian_ref || 'main' }}
         run: |
           set -eu
           args=(--repo "${REPO}" --ref main)
-          case "${KERNEL_BOARD}" in
-            recomputer-rk3576-devkit) args+=(-f build_rk3576=true  -f build_rk3588=false) ;;
-            recomputer-rk3588-devkit) args+=(-f build_rk3576=false -f build_rk3588=true)  ;;
-            *) echo "::error::Unknown kernel_board '${KERNEL_BOARD}'"; exit 1 ;;
-          esac
+          args+=(-f "build_rk3576=${KERNEL_RK3576:-false}")
+          args+=(-f "build_rk3588=${KERNEL_RK3588:-false}")
           args+=(-f "armbian_ref=${ARMBIAN_REF}")
+          if [[ "${KERNEL_RK3576}" != 'true' && "${KERNEL_RK3588}" != 'true' ]]; then
+            echo "::error::build_kernel=true but no board selected (enable kernel_rk3576 or kernel_rk3588)."
+            exit 1
+          fi
           gh workflow run kernel-build-publish.yml "${args[@]}"
-          echo "Kernel workflow triggered for ${KERNEL_BOARD}."
+          echo "Kernel workflow triggered (rk3576=${KERNEL_RK3576:-false}, rk3588=${KERNEL_RK3588:-false})."
