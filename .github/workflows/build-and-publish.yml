@@ -327,6 +327,6 @@ jobs:
             recomputer-rk3588-devkit) args+=(-f build_rk3576=false -f build_rk3588=true)  ;;
             *) echo "::error::Unknown kernel_board '${KERNEL_BOARD}'"; exit 1 ;;
           esac
-          args+=(-f build_uboot=true -f "armbian_ref=${ARMBIAN_REF}")
+          args+=(-f "armbian_ref=${ARMBIAN_REF}")
           gh workflow run kernel-build-publish.yml "${args[@]}"
           echo "Kernel workflow triggered for ${KERNEL_BOARD}."

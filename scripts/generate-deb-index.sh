@@ -36,12 +36,11 @@ classify() {
             echo "Kernel"
             ;;
         # Armbian convention: linux-u-boot-${BOARD}_* — no extra dash between
-        # "linux-u-boot" and the board name.
-        linux-u-boot-recomputer-rk3576-devkit*)
-            echo "U-Boot (rk3576)"
-            ;;
+        # "linux-u-boot" and the board name. Both boards land in one U-Boot
+        # bucket so the page reads as a single category.
+        linux-u-boot-recomputer-rk3576-devkit*|\
         linux-u-boot-recomputer-rk3588-devkit*)
-            echo "U-Boot (rk3588)"
+            echo "U-Boot"
             ;;
         armbian-ota*|recomputer-*ota*)
             echo "OTA / Recovery"
@@ -77,8 +76,7 @@ classify() {
 # ── Category order & display ─────────────────────────────────────────────────
 CATEGORY_ORDER=(
     "Kernel"
-    "U-Boot (rk3576)"
-    "U-Boot (rk3588)"
+    "U-Boot"
     "Rockchip Firmware"
     "Camera (rkaiq)"
     "Morse Wi-Fi"
