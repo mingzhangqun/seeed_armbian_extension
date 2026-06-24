@@ -39,11 +39,10 @@ on:
         required: false
         type: string
         default: 'main'
-    secrets:
-      ARMBIAN_APT_GPG_PRIVATE_KEY:
-        required: true
-      ARMBIAN_APT_GPG_KEY_ID:
-        required: true
+    # Secrets (ARMBIAN_APT_GPG_PRIVATE_KEY, ARMBIAN_APT_GPG_KEY_ID) are
+    # inherited via `secrets: inherit` in the caller; declaring them
+    # `required: true` here causes startup_failure in the caller when the
+    # repo hasn't set them yet (e.g. a fresh fork).
 
 # ──────────────────────────────────────────────────
 # Kernel + U-Boot build via scripts/build.sh (wraps
