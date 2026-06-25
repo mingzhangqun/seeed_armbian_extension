@@ -1,13 +1,14 @@
 #!/bin/bash
 #
-# generate-deb-index.sh — 生成按类别分组的 deb 包索引页面 (HTML)
+# generate-deb-index.sh — generate an HTML index page of .deb packages,
+# grouped by category.
 #
-# 用法: ./scripts/generate-deb-index.sh <debs-dir> <output-html>
+# Usage: ./scripts/generate-deb-index.sh <debs-dir> <output-html> [sdk-manifest]
 #
-# 环境变量:
-#   REPO_URL              — 仓库根 URL (如 https://mingzhangqun.github.io/seeed_armbian_extension)
-#   GITHUB_REPOSITORY     — GitHub Actions 自动提供 (owner/repo)
-#   GITHUB_RUN_ID         — 用于页面底部链接到本次构建
+# Environment variables:
+#   REPO_URL          — repository root URL (e.g. https://mingzhangqun.github.io/seeed_armbian_extension)
+#   GITHUB_REPOSITORY — provided by GitHub Actions (owner/repo)
+#   GITHUB_RUN_ID     — used for the build link in the page footer
 #
 
 set -euo pipefail
@@ -90,6 +91,18 @@ classify() {
     esac
 }
 
+# ── Escape HTML special characters ───────────────────────────────────────────
+# Deb metadata (descriptions, versions) can contain &, <, >, " — escape before
+# injecting into the page so it renders correctly instead of being parsed as
+# markup. & must be first so we don't double-escape the entities we add.
+escape_html() {
+    # Use sed with \& (literal &) — bash's ${var//pat/repl} treats an
+    # unescaped & in repl as the matched text, which would mangle the
+    # entities. & must be substituted first so the entities we add aren't
+    # re-escaped.
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
 # ── Category order & display ─────────────────────────────────────────────────
 CATEGORY_ORDER=(
     "Kernel"
@@ -112,12 +125,13 @@ total=0
 while IFS= read -r deb; do
     [[ -z "$deb" ]] && continue
     filename=$(basename "$deb")
-    # Strip _<version>_<arch>.deb to get package name
-    pkgname=$(printf '%s' "$filename" | sed -E 's/_[0-9].*_(arm64|armhf|all|amd64)\.deb$//')
-    category=$(classify "$pkgname" "$filename")
-
     # Extract metadata (Package, Version, Architecture, Description, Installed-Size)
     metadata=$(dpkg-deb -f "$deb")
+    # Authoritative package name from the control file — more reliable than
+    # stripping _<version>_<arch>.deb off the filename (which mis-parses when
+    # a package name itself contains _<digit>).
+    pkgname=$(printf '%s' "$metadata" | awk '/^Package:/{sub(/^Package: /,""); print; exit}')
+    category=$(classify "$pkgname" "$filename")
     version=$(printf '%s' "$metadata" | awk '/^Version:/{sub(/^Version: /,""); print; exit}')
     arch=$(printf '%s' "$metadata" | awk '/^Architecture:/{sub(/^Architecture: /,""); print; exit}')
     description=$(printf '%s' "$metadata" | awk '/^Description:/{sub(/^Description: /,""); print; exit}')
@@ -216,12 +230,12 @@ EOF
         while IFS=$'\t' read -r filename pkgname version arch description file_size_h inst_size_h; do
             [[ -z "$filename" ]] && continue
             printf '<tr>'
-            printf '<td class="pkg"><code>%s</code></td>' "$pkgname"
-            printf '<td>%s</td>' "$version"
-            printf '<td class="arch">%s</td>' "$arch"
-            printf '<td class="size">%s</td>' "$file_size_h"
-            printf '<td class="size">%s</td>' "${inst_size_h:-—}"
-            printf '<td class="desc">%s</td>' "$description"
+            printf '<td class="pkg"><code>%s</code></td>' "$(escape_html "$pkgname")"
+            printf '<td>%s</td>' "$(escape_html "$version")"
+            printf '<td class="arch">%s</td>' "$(escape_html "$arch")"
+            printf '<td class="size">%s</td>' "$(escape_html "$file_size_h")"
+            printf '<td class="size">%s</td>' "$(escape_html "${inst_size_h:-—}")"
+            printf '<td class="desc">%s</td>' "$(escape_html "$description")"
             printf '</tr>\n'
         done <<< "${entries[$category]}"
 
