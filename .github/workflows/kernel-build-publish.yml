@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       build_rk3576:
-        description: 'recomputer-rk3576-devkit'
+        description: 'Build kernel recomputer-rk3576-devkit'
         required: false
         type: boolean
         default: true
       build_rk3588:
-        description: 'recomputer-rk3588-devkit'
+        description: 'Build kernel recomputer-rk3588-devkit'
         required: false
         type: boolean
         default: true
