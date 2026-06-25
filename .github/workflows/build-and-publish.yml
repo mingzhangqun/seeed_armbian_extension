@@ -16,10 +16,6 @@ on:
         required: false
         type: boolean
         default: false
-      armbian_ref:
-        description: 'armbian-build ref (passed to kernel workflow if build_kernel=true)'
-        required: false
-        default: 'main'
       kernel_rk3576:
         description: 'Build kernel for recomputer-rk3576-devkit (if build_kernel is true)'
         required: false
@@ -330,13 +326,11 @@ jobs:
           REPO: ${{ github.repository }}
           KERNEL_RK3576: ${{ inputs.kernel_rk3576 }}
           KERNEL_RK3588: ${{ inputs.kernel_rk3588 }}
-          ARMBIAN_REF: ${{ inputs.armbian_ref || 'main' }}
         run: |
           set -eu
           args=(--repo "${REPO}" --ref main)
           args+=(-f "build_rk3576=${KERNEL_RK3576:-false}")
           args+=(-f "build_rk3588=${KERNEL_RK3588:-false}")
-          args+=(-f "armbian_ref=${ARMBIAN_REF}")
           if [[ "${KERNEL_RK3576}" != 'true' && "${KERNEL_RK3588}" != 'true' ]]; then
             echo "::error::build_kernel=true but no board selected (enable kernel_rk3576 or kernel_rk3588)."
             exit 1

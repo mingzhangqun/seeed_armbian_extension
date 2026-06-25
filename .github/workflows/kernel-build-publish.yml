@@ -13,29 +13,6 @@ on:
         required: false
         type: boolean
         default: true
-      armbian_ref:
-        description: 'Seeed-Studio/armbian-build ref'
-        required: false
-        default: 'main'
-
-  workflow_call:
-    inputs:
-      # Single-board shortcut for callers (e.g. build-and-publish.yml).
-      # When non-empty, it overrides build_rk3576/build_rk3588.
-      board:
-        required: false
-        type: string
-        default: ''
-      armbian_ref:
-        required: false
-        type: string
-        default: 'main'
-    # Secrets (ARMBIAN_APT_GPG_PRIVATE_KEY, ARMBIAN_APT_GPG_KEY_ID) are
-    # inherited via `secrets: inherit` in the caller; declaring them
-    # `required: true` here causes startup_failure in the caller when the
-    # repo hasn't set them yet (e.g. a fresh fork).
-    #
-    # U-Boot is always built alongside the kernel — no toggle for it.
 
 # ──────────────────────────────────────────────────
 # Kernel + U-Boot build via scripts/build.sh (wraps
@@ -57,20 +34,13 @@ jobs:
       - name: Generate matrix
         id: gen
         env:
-          INPUT_BOARD: ${{ inputs.board }}
           INPUT_RK3576: ${{ inputs.build_rk3576 }}
           INPUT_RK3588: ${{ inputs.build_rk3588 }}
-          INPUT_REF: ${{ inputs.armbian_ref }}
         run: |
           set -eu
           boards=()
-          if [[ -n "${INPUT_BOARD}" ]]; then
-            # workflow_call single-board shortcut
-            boards+=("${INPUT_BOARD}")
-          else
-            [[ "${INPUT_RK3576}" == 'true' ]] && boards+=('recomputer-rk3576-devkit')
-            [[ "${INPUT_RK3588}" == 'true' ]] && boards+=('recomputer-rk3588-devkit')
-          fi
+          [[ "${INPUT_RK3576}" == 'true' ]] && boards+=('recomputer-rk3576-devkit')
+          [[ "${INPUT_RK3588}" == 'true' ]] && boards+=('recomputer-rk3588-devkit')
           if [ ${#boards[@]} -eq 0 ]; then
             echo "::error::No boards selected (enable build_rk3576 or build_rk3588)."
             exit 1
@@ -93,7 +63,18 @@ jobs:
             echo "${matrix}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          echo "armbian_ref=${INPUT_REF:-main}" >> "$GITHUB_OUTPUT"
+          # armbian-build ref follows the workflow's own ref ("Use workflow
+          # from" in the dispatch UI). Feature branches of this repo don't
+          # exist in Seeed-Studio/armbian-build, so fall back to main.
+          REF_NAME="${GITHUB_REF_NAME}"
+          LSREMOTE=$(git ls-remote "https://github.com/Seeed-Studio/armbian-build.git" "${REF_NAME}" 2>/dev/null || true)
+          if [[ -n "${LSREMOTE}" ]]; then
+            RESOLVED="${REF_NAME}"
+          else
+            RESOLVED="main"
+            echo "::warning::Ref '${REF_NAME}' not found in Seeed-Studio/armbian-build, using 'main'."
+          fi
+          echo "armbian_ref=${RESOLVED}" >> "$GITHUB_OUTPUT"
           echo "Selected boards: ${boards[*]}"
 
   # ──────────────────────────────────────────────────
