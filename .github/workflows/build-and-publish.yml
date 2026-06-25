@@ -183,6 +183,9 @@ jobs:
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
           EXCLUDE_PKGS=$(find /tmp/debs -name '*.deb' -exec basename {} \; | sed 's/_.*//' | sort -u)
           echo "CI-built packages (will exclude from SDK): ${EXCLUDE_PKGS}"
+          # Manifest of SDK-sourced debs — used by generate-deb-index.sh to
+          # classify them as "Rockchip SDK" regardless of package name.
+          : > /tmp/sdk-debs.manifest
           copied=0; skipped=0; seen_pkgs=""
           while IFS= read -r deb; do
             pkg_name=$(basename "${deb}" | sed 's/_.*//')
@@ -194,10 +197,12 @@ jobs:
               skipped=$((skipped + 1))
             else
               cp -vn "${deb}" /tmp/debs/ && copied=$((copied + 1))
+              basename "${deb}" >> /tmp/sdk-debs.manifest
               seen_pkgs="${seen_pkgs}${pkg_name}"$'\n'
             fi
           done < <(find "${TMPDIR}" -name '*.deb')
           echo "  Copied ${copied} SDK debs, skipped ${skipped} conflicting"
+          echo "  Manifest: $(wc -l < /tmp/sdk-debs.manifest) entries in /tmp/sdk-debs.manifest"
 
       - name: Fix cross-distro dependencies
         run: |
@@ -263,7 +268,7 @@ jobs:
 
       - name: Generate deb index page
         run: |
-          scripts/generate-deb-index.sh /tmp/debs public/index.html
+          scripts/generate-deb-index.sh /tmp/debs public/index.html /tmp/sdk-debs.manifest
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
@@ -279,8 +284,12 @@ jobs:
           # Exclude kernel debs from userspace cache
           find /tmp/debs -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' ! -name 'linux-u-boot-*' \
             -exec cp {} /tmp/cache-out/ \;
+          # Include the SDK manifest so kernel workflow can still classify
+          # SDK debs as "Rockchip SDK" on its index page.
+          [ -f /tmp/sdk-debs.manifest ] && cp /tmp/sdk-debs.manifest /tmp/cache-out/
           cd /tmp/cache-out && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then
-            tar -cf userspace-debs.tar.xz -I 'xz -9' "${deb_files[@]}"
+            tar -cf userspace-debs.tar.xz -I 'xz -9' *.deb sdk-debs.manifest 2>/dev/null || \
+              tar -cf userspace-debs.tar.xz -I 'xz -9' *.deb
           fi
           cd /tmp/cache-out
           gh release create userspace-debs-cache userspace-debs.tar.xz \

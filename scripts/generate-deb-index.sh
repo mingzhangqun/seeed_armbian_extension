@@ -12,12 +12,26 @@
 
 set -euo pipefail
 
-DEBS_DIR="${1:?Usage: $0 <debs-dir> <output-html>}"
-OUTPUT_HTML="${2:?Usage: $0 <debs-dir> <output-html>}"
+DEBS_DIR="${1:?Usage: $0 <debs-dir> <output-html> [sdk-manifest]}"
+OUTPUT_HTML="${2:?Usage: $0 <debs-dir> <output-html> [sdk-manifest]}"
+SDK_MANIFEST="${3:-}"
 
 if [[ ! -d "$DEBS_DIR" ]]; then
     echo "ERROR: debs directory '$DEBS_DIR' not found" >&2
     exit 1
+fi
+
+# ── Load SDK manifest into a set (associative array) ─────────────────────────
+# A text file with one filename per line. Debs whose basename appears in this
+# set are classified as "Rockchip SDK" regardless of package name — accurate
+# than pattern-matching on names like gstreamer1.0-*, libwayland-*, etc.
+declare -A sdk_set=()
+if [[ -n "$SDK_MANIFEST" && -f "$SDK_MANIFEST" ]]; then
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        sdk_set["$line"]=1
+    done < "$SDK_MANIFEST"
+    echo "Loaded ${#sdk_set[@]} SDK deb names from manifest"
 fi
 
 # ── Resolve repo URL ─────────────────────────────────────────────────────────
@@ -29,8 +43,14 @@ if [[ -z "$REPO_URL" && -n "${GITHUB_REPOSITORY:-}" ]]; then
 fi
 
 # ── Classify a deb by package name ───────────────────────────────────────────
+# Args: $1 = package name, $2 = filename. Returns category string.
 classify() {
-    local name="$1"
+    local name="$1" filename="$2"
+    # Manifest match wins first — most accurate signal for SDK packages.
+    if [[ -n "${sdk_set[$filename]:-}" ]]; then
+        echo "Rockchip SDK"
+        return
+    fi
     case "$name" in
         linux-image-*|linux-headers-*|linux-dtb-*|linux-source-*|linux-libc-dev-*)
             echo "Kernel"
@@ -45,7 +65,7 @@ classify() {
         armbian-ota*|recomputer-*ota*)
             echo "OTA / Recovery"
             ;;
-        camera-engine-rkaiq*)
+        camera-engine-rkaiq*|camera_engine_rkisp*)
             echo "Camera (rkaiq)"
             ;;
         fcs960k-aic-bluez*|hostapd-morse-tools*|morsectrl-tools*|\
@@ -60,9 +80,6 @@ classify() {
             ;;
         linux-firmware-rk3576*|linux-firmware-rk3588*)
             echo "Rockchip Firmware"
-            ;;
-        libmali-*|librga-*|rockchip-*|rkaiq*|rknpu*|rknn*|mpp*|rga*)
-            echo "Rockchip SDK"
             ;;
         armbian-*|armbian-firmware*)
             echo "Armbian"
@@ -97,7 +114,7 @@ while IFS= read -r deb; do
     filename=$(basename "$deb")
     # Strip _<version>_<arch>.deb to get package name
     pkgname=$(printf '%s' "$filename" | sed -E 's/_[0-9].*_(arm64|armhf|all|amd64)\.deb$//')
-    category=$(classify "$pkgname")
+    category=$(classify "$pkgname" "$filename")
 
     # Extract metadata (Package, Version, Architecture, Description, Installed-Size)
     metadata=$(dpkg-deb -f "$deb")

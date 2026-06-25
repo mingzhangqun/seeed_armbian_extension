@@ -257,7 +257,9 @@ jobs:
 
       - name: Generate deb index page
         run: |
-          scripts/generate-deb-index.sh /tmp/userspace public/index.html
+          # userspace-debs-cache tar includes sdk-debs.manifest (if produced
+          # by build-and-publish.yml) so SDK debs can be classified correctly.
+          scripts/generate-deb-index.sh /tmp/userspace public/index.html /tmp/userspace/sdk-debs.manifest
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
