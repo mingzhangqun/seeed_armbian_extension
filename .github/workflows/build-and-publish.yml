@@ -12,17 +12,17 @@ on:
         required: false
         default: 'rockchip-sdk-debs'
       build_kernel:
-        description: 'Trigger kernel build after publish'
+        description: 'Trigger kernel build'
         required: false
         type: boolean
         default: true
       kernel_rk3576:
-        description: 'Build kernel for recomputer-rk3576-devkit'
+        description: 'recomputer-rk3576-devkit'
         required: false
         type: boolean
         default: true
       kernel_rk3588:
-        description: 'Build kernel for recomputer-rk3588-devkit'
+        description: 'recomputer-rk3588-devkit'
         required: false
         type: boolean
         default: true
