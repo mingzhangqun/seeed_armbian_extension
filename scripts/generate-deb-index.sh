@@ -6,7 +6,7 @@
 # Usage: ./scripts/generate-deb-index.sh <debs-dir> <output-html> [sdk-manifest]
 #
 # Environment variables:
-#   REPO_URL          — repository root URL (e.g. https://mingzhangqun.github.io/seeed_armbian_extension)
+#   REPO_URL          — repository root URL (e.g. https://<owner>.github.io/<repo>, derived from GITHUB_REPOSITORY)
 #   GITHUB_REPOSITORY — provided by GitHub Actions (owner/repo)
 #   GITHUB_RUN_ID     — used for the build link in the page footer
 #
