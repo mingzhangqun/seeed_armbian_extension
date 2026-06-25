@@ -11,11 +11,6 @@ on:
         description: 'Release tag containing SDK deb packages (leave empty to skip)'
         required: false
         default: 'rockchip-sdk-debs'
-      build_kernel:
-        description: 'Trigger kernel build'
-        required: false
-        type: boolean
-        default: true
       kernel_rk3576:
         description: 'recomputer-rk3576-devkit'
         required: false
@@ -320,7 +315,7 @@ jobs:
         # — the latter causes startup_failure on this repo for a reason that
         # doesn't reproduce elsewhere. The kernel workflow's dispatch inputs
         # are build_rk3576/build_rk3588 booleans; map our checkboxes to them.
-        if: ${{ inputs.build_kernel == true }}
+        if: ${{ inputs.kernel_rk3576 == 'true' || inputs.kernel_rk3588 == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -331,9 +326,5 @@ jobs:
           args=(--repo "${REPO}" --ref main)
           args+=(-f "build_rk3576=${KERNEL_RK3576:-false}")
           args+=(-f "build_rk3588=${KERNEL_RK3588:-false}")
-          if [[ "${KERNEL_RK3576}" != 'true' && "${KERNEL_RK3588}" != 'true' ]]; then
-            echo "::error::build_kernel=true but no board selected (enable kernel_rk3576 or kernel_rk3588)."
-            exit 1
-          fi
           gh workflow run kernel-build-publish.yml "${args[@]}"
           echo "Kernel workflow triggered (rk3576=${KERNEL_RK3576:-false}, rk3588=${KERNEL_RK3588:-false})."
