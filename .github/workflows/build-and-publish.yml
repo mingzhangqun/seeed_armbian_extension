@@ -15,14 +15,14 @@ on:
         description: 'Trigger kernel build after publish'
         required: false
         type: boolean
-        default: false
+        default: true
       kernel_rk3576:
-        description: 'Build kernel for recomputer-rk3576-devkit (if build_kernel is true)'
+        description: 'Build kernel for recomputer-rk3576-devkit'
         required: false
         type: boolean
         default: true
       kernel_rk3588:
-        description: 'Build kernel for recomputer-rk3588-devkit (if build_kernel is true)'
+        description: 'Build kernel for recomputer-rk3588-devkit'
         required: false
         type: boolean
         default: true
