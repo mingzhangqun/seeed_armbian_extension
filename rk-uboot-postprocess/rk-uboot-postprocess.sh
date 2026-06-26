@@ -8,7 +8,7 @@
 #     for new SPI flash vendor support (sfc.c unaligned access fix + vendor configs)
 #   - idbloader.img generation via mkimage (RK3588, whose INI lacks CREATE_IDB)
 #   - maskrom spl_loader always saved as spl_loader_maskrom.bin in the U-Boot
-#     source dir, picked up by board_uboot_spi_image_postprocess and shipped in
+#     source dir, picked up by board_uboot_spi_image_after_build and shipped in
 #     the u-boot deb under /usr/lib/linux-u-boot-<branch>-<board>/. Uses the
 #     rkbin-tools usbplug blob by default; RK_COMPILE_USBPLUG=yes swaps in a
 #     usbplug recompiled from patched U-Boot source for new SPI flash vendor
@@ -48,7 +48,7 @@ board_uboot_spl_blobs_postprocess() {
 # _seeed_rk35xx_spl_loader and saved as spl_loader_maskrom.bin in the U-Boot
 # source dir) to target_files so it ships in the u-boot deb under
 # /usr/lib/linux-u-boot-<branch>-<board>/.
-board_uboot_spi_image_postprocess() {
+board_uboot_spi_image_after_build() {
 	if [[ -f spl_loader_maskrom.bin ]]; then
 		target_files+=" spl_loader_maskrom.bin"
 		display_alert "maskrom spl_loader added to u-boot deb" \
@@ -84,7 +84,7 @@ _seeed_rk3576_spl_loader() {
 	rm -f $rkboot_ini
 
 	# Always save spl_loader under a stable name so the
-	# board_uboot_spi_image_postprocess hook can pick it up and ship it in
+	# board_uboot_spi_image_after_build hook can pick it up and ship it in
 	# the u-boot deb. Uses rkbin blob usbplug by default; compiled usbplug
 	# (if RK_COMPILE_USBPLUG=yes) was already substituted into usbplug_path above.
 	cp rk3576_spl_loader_*.bin spl_loader_maskrom.bin 2>/dev/null && {
@@ -158,7 +158,7 @@ RK3588EOF
 		-d "${spl_bin_path}:spl/u-boot-spl.bin" idbloader.img
 
 	# Always save spl_loader under a stable name so the
-	# board_uboot_spi_image_postprocess hook can pick it up and ship it in
+	# board_uboot_spi_image_after_build hook can pick it up and ship it in
 	# the u-boot deb. Uses rkbin blob usbplug by default; compiled usbplug
 	# (if RK_COMPILE_USBPLUG=yes) was already substituted into usbplug_path above.
 	cp rk3588_spl_loader*.bin spl_loader_maskrom.bin 2>/dev/null && {
