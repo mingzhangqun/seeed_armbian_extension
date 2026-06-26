@@ -109,11 +109,21 @@ fi
 echo ""
 echo "=== Done ==="
 echo "APT Repository published successfully!"
-echo "URL: https://seeed-studio.github.io/seeed_armbian_extension/"
+
+# Compute Pages URL from GITHUB_REPOSITORY (works for forks). Falls back to the
+# upstream Seeed-Studio URL when running outside CI.
+if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    OWNER="${GITHUB_REPOSITORY%%/*}"
+    REPO_NAME="${GITHUB_REPOSITORY#*/}"
+    PAGES_URL="https://${OWNER}.github.io/${REPO_NAME}/"
+else
+    PAGES_URL="https://seeed-studio.github.io/seeed_armbian_extension/"
+fi
+echo "URL: ${PAGES_URL}"
 echo ""
 echo "Distribution: stable (all releases)"
 echo ""
 echo "To use:"
-echo "  curl -fsSL https://seeed-studio.github.io/seeed_armbian_extension/seeed-repo.gpg | sudo gpg --dearmor -o /usr/share/keyrings/seeed-repo.gpg"
-echo '  echo "deb [signed-by=/usr/share/keyrings/seeed-repo.gpg] https://seeed-studio.github.io/seeed_armbian_extension/ stable main" | sudo tee /etc/apt/sources.list.d/seeed.list'
+echo "  curl -fsSL ${PAGES_URL}seeed-repo.gpg | sudo gpg --dearmor -o /usr/share/keyrings/seeed-repo.gpg"
+echo '  echo "deb [signed-by=/usr/share/keyrings/seeed-repo.gpg] '"${PAGES_URL}"' stable main" | sudo tee /etc/apt/sources.list.d/seeed.list'
 echo "  sudo apt-get update"

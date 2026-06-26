@@ -4,38 +4,91 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: 'Source branch/tag for package sources'
+        description: 'Package sources branch/tag'
         required: false
         default: 'deb_source'
-      sdk_debs_release:
-        description: 'Release tag containing SDK deb packages (leave empty to skip)'
-        required: false
-        default: 'rockchip-sdk-debs'
-      build_kernel:
-        description: 'Trigger kernel build after publish'
-        required: false
-        type: boolean
-        default: false
-      armbian_ref:
-        description: 'armbian-build ref (passed to kernel workflow if build_kernel=true)'
+      armbian_build_ref:
+        description: 'Seeed-Studio/armbian-build branch/tag'
         required: false
         default: 'main'
-      kernel_board:
-        description: 'Board for kernel build (if build_kernel is true)'
+      build_rk3576:
+        description: 'recomputer-rk3576-devkit'
         required: false
-        type: choice
-        options:
-          - recomputer-rk3576-devkit
+        type: boolean
+        default: true
+      build_rk3588:
+        description: 'recomputer-rk3588-devkit'
+        required: false
+        type: boolean
+        default: true
 
-  push:
-    branches: [deb_source]
+# ──────────────────────────────────────────────────
+# Single workflow: userspace debs (ARM) and kernel +
+# U-Boot debs (x86 cross-compile) build in parallel,
+# then publish merges everything into one APT repo.
+# No cross-workflow release cache, no chained trigger.
+# ──────────────────────────────────────────────────
 
 jobs:
   # ──────────────────────────────────────────────────
-  # Build all packages on Debian Bookworm (oldest supported).
+  # Build a JSON matrix of boards from the input flags.
+  # On push (no inputs), both boards default to true.
+  # ──────────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      armbian_ref: ${{ steps.gen.outputs.armbian_ref }}
+    steps:
+      - name: Generate matrix
+        id: gen
+        env:
+          INPUT_RK3576: ${{ inputs.build_rk3576 || 'true' }}
+          INPUT_RK3588: ${{ inputs.build_rk3588 || 'true' }}
+          INPUT_REF: ${{ inputs.armbian_build_ref || 'main' }}
+        run: |
+          set -eu
+          boards=()
+          [[ "${INPUT_RK3576}" == 'true' ]] && boards+=('recomputer-rk3576-devkit')
+          [[ "${INPUT_RK3588}" == 'true' ]] && boards+=('recomputer-rk3588-devkit')
+          if [ ${#boards[@]} -eq 0 ]; then
+            echo "::error::No boards selected (enable build_rk3576 or build_rk3588)."
+            exit 1
+          fi
+          for b in "${boards[@]}"; do
+            if [[ ! "$b" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+              echo "::error::Invalid board name: '$b'"
+              exit 1
+            fi
+          done
+          matrix=$(printf '%s\n' "${boards[@]}" | jq -Rc '{board: .}' | jq -sc '.')
+          {
+            echo "matrix<<EOF"
+            echo "${matrix}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # Ref validation: chars in [A-Za-z0-9._-/] (branch/tag names)
+          if [[ ! "${INPUT_REF}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error::Invalid armbian_build_ref: '${INPUT_REF}'"
+            exit 1
+          fi
+          # Existence check: warn (don't fail) if ref not found, fall back to main.
+          LSREMOTE=$(git ls-remote "https://github.com/Seeed-Studio/armbian-build.git" "${INPUT_REF}" 2>/dev/null || true)
+          if [[ -n "${LSREMOTE}" ]]; then
+            RESOLVED="${INPUT_REF}"
+          else
+            RESOLVED="main"
+            echo "::warning::Ref '${INPUT_REF}' not found in Seeed-Studio/armbian-build, using 'main'."
+          fi
+          echo "armbian_ref=${RESOLVED}" >> "$GITHUB_OUTPUT"
+          echo "Selected boards: ${boards[*]}"
+          echo "armbian-build ref: ${RESOLVED}"
+
+  # ──────────────────────────────────────────────────
+  # Build all userspace packages on Debian Bookworm (oldest supported).
   # Binaries are forward-compatible with newer distros (trixie, noble, etc.)
   # ──────────────────────────────────────────────────
-  build-debs:
+  build-userspace:
     runs-on: ubuntu-24.04-arm
     container:
       image: debian:bookworm
@@ -119,11 +172,103 @@ jobs:
           path: /tmp/debs/*.deb
 
   # ──────────────────────────────────────────────────
-  # Publish APT repository (aptly + GitHub Pages)
-  # Single set of debs published to both stable and bookworm dists.
+  # Per-board matrix build: kernel + U-Boot (x86 cross-compile)
+  # via scripts/build.sh (wraps armbian-build's compile.sh, sets
+  # ENABLE_SEEED_RK_EXTENSION, RK_COMPILE_USBPLUG, cache
+  # invalidation, etc.)
+  # Output: armbian-build/output/debs/*.deb
   # ──────────────────────────────────────────────────
-  publish-apt:
-    needs: [build-debs]
+  build-kernel:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        value: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout (for scripts/build.sh and extension)
+        uses: actions/checkout@v4
+
+      - name: Resolve board
+        id: board
+        env:
+          MATRIX_BOARD: ${{ matrix.value.board }}
+        run: |
+          echo "name=${MATRIX_BOARD}" >> "$GITHUB_OUTPUT"
+          echo "Resolved board: ${MATRIX_BOARD}"
+
+      - name: Checkout armbian-build
+        uses: actions/checkout@v4
+        with:
+          repository: Seeed-Studio/armbian-build
+          ref: ${{ needs.prepare.outputs.armbian_ref }}
+          path: armbian-build
+          fetch-depth: 1
+
+      - name: Stage build.sh and install extension
+        run: |
+          EXT_DIR="$PWD"
+          mkdir -p armbian-build/userpatches/extensions
+          # armbian-build's extension search uses `find -type f` (no -L),
+          # which doesn't follow symlinks — a symlinked extension reads as
+          # 0 files and the framework falls back to fetching
+          # Seeed-Studio/seeed_armbian_extension from GitHub (which lacks
+          # the maskrom SPL hooks). Copy the repo instead so the local
+          # fork version wins.
+          rsync -a --exclude='.git' --exclude='.claude' --exclude='.omc' \
+            --exclude='.codegraph' --exclude='armbian-build' \
+            --exclude='*.w' --exclude='*.m' --exclude='*.bak' \
+            "${EXT_DIR}/" armbian-build/userpatches/extensions/seeed_armbian_extension/
+          cp scripts/build.sh armbian-build/build.sh
+          chmod +x armbian-build/build.sh
+          echo "Staged build.sh -> armbian-build/build.sh"
+          echo "Copied extension -> armbian-build/userpatches/extensions/seeed_armbian_extension"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev \
+            python3 device-tree-compiler swig \
+            cpio rsync curl wget git \
+            dwarves
+
+      - name: Compile kernel (scripts/build.sh --kernel)
+        working-directory: armbian-build
+        env:
+          BOARD: ${{ steps.board.outputs.name }}
+        run: |
+          ./build.sh --kernel -b "${BOARD}"
+
+      - name: Compile U-Boot (scripts/build.sh --uboot)
+        working-directory: armbian-build
+        env:
+          BOARD: ${{ steps.board.outputs.name }}
+        run: |
+          ./build.sh --uboot -b "${BOARD}"
+
+      - name: List built debs
+        env:
+          BOARD: ${{ steps.board.outputs.name }}
+        run: |
+          echo "=== Built packages for ${BOARD} ==="
+          find armbian-build/output/debs -name '*.deb' -exec ls -lh {} \;
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-${{ steps.board.outputs.name }}
+          path: armbian-build/output/debs/**/*.deb
+
+  # ──────────────────────────────────────────────────
+  # Publish APT repository (aptly + GitHub Pages).
+  # Merges userspace + kernel/U-Boot debs (from the two
+  # build jobs above) with prebuilt and SDK debs, then
+  # regenerates the entire apt repo + an index HTML page.
+  # ──────────────────────────────────────────────────
+  publish:
+    needs: [build-userspace, build-kernel]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -134,7 +279,7 @@ jobs:
       - name: Checkout (for scripts)
         uses: actions/checkout@v4
 
-      - name: Download build artifacts
+      - name: Download all debs
         uses: actions/download-artifact@v4
         with:
           path: /tmp/debs
@@ -161,12 +306,13 @@ jobs:
       - name: Download SDK debs from Release
         env:
           GH_TOKEN: ${{ github.token }}
-          SDK_RELEASE_TAG: ${{ inputs.sdk_debs_release || 'rockchip-sdk-debs' }}
+          SDK_RELEASE_TAG: 'rockchip-sdk-debs'
+          REPO: ${{ github.repository }}
         run: |
           echo "=== Downloading SDK debs from Release: ${SDK_RELEASE_TAG} ==="
           TMPDIR=$(mktemp -d)
           gh release download "${SDK_RELEASE_TAG}" \
-            --repo "${{ github.repository }}" \
+            --repo "${REPO}" \
             --dir "${TMPDIR}" \
             --pattern '*arm64*.tar.xz' \
             --clobber || { echo "WARNING: Release ${SDK_RELEASE_TAG} not found, skipping SDK debs"; exit 0; }
@@ -178,6 +324,9 @@ jobs:
           echo "Downloaded $(find "${TMPDIR}" -name '*.deb' | wc -l) SDK debs"
           EXCLUDE_PKGS=$(find /tmp/debs -name '*.deb' -exec basename {} \; | sed 's/_.*//' | sort -u)
           echo "CI-built packages (will exclude from SDK): ${EXCLUDE_PKGS}"
+          # Manifest of SDK-sourced debs — used by generate-deb-index.sh to
+          # classify them as "Rockchip SDK" regardless of package name.
+          : > /tmp/sdk-debs.manifest
           copied=0; skipped=0; seen_pkgs=""
           while IFS= read -r deb; do
             pkg_name=$(basename "${deb}" | sed 's/_.*//')
@@ -189,10 +338,12 @@ jobs:
               skipped=$((skipped + 1))
             else
               cp -vn "${deb}" /tmp/debs/ && copied=$((copied + 1))
+              basename "${deb}" >> /tmp/sdk-debs.manifest
               seen_pkgs="${seen_pkgs}${pkg_name}"$'\n'
             fi
           done < <(find "${TMPDIR}" -name '*.deb')
           echo "  Copied ${copied} SDK debs, skipped ${skipped} conflicting"
+          echo "  Manifest: $(wc -l < /tmp/sdk-debs.manifest) entries in /tmp/sdk-debs.manifest"
 
       - name: Fix cross-distro dependencies
         run: |
@@ -213,24 +364,6 @@ jobs:
           done
           echo "Fixed ${fixed} packages"
 
-      - name: Download cached kernel debs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p /tmp/kernel-cache
-          gh release download kernel-debs-cache \
-            --repo "${{ github.repository }}" \
-            --dir /tmp/kernel-cache \
-            --clobber 2>/dev/null \
-            || { echo "No kernel cache found, skipping kernel debs"; exit 0; }
-          if [ -f /tmp/kernel-cache/kernel-debs.tar.xz ]; then
-            tar -xf /tmp/kernel-cache/kernel-debs.tar.xz -C /tmp/kernel-cache
-            echo "=== Cached kernel debs ==="
-            find /tmp/kernel-cache -name '*.deb' -exec basename {} \;
-            cp -v /tmp/kernel-cache/*.deb /tmp/debs/
-            echo "Added $(find /tmp/kernel-cache -name '*.deb' | wc -l) cached kernel debs"
-          fi
-
       - name: List all debs (final)
         run: |
           echo "=== Final .deb list ==="
@@ -243,46 +376,32 @@ jobs:
           sudo apt-get install -y aptly gnupg2
 
       - name: Import GPG key
+        env:
+          GPG_KEY_B64: ${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}
         run: |
-          echo "${{ secrets.ARMBIAN_APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          echo "${GPG_KEY_B64}" | base64 -d | gpg --batch --import
 
       - name: Publish apt repository
+        env:
+          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
         run: |
           chmod +x scripts/*.sh
           scripts/publish-aptly.sh /tmp/debs
-        env:
-          ARMBIAN_APT_GPG_KEY_ID: ${{ secrets.ARMBIAN_APT_GPG_KEY_ID }}
+
+      - name: Generate deb index page
+        run: |
+          scripts/generate-deb-index.sh /tmp/debs public/index.html /tmp/sdk-debs.manifest
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: public
 
-      - name: Cache userspace debs for kernel workflow
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p /tmp/cache-out
-          # Exclude kernel debs from userspace cache
-          find /tmp/debs -name '*.deb' ! -name 'linux-image-*' ! -name 'linux-headers-*' ! -name 'linux-dtb-*' ! -name 'linux-source-*' \
-            -exec cp {} /tmp/cache-out/ \;
-          cd /tmp/cache-out && shopt -s nullglob; deb_files=(*.deb); if [ ${#deb_files[@]} -gt 0 ]; then
-            tar -cf userspace-debs.tar.xz -I 'xz -9' "${deb_files[@]}"
-          fi
-          cd /tmp/cache-out
-          gh release create userspace-debs-cache userspace-debs.tar.xz \
-            --repo "${{ github.repository }}" \
-            --title "Userspace debs cache" \
-            --notes "Latest userspace debs (auto-updated by CI)" \
-          || gh release upload userspace-debs-cache userspace-debs.tar.xz \
-            --repo "${{ github.repository }}" \
-            --clobber
-
   # ──────────────────────────────────────────────────
   # Deploy to GitHub Pages
   # ──────────────────────────────────────────────────
   deploy-pages:
-    needs: publish-apt
+    needs: publish
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -295,15 +414,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
-  # ──────────────────────────────────────────────────
-  # Optionally trigger kernel build after deploy
-  # ──────────────────────────────────────────────────
-  kernel:
-    needs: deploy-pages
-    if: ${{ inputs.build_kernel == true }}
-    uses: ./.github/workflows/kernel-build-publish.yml
-    with:
-      board: ${{ inputs.kernel_board || 'recomputer-rk3576-devkit' }}
-      armbian_ref: ${{ inputs.armbian_ref || 'main' }}
-    secrets: inherit
