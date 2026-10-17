@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 BOARD="recomputer-rk3576-devkit"
-BRANCH="vendor"
+BRANCH="${BRANCH:-vendor}"
 RELEASE="bookworm"
 KERNEL_CONFIGURE="no"
 CLEAR_KERNEL_CACHE="no"
@@ -31,10 +31,13 @@ SECURITY_PROFILE="none"
 
 RK_COMPILE_USBPLUG="yes"
 
+# Everything after `--` on the command line goes verbatim to compile.sh.
+EXTRA_PASSTHROUGH=()
+
 CRYPTROOT_PASSPHRASE="${CRYPTROOT_PASSPHRASE:-}"
 
 # Valid option values
-VALID_BOARDS="recomputer-rk3576-devkit recomputer-rk3588-devkit recomputer-rk3576-module-devkit"
+VALID_BOARDS="recomputer-rk3576-devkit recomputer-rk3588-devkit recomputer-rk3576-industrial recomputer-rk3576-module-devkit"
 VALID_DESKTOPS="gnome xfce kde-plasma mate cinnamon"
 VALID_TIERS="minimal mid full"
 VALID_OTA_FORMATS="xz gz zstd"
@@ -59,7 +62,7 @@ Options:
   Build config:
   -b, --board BOARD           Board name (default: recomputer-rk3576-devkit)
                               Options: recomputer-rk3576-devkit, recomputer-rk3588-devkit,
-                                       recomputer-rk3576-module-devkit
+                                       recomputer-rk3576-industrial, recomputer-rk3576-module-devkit
   -R, --release RELEASE       Release/distro (default: bookworm)
                               Debian:  trixie, bookworm, bullseye, buster, sid, forky, resolute
                               Ubuntu:  plucky, oracular, noble, jammy, focal, questing
@@ -76,6 +79,8 @@ Options:
   -r, --clear-rootfs-cache    Clear rootfs cache before build
   -n, --dry-run               Show build config without running compile.sh
   -h, --help                  Show this help
+  --                          Pass everything after it verbatim to compile.sh
+                              (userpatches config names, KEY=VALUE overrides)
 
 Examples:
   $(basename "$0")                              # Default: GNOME desktop, bookworm
@@ -87,6 +92,7 @@ Examples:
   $(basename "$0") recovery secure-boot         # Recovery OTA + secure boot
   $(basename "$0") ab secure-boot -d xfce       # A/B OTA + secure boot with XFCE
   $(basename "$0") ab -b recomputer-rk3588-devkit
+  $(basename "$0") --minimal -- OTA_ENABLE=no industrial-local
 EOF
     exit 0
 }
@@ -304,6 +310,11 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             ;;
+        --)
+            shift
+            EXTRA_PASSTHROUGH=("$@")
+            break
+            ;;
         -*)
             die "Unknown option '$1'. Run '$(basename "$0") --help' for usage."
             ;;
@@ -427,6 +438,7 @@ if [[ "$RK_COMPILE_USBPLUG" == "yes" ]]; then
 else
     echo " USBPLUG        : rkbin blob (--no-usbplug)"
 fi
+[[ ${#EXTRA_PASSTHROUGH[@]} -gt 0 ]] && echo " Extra args     : ${EXTRA_PASSTHROUGH[*]}"
 echo "==========================================="
 
 # ── Construct build args ────────────────────────────────────────────────────
@@ -477,6 +489,10 @@ else
 fi
 
 append_cache_ttl_args
+
+# Everything after `--` is passed verbatim to compile.sh: userpatches config
+# names (e.g. "industrial-local") and/or KEY=VALUE overrides (e.g. "OTA_ENABLE=no").
+BUILD_CMD+=("${EXTRA_PASSTHROUGH[@]}")
 
 # ── Execute or dry-run ──────────────────────────────────────────────────────
 if [[ "$DRY_RUN" == "yes" ]]; then
