@@ -180,10 +180,65 @@ ota_detect_devices() {
     # which previously made blkid miss LABEL=armbi_root and silently skip OTA.
     udevadm settle --timeout=10 2>/dev/null || true
 
-    # Detect auto-decrypt by mapper first. Some minimal images do not ship blkid in
-    # the real rootfs, but initramfs only needs the already-opened mapper.
-    if [ -e /dev/mapper/armbian-root ] || blkid -t TYPE=crypto_LUKS >/dev/null 2>&1; then
-        log "auto-decrypt candidate detected, waiting for /dev/mapper/armbian-root"
+    # Command-line root= of this boot, parsed once: the auto-decrypt gate
+    # below and the standard-mode root detection further down both consume it.
+    cmdline_root=""
+    for _tok in $(cat /proc/cmdline 2>/dev/null); do
+        case "${_tok}" in
+            root=*) cmdline_root="${_tok#root=}"; break ;;
+        esac
+    done
+
+    # Detect auto-decrypt mode. The unlock itself happens in the init-top
+    # decryption-disk hook, which runs before this init-premount hook and
+    # hard-stops the boot on failure: a genuine auto-decrypt boot normally
+    # reaches here with /dev/mapper/armbian-root already open. Wait-worthy
+    # signals, in order: the open mapper, firmware asking for it on the
+    # cmdline (root=/dev/mapper/* or cryptdevice=UUID=*), or a cmdline
+    # root= that resolves to a crypto_LUKS container. A bare blkid
+    # crypto_LUKS hit is NOT one: with several disks attached, a LUKS
+    # container on a non-boot disk (e.g. a plain SD boot with an encrypted
+    # eMMC left installed) used to trigger the full 30s mapper wait on
+    # every plain boot of that chassis -- delaying root mount, and with
+    # late udev module loads racing the unused-regulator shutdown,
+    # bricking the boot outright.
+    luks_signal=""
+    if [ -e /dev/mapper/armbian-root ]; then
+        luks_signal="mapper already open"
+    else
+        case "${cmdline_root}" in
+            /dev/mapper/*) luks_signal="cmdline root=${cmdline_root}" ;;
+        esac
+        if [ -z "${luks_signal}" ]; then
+            for _tok in $(cat /proc/cmdline 2>/dev/null); do
+                case "${_tok}" in
+                    cryptdevice=UUID=*) luks_signal="cmdline ${_tok}"; break ;;
+                esac
+            done
+        fi
+        if [ -z "${luks_signal}" ]; then
+            luks_root_dev=""
+            case "${cmdline_root}" in
+                UUID=*)
+                    luks_root_dev="$(first_match_on_disk "UUID=${cmdline_root#UUID=}" "$(recovery_boot_disk || true)")"
+                    ;;
+                LABEL=*)
+                    luks_root_dev="$(get_dev_and_uuid_by_label "${cmdline_root#LABEL=}" "$(recovery_boot_disk || true)" || true)"
+                    luks_root_dev="${luks_root_dev%% *}"
+                    ;;
+                /dev/*)
+                    luks_root_dev="${cmdline_root}"
+                    ;;
+            esac
+            if [ -n "${luks_root_dev}" ] && [ -e "${luks_root_dev}" ] && \
+               [ "$(blkid -s TYPE -o value "${luks_root_dev}" 2>/dev/null || true)" = "crypto_LUKS" ]; then
+                luks_signal="cmdline root=${cmdline_root} resolves to LUKS container ${luks_root_dev}"
+            fi
+        fi
+    fi
+
+    if [ -n "${luks_signal}" ]; then
+        log "auto-decrypt candidate detected (${luks_signal}), waiting for /dev/mapper/armbian-root"
         timeout=30
         elapsed=0
         while [ ! -e /dev/mapper/armbian-root ] && [ "${elapsed}" -lt "${timeout}" ]; do
@@ -199,7 +254,7 @@ ota_detect_devices() {
             log "WARN: LUKS container present but mapper not ready after ${timeout}s, fallback to standard mode"
         fi
     else
-        log "no crypto_LUKS container, using standard recovery OTA mode"
+        log "no auto-decrypt signal (mapper, cmdline root=/cryptdevice=), using standard recovery OTA mode"
     fi
 
     boot_info="$(get_dev_and_uuid_by_label "armbi_boot" "$(recovery_boot_disk || true)" || true)"
@@ -218,12 +273,6 @@ ota_detect_devices() {
         #      disk when the tokens are present.
         #   3. LABEL=armbi_root fallback, likewise token-anchored.
         root_info=""
-        cmdline_root=""
-        for _tok in $(cat /proc/cmdline 2>/dev/null); do
-            case "${_tok}" in
-                root=*) cmdline_root="${_tok#root=}"; break ;;
-            esac
-        done
 
         case "${ROOT:-}" in
             /dev/*)
