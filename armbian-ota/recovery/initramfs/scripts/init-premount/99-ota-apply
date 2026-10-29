@@ -275,6 +275,26 @@ run_campaign() {
     BOOT_TAR="$(ota_resolve_payload "${OTA_DIR}" boot)"
     BOOT_ITB="${OTA_DIR}/boot.itb"
 
+    # v0.8 dropped the ota_validate_recovery_state call that used to
+    # compute these flags, so ota_apply_boot's gates evaluated EMPTY
+    # operands: '[ "" -eq 1 ]' -> 'sh: bad number' -> DO_BOOT_OTA stayed 0
+    # and every campaign skipped the boot refresh while replacing the
+    # rootfs (new rootfs + old boot, rk3588 SD rig 2026-10-29). Compute
+    # them here, including the package-requested deferral to the boot
+    # hook (OTA_BOOT_REFRESH=0 keeps legacy semantics).
+    HAS_BOOT_TAR=0
+    [ -f "${BOOT_TAR}" ] && HAS_BOOT_TAR=1
+    HAS_BOOT_ITB=0
+    [ -f "${BOOT_ITB}" ] && HAS_BOOT_ITB=1
+    if [ "${HAS_BOOT_TAR}" -eq 1 ]; then
+        bsw_flag="$(sed -n 's/^OTA_BOOT_REFRESH=//p' "${OTA_DIR}/package.env" 2>/dev/null | head -n1)"
+        if [ "${bsw_flag}" = "0" ]; then
+            OTA_BOOT_HOOK_MODE=1
+            HAS_BOOT_TAR=0
+            log "boot refresh deferred to OTA hook (package.env OTA_BOOT_REFRESH=0)"
+        fi
+    fi
+
     retry=$(( $(state_get RETRY_COUNT 2>/dev/null || echo 0) + 1 ))
     state_set "RETRY_COUNT" "${retry}" ||
         campaign_fail "cannot persist RETRY_COUNT"
