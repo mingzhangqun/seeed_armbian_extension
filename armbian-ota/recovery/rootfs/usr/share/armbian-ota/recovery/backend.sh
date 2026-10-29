@@ -122,6 +122,7 @@ recovery_assert_dual_tar() {
     case "${fmt}" in
         xz)   fmt="xz" ;;
         zstd) fmt="zst" ;;
+        zst)  fmt="zst" ;;
         gz)   fmt="gz" ;;
         *) error_exit "Unknown PAYLOAD_FORMAT: ${fmt}" ;;
     esac

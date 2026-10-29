@@ -145,6 +145,7 @@ ota_check_package_requirements() {
     fi
 
     fmt="$(package_env_get_value "PAYLOAD_FORMAT" || true)"
+    [ "${fmt}" = "zstd" ] && fmt="zst"
     if [ -n "${fmt}" ]; then
         case " ${OTA_RUNTIME_FORMATS} " in
             *" ${fmt} "*) ;;
