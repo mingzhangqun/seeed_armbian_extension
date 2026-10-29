@@ -165,10 +165,18 @@ unmount_recovery_transaction_store() {
 rescue_shell() {
     log "RESCUE SHELL: $*"
     echo "OTA_RESCUE: $*" > /dev/kmsg 2>/dev/null || true
+    # Say it on the serial line too: /dev/console mapping follows the last
+    # console= parameter, and a rescue session must stay reachable even
+    # when that mapping is off (rk35xx serial console is ttyFIQ0@1500000).
+    echo "OTA_RESCUE: $* (shell on ttyFIQ0)" > /dev/ttyFIQ0 2>/dev/null || true
     if type panic >/dev/null 2>&1; then
         panic "OTA Rescue: $* -- rootfs may be inconsistent, do NOT continue boot; press Enter for a shell"
     fi
-    # panic unavailable (non-initramfs-tools context): block here
+    # panic unavailable (non-initramfs-tools context): spawn an interactive
+    # shell explicitly bound to the serial console instead of sleeping --
+    # an unreachable rescue shell is indistinguishable from a hang
+    # (observed 2026-10-29, blind rescue with no operator access).
+    setsid sh -c 'exec sh </dev/ttyFIQ0 >/dev/ttyFIQ0 2>&1'
     while :; do sleep 3600; done
 }
 
