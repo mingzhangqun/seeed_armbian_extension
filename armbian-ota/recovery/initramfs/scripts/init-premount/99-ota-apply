@@ -100,16 +100,28 @@ find_userdata_device() {
         fi
     fi
 
-    dev="$(blkid -t PARTLABEL=userdata -o device 2>/dev/null | head -n1 || true)"
-    if [ -n "${dev}" ] && [ "$(blkid -s TYPE -o value "${dev}" 2>/dev/null || true)" = "ext4" ]; then
-        printf '%s\n' "${dev}"
-        return 0
-    fi
+    # Fallbacks stay disk-scoped whenever ROOT_DEV is known: cloned disks
+    # duplicate every PARTLABEL/LABEL and blkid's first match is arbitrary
+    # (dual-disk rk3588 resolved the empty eMMC userdata while the armed
+    # transaction lived on the SD userdata, so the rescue reconciled
+    # against the wrong disk and saw STATUS=idle, 2026-10-29). With no
+    # same-disk candidate we return nothing and fail closed instead of
+    # guessing; the unscoped lookup only serves single-disk legacy boots
+    # where ROOT_DEV never resolved.
+    root_disk=""
+    [ -n "${ROOT_DEV}" ] &&
+        root_disk="$(find_user_data__parent_disk "${ROOT_DEV}" 2>/dev/null || true)"
 
-    dev="$(blkid -t LABEL=armbi_usrdata -o device 2>/dev/null | head -n1 || true)"
-    if [ -n "${dev}" ] && [ "$(blkid -s TYPE -o value "${dev}" 2>/dev/null || true)" = "ext4" ]; then
-        printf '%s\n' "${dev}"
-    fi
+    for dev in $(blkid -t PARTLABEL=userdata -o device 2>/dev/null) \
+               $(blkid -t LABEL=armbi_usrdata -o device 2>/dev/null); do
+        [ "$(blkid -s TYPE -o value "${dev}" 2>/dev/null || true)" = "ext4" ] || continue
+        if [ -z "${root_disk}" ] ||
+           [ "$(find_user_data__parent_disk "${dev}" 2>/dev/null || true)" = "${root_disk}" ]; then
+            printf '%s\n' "${dev}"
+            return 0
+        fi
+    done
+    return 0
 }
 
 # Return the payload file staged for $2 (rootfs|boot); zst wins over xz over
