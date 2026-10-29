@@ -61,16 +61,20 @@ function ota_payload_tree_hash() {
 }
 
 function ota_compute_payload_id() {
+    # NB: the sixth local must not be called "version" -- the armbian-build
+    # framework exports a readonly global of that name, so 'local version'
+    # fails ("local: version: readonly variable") and the payload id would
+    # silently hash the framework's version instead of the image's.
     local rootfs_tar="$1"
     local boot_tree="$2"
-    local board="$3" release="$4" kernel="$5" version="$6"
+    local board="$3" release="$4" kernel="$5" img_version="$6"
     local root_sha boot_sha
 
     root_sha="$(sha256sum "${rootfs_tar}" | awk '{print $1}')"
     boot_sha="$(ota_payload_tree_hash "${boot_tree}")"
 
     printf 'armbian-ota-payload-v1|R=%s|B=%s|BOARD=%s|RELEASE=%s|KERNEL=%s|VERSION=%s|HAS_ROOTFS=1\n' \
-        "${root_sha}" "${boot_sha}" "${board}" "${release}" "${kernel}" "${version}" |
+        "${root_sha}" "${boot_sha}" "${board}" "${release}" "${kernel}" "${img_version}" |
         sha256sum | awk '{print $1}'
 }
 
