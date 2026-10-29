@@ -187,7 +187,7 @@ state_mark_completed() {
 state_begin_campaign() {
     candidate_id="$1"
 
-    state_set_multi \
+    ota_state_set_multi \
         "OTA_MODE=recovery" \
         "STATUS=prepared" \
         "CANDIDATE_ID=${candidate_id}" \
@@ -207,7 +207,7 @@ state_switch_restore() {
     backup_id="$1"
     reason="$2"
 
-    state_set_multi \
+    ota_state_set_multi \
         "STATUS=prepared" \
         "CANDIDATE_ID=${backup_id}" \
         "RESTORE_MODE=1" \
@@ -219,7 +219,7 @@ state_switch_restore() {
 state_mark_failed() {
     reason="$1"
 
-    state_set_multi \
+    ota_state_set_multi \
         "STATUS=failed" \
         "ERROR_MSG=${reason}" \
         "COMPLETE_TIME=$(date -Iseconds)"
@@ -230,7 +230,7 @@ state_mark_failed() {
 state_mark_success() {
     installed_id="$1"
 
-    state_set_multi \
+    ota_state_set_multi \
         "STATUS=success" \
         "INSTALLED_ID=${installed_id}" \
         "COMPLETE_TIME=$(date -Iseconds)"
