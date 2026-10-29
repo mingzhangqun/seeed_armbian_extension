@@ -358,7 +358,7 @@ run_campaign() {
     fi
 
     # commit: applied, then the one-shot handoff token
-    state_set_multi "STATUS=applied" ||
+    ota_state_set_multi "STATUS=applied" ||
         campaign_fail "cannot persist STATUS=applied"
 
     fw_env_set "ota_boot_next" "normal" ||
