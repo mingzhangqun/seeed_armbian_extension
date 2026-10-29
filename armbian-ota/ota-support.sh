@@ -44,7 +44,8 @@ if [[ "${OTA_ENABLE:-}" == "yes" ]]; then
     else
         for ota_support_module in \
             recovery/build-hooks/partitions \
-            recovery/build-hooks/runtime-install
+            recovery/build-hooks/runtime-install \
+            recovery/build-hooks/rescue-artifacts
         do
             # shellcheck source=/dev/null
             source "${OTA_SUPPORT_DIR}/${ota_support_module}.sh"

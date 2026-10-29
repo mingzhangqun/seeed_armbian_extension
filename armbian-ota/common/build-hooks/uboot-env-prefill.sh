@@ -73,21 +73,23 @@ function ota_uboot_env_prefill_compose() {
     [[ -f "${default_env}" ]] ||
         exit_with_error "U-Boot default env not packaged" "${default_env} missing; rebuild u-boot (./seeed-build.sh --uboot) so the deb carries u-boot-default.env"
 
-    bootcmd_value="$(sed -n 's/^bootcmd=//p' "${default_env}" | head -n 1)"
-    [[ -n "${bootcmd_value}" ]] ||
-        exit_with_error "Compiled default bootcmd not found" "${default_env}"
+    # v0.8 routing env (design section 3.2): transaction flags + the p1
+    # anchored boot pair + a bootcmd that (a) saves ota_boot_next=recovery
+    # BEFORE booting a candidate, (b) routes to Rescue on every normal
+    # return, (c) never scans external media. The Seeed boot.scr already
+    # carries the armbian.bootdev tokens in its own bootargs, and the rescue
+    # branch injects them directly, so no bootargs prefixing is needed here.
+    routing_env="$(mktemp)" || exit_with_error "mktemp failed"
+    {
+        printf '%s\n' 'ota_in_progress=0'
+        printf '%s\n' 'ota_boot_next=recovery'
+        printf '%s\n' 'ota_normal_boot=setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scriptaddr} /boot.scr && source ${scriptaddr}'
+        printf '%s\n' 'ota_rescue_boot=ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root=LABEL=armbi_root rootwait rootfstype=ext4 console=${console} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
+        printf '%s\n' 'bootcmd=if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
+    } > "${routing_env}"
 
-    override_env="$(mktemp)" || exit_with_error "mktemp failed"
-    if [[ "${bootcmd_value}" != *armbian.bootdev* ]]; then
-        # Keep the compiled bootcmd verbatim behind the token prefix so the
-        # recovery boot path stays identical to today's default-env boot,
-        # except that initramfs can now anchor partition lookups.
-        printf 'bootcmd=setenv bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; %s\n' \
-            "${bootcmd_value}" > "${override_env}"
-    fi
-
-    ota_ab_merge_uboot_env_files "${final_env}" "${default_env}" "${override_env}"
-    rm -f "${override_env}"
+    ota_ab_merge_uboot_env_files "${final_env}" "${default_env}" "${routing_env}"
+    rm -f "${routing_env}"
 }
 
 # Validate that the env area fits between the u-boot loader blob and
@@ -143,8 +145,10 @@ for entry in blob[4:].split(b"\0"):
         break
     print(entry.decode("utf-8", "replace"))
 ')" || exit_with_error "Env blob readback failed" "${env_info}"
-    grep -q '^bootcmd=.*armbian\.bootdev' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks bootdev token" "bootcmd not carried into blob"
+    grep -q '^ota_rescue_boot=' <<< "${env_info}" ||
+        exit_with_error "Prefilled env lacks rescue boot script" "ota_rescue_boot not carried into blob"
+    grep -q '^bootcmd=.*ota_in_progress' <<< "${env_info}" ||
+        exit_with_error "Prefilled env lacks transactional bootcmd" "bootcmd not carried into blob"
 
     display_alert "OTA U-Boot env prefill" "$(grep '^bootcmd=' <<< "${env_info}")" "info"
 }

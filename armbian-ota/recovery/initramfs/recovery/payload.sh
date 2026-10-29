@@ -475,8 +475,9 @@ ota_apply_boot() {
     fi
 
     if [ "$DO_BOOT_OTA" -eq 1 ]; then
-        # The separate boot partition holds the live env; capture it before
-        # boot.tar.gz overwrites the file (extract does not wipe the fs).
+        # The separate boot partition holds the live env; capture it BEFORE
+        # the clear below deletes it (hard ordering: capture -> clear ->
+        # extract; inverting it loses the user's overlays, section 7 step 6).
         if [ -f "${BOOT_MNT}/armbianEnv.txt" ]; then
             if cp "${BOOT_MNT}/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota"; then
                 log "captured pre-OTA armbianEnv.txt from boot partition"
@@ -485,13 +486,27 @@ ota_apply_boot() {
             fi
         fi
 
+        # v0.8: wipe normal boot files (everything except recovery/ and
+        # lost+found/, hidden files included) so the partition content after
+        # OTA is exactly the package plus the rescuer. Never mkfs here --
+        # recovery/ lives in this filesystem.
+        ota_clear_normal_boot "${BOOT_MNT}" || {
+            log "ERROR: failed to clear normal boot files"
+            return 1
+        }
+
         log "extracting ${BOOT_TAR} -> ${BOOT_MNT} ..."
         start_heartbeat "extracting ${BOOT_TAR##*/} to ${BOOT_MNT}"
         if ! extract_tar "${BOOT_TAR}" "${BOOT_MNT}" "boot"; then
             stop_heartbeat
-            log "ERROR: extract ${BOOT_TAR##*/} failed, system may be broken"
+            log "ERROR: extract ${BOOT_TAR##*/} failed -- FATAL (legacy warn-and-continue removed: it produced 'new rootfs + old boot')"
+            return 1
         fi
         stop_heartbeat
+
+        # v0.8: the package must prove its identity on the partition it just
+        # wrote; a mismatch means the extract was partial or wrong.
+        ota_verify_boot_marker "${BOOT_MNT}" || return 1
 
         sync
     fi
@@ -682,4 +697,84 @@ ota_unmount_all() {
 
     log "unmounting ${ROOT_MNT} ..."
     umount "${ROOT_MNT}" 2>/dev/null  || log "WARN: umount ${ROOT_MNT} failed"
+}
+
+# ===== v0.8 helpers: boot clear, markers, overlay upper ======================
+
+# Remove every normal boot file, keeping only recovery/ (the rescuer itself)
+# and lost+found/. find -mindepth is mandatory: a shell glob would silently
+# skip dotfiles (.auto_preserve etc.), section 7 "boot 清空规则".
+ota_clear_normal_boot() {
+    boot_mnt="$1"
+
+    [ -n "${boot_mnt}" ] && [ -d "${boot_mnt}" ] || {
+        log "ota_clear_normal_boot: invalid boot mount: ${boot_mnt:-<empty>}"
+        return 1
+    }
+
+    log "clearing normal boot files in ${boot_mnt} (keeping recovery/, lost+found/)"
+    find "${boot_mnt}" -mindepth 1 -maxdepth 1 \
+        ! -name recovery ! -name lost+found \
+        -exec rm -rf -- {} + || {
+        log "ERROR: ota_clear_normal_boot: find/rm failed"
+        return 1
+    }
+    sync
+    return 0
+}
+
+# Boot marker gate: the payload identity the package carries must be present
+# on the freshly written partition.
+ota_verify_boot_marker() {
+    boot_mnt="$1"
+    expected="${OTA_EXPECT_PAYLOAD_ID:-}"
+
+    [ -n "${expected}" ] || {
+        log "ota_verify_boot_marker: OTA_EXPECT_PAYLOAD_ID not set by orchestrator"
+        return 1
+    }
+    actual="$(cat "${boot_mnt}/payload-id" 2>/dev/null)"
+    if [ "${actual}" != "${expected}" ]; then
+        log "ERROR: boot payload marker mismatch: got=${actual:-none} want=${expected}"
+        return 1
+    fi
+    log "boot payload marker verified: ${expected}"
+    return 0
+}
+
+# Rootfs marker: the applier (not the tar) writes the identity into the new
+# root so health confirmation can compare against CANDIDATE_ID. Backup-built
+# payloads never carry it pre-stamped, so this write is unconditional.
+ota_write_rootfs_marker() {
+    marker_id="$1"
+
+    mkdir -p "${ROOT_MNT}/usr/share/armbian-ota" || return 1
+    printf '%s\n' "${marker_id}" > "${ROOT_MNT}/usr/share/armbian-ota/installed-payload-id" || {
+        log "ERROR: cannot write rootfs payload marker"
+        return 1
+    }
+    sync
+    log "rootfs payload marker written: ${marker_id}"
+    return 0
+}
+
+# Overlay upper cleanup (section 8): only the pieces that would shadow the
+# new lower layer -- stale kernel modules and the old overlayroot config.
+# Everything else in upper (user drift) survives by design.
+ota_clean_overlay_upper() {
+    upper="${USERDATA_MNT}/overlay"
+
+    [ -d "${upper}" ] || {
+        log "no overlay upper at ${upper}; skipping cleanup"
+        return 0
+    }
+    rm -rf "${upper}/lib/modules" 2>/dev/null || {
+        log "WARN: failed to clean ${upper}/lib/modules"
+    }
+    rm -f "${upper}/etc/overlayroot.conf" 2>/dev/null || {
+        log "WARN: failed to clean ${upper}/etc/overlayroot.conf"
+    }
+    sync
+    log "overlay upper cleaned (lib/modules, overlayroot.conf)"
+    return 0
 }

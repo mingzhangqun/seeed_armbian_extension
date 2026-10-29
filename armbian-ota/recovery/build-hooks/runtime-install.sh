@@ -8,10 +8,57 @@ function ota_install_recovery_runtime_to_rootfs() {
 
     ota_install_common_runtime_to_rootfs "${root_dir}" || return 1
     ota_sync_rootfs "Recovery OTA runtime" "${OTA_RECOVERY_ROOTFS}" "${root_dir}"
+    ota_install_recovery_fw_env_tools "${root_dir}" || return 1
 
     display_alert "Recovery OTA runtime" "Enabling firstboot hook service" "info"
     chroot "${root_dir}" systemctl enable armbian-ota-firstboot-hook.service \
         || display_alert "Recovery OTA runtime" "Failed to enable armbian-ota-firstboot-hook.service" "warn"
+
+    display_alert "Recovery OTA runtime" "Enabling health confirmation service" "info"
+    chroot "${root_dir}" systemctl enable armbian-ota-health.service \
+        || display_alert "Recovery OTA runtime" "Failed to enable armbian-ota-health.service" "warn"
+}
+
+# fw_setenv/fw_printenv for the plain-recovery routing tokens. Ubuntu noble
+# has no arm64 package that carries them (u-boot-tools ships only mkimage et
+# al.; uboot-envtools lacks an arm64 candidate), so we install the Debian
+# bookworm libubootenv debs directly -- glibc 2.36 binaries run fine on
+# noble's 2.39. Standard download-or-cached pattern into cache/download.
+OTA_FW_ENV_DEB_MIRROR="${OTA_FW_ENV_DEB_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian/pool/main/libu/libubootenv}"
+OTA_FW_ENV_DEB_VERSION="${OTA_FW_ENV_DEB_VERSION:-0.3.2-1}"
+
+function ota_install_recovery_fw_env_tools() {
+    local root_dir="$1"
+    local deb
+    local -a debs=(
+        "libubootenv0.1_${OTA_FW_ENV_DEB_VERSION}_arm64.deb"
+        "libubootenv-tool_${OTA_FW_ENV_DEB_VERSION}_arm64.deb"
+    )
+    local cache_dir="${SRC}/cache/download/libubootenv"
+    mkdir -p "${cache_dir}"
+
+    for deb in "${debs[@]}"; do
+        if [[ ! -f "${cache_dir}/${deb}" ]]; then
+            display_alert "Recovery OTA fw_env" "downloading ${deb}" "info"
+            curl -fsSL --retry 3 -o "${cache_dir}/${deb}.dl" \
+                "${OTA_FW_ENV_DEB_MIRROR}/${deb}" ||
+                {
+                    rm -f "${cache_dir}/${deb}.dl"
+                    exit_with_error "Recovery OTA fw_env" "failed to download ${deb}"
+                }
+            mv "${cache_dir}/${deb}.dl" "${cache_dir}/${deb}"
+        fi
+        cp "${cache_dir}/${deb}" "${root_dir}/tmp/${deb}"
+    done
+
+    # exact filenames, never globs: the command travels through Armbian's
+    # chroot_custom quoting and an unexpanded glob reaches dpkg literally
+    chroot "${root_dir}" dpkg -i "/tmp/${debs[0]}" "/tmp/${debs[1]}" ||
+        exit_with_error "Recovery OTA fw_env" "dpkg -i libubootenv debs failed"
+    rm -f "${root_dir}/tmp/${debs[0]}" "${root_dir}/tmp/${debs[1]}"
+    [[ -x "${root_dir}/usr/bin/fw_setenv" && -x "${root_dir}/usr/bin/fw_printenv" ]] ||
+        exit_with_error "Recovery OTA fw_env" "fw_setenv/fw_printenv missing after install"
+    display_alert "Recovery OTA fw_env" "fw_setenv/fw_printenv installed from bookworm debs" "info"
 }
 
 function ota_install_recovery_initramfs_file() {
@@ -57,6 +104,7 @@ function ota_install_recovery_initramfs() {
     local -a initramfs_file_list=(
         "hooks/99-copy-tools:etc/initramfs-tools/hooks/99-copy-tools:0755"
         "scripts/init-premount/99-ota-apply:etc/initramfs-tools/scripts/init-premount/99-ota-apply:0755"
+        "scripts/init-bottom/99-ota-normal-marker:etc/initramfs-tools/scripts/init-bottom/99-ota-normal-marker:0755"
         "recovery/log.sh:etc/initramfs-tools/ota/recovery/log.sh:0644"
         "recovery/device.sh:etc/initramfs-tools/ota/recovery/device.sh:0644"
         "recovery/payload.sh:etc/initramfs-tools/ota/recovery/payload.sh:0644"
@@ -80,6 +128,8 @@ function ota_install_recovery_initramfs() {
             cd "${root_dir}" || exit 1
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/state.sh"
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/find-userdata.sh"
+            sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/fwenv.sh"
+            sha256sum "etc/initramfs-tools/hooks/99-copy-tools"
             for entry in "${initramfs_file_list[@]}"; do
                 IFS=: read -r source_path destination_path mode <<< "${entry}"
                 sha256sum "${destination_path}"

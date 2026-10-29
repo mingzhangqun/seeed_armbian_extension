@@ -7,7 +7,11 @@
 # without decompression. "gz" reproduces the legacy double-gzip layout.
 # "zstd" mirrors the xz layout with .tar.zst payloads (the target runtime
 # must list zstd in OTA_RUNTIME_FORMATS). See docs/10-ota-package-formats.md.
-OTA_PAYLOAD_COMP="${OTA_PAYLOAD_COMP:-xz}"
+# v0.8: recovery payloads pin zstd (the device-side lazy backup uses the
+# same format; one format, one extract path). A/B keeps the xz default.
+OTA_PAYLOAD_COMP_DEFAULT="xz"
+[[ "${AB_PART_OTA:-}" != "yes" ]] && OTA_PAYLOAD_COMP_DEFAULT="zstd"
+OTA_PAYLOAD_COMP="${OTA_PAYLOAD_COMP:-${OTA_PAYLOAD_COMP_DEFAULT}}"
 case "${OTA_PAYLOAD_COMP}" in
     xz)   OTA_PAYLOAD_TAR_SUFFIX="tar.xz" ;;
     gz)   OTA_PAYLOAD_TAR_SUFFIX="tar.gz" ;;
@@ -39,6 +43,35 @@ function ota_payload_compress_archive() {
             (cd "${source_dir}" && tar -I "$(ota_gzip_prog)" -cf "${archive}" "$@" .)
             ;;
     esac
+}
+
+# Deterministic tree hash over a boot staging tree: every file's sha256 in
+# sorted path order, folded into one digest. payload-id is excluded so the
+# identity never hashes its own container. MIRROR of ota_payload_tree_hash in
+# recovery/backend.sh -- the OTA package and the on-device backup MUST derive
+# IDs from the same rule (design section 4).
+function ota_payload_tree_hash() {
+    local tree_dir="$1"
+
+    (
+        cd "${tree_dir}" || exit 1
+        find . -type f ! -name payload-id -print0 | LC_ALL=C sort -z |
+            xargs -0 -r sha256sum
+    ) | awk '{print $1"  "substr($2,3)}' | sha256sum | awk '{print $1}'
+}
+
+function ota_compute_payload_id() {
+    local rootfs_tar="$1"
+    local boot_tree="$2"
+    local board="$3" release="$4" kernel="$5" version="$6"
+    local root_sha boot_sha
+
+    root_sha="$(sha256sum "${rootfs_tar}" | awk '{print $1}')"
+    boot_sha="$(ota_payload_tree_hash "${boot_tree}")"
+
+    printf 'armbian-ota-payload-v1|R=%s|B=%s|BOARD=%s|RELEASE=%s|KERNEL=%s|VERSION=%s|HAS_ROOTFS=1\n' \
+        "${root_sha}" "${boot_sha}" "${board}" "${release}" "${kernel}" "${version}" |
+        sha256sum | awk '{print $1}'
 }
 
 function ota_payload_list_archive() {
@@ -207,6 +240,40 @@ EOF
     if [[ -f "${ota_temp_dir}/ota-hook.sh" ]]; then
         echo "OTA_HOOK=ota-hook.sh" >> "${ota_mode_file}"
     fi
+
+    # v0.8 identity card for recovery packages (design section 4)
+    if [[ "${manifest_mode}" == "recovery" ]]; then
+        cat >> "${ota_mode_file}" << EOF
+PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID:-}
+KIND=full
+FMT=${OTA_PAYLOAD_TAR_SUFFIX#tar.}
+HAS_ROOTFS=1
+EOF
+        [[ -n "${OTA_RECOVERY_PAYLOAD_ID}" ]] ||
+            exit_with_error "OTA package identity" "PAYLOAD_ID not computed for a recovery package"
+    fi
+}
+
+# Per-payload identity card staged inside the package (copied verbatim into
+# payloads/<PAYLOAD_ID>/ by the device-side start flow).
+function ota_write_payload_env() {
+    local ota_temp_dir="$1"
+    local manifest_mode="$2"
+
+    [[ "${manifest_mode}" == "recovery" && -n "${OTA_RECOVERY_PAYLOAD_ID:-}" ]] || return 0
+
+    cat > "${ota_temp_dir}/payload.env" << EOF
+PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID}
+KIND=full
+FMT=${OTA_PAYLOAD_TAR_SUFFIX#tar.}
+HAS_ROOTFS=1
+BOARD=${BOARD}
+RELEASE=${RELEASE}
+KERNEL=${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}
+VERSION=${IMAGE_VERSION:-${REVISION}}
+OTA_MODE=recovery
+EOF
+    display_alert "OTA payload identity" "payload.env staged (PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID})" "info"
 }
 
 # Stage a package-provided OTA hook (OTA_HOOK_SCRIPT build variable; the
@@ -596,28 +663,80 @@ function ota_create_payload_archives() {
     local ota_security_mode="$2"
     local boot_partition="$3"
     local boot_mount="${ota_temp_dir}/boot_mount"
+    local boot_stage="${ota_temp_dir}/boot_stage"
+    local payload_id
 
     if [[ "${ota_security_mode}" == "secure-boot-encrypted-rootfs" ]]; then
+        # raw-FIT/secure is Phase 2 (deferred design doc); no payload-id flow
         ota_copy_secure_boot_itb "${ota_temp_dir}" || return 1
+        rm -rf "${boot_mount}"
+        return 0
     fi
 
-    mkdir -p "${boot_mount}"
-    if [[ -n "${boot_partition}" && "${ota_security_mode}" != "secure-boot-encrypted-rootfs" ]]; then
-        if ! ota_archive_boot_partition "${boot_partition}" "${boot_mount}" "${ota_temp_dir}/boot.${OTA_PAYLOAD_TAR_SUFFIX}" \
-            "${ota_temp_dir}/boot.sha256" "boot partition" "warn"; then
+    # 1) stage the boot content (recovery/ and lost+found/ excluded) so the
+    #    identity can be folded in before the archive is sealed. The rescuer
+    #    directory never ships inside an OTA package (design section 1).
+    mkdir -p "${boot_mount}" "${boot_stage}"
+    if [[ -n "${boot_partition}" ]]; then
+        if ! mount "${boot_partition}" "${boot_mount}"; then
+            display_alert "Failed to mount boot partition" "${boot_partition}" "warn"
+            rm -rf "${boot_mount}" "${boot_stage}"
+            return 0
+        fi
+        (
+            cd "${boot_mount}" || exit 1
+            find . -mindepth 1 -maxdepth 1 \
+                ! -name recovery ! -name lost+found -print0 |
+                xargs -0 -r cp -a --target-directory="${boot_stage}"
+        ) || {
+            umount "${boot_mount}" 2>/dev/null || true
+            rm -rf "${boot_mount}" "${boot_stage}"
+            return 1
+        }
+        if ! umount "${boot_mount}"; then
+            rm -rf "${boot_mount}" "${boot_stage}"
             return 1
         fi
     fi
 
+    # 2) rootfs payload first (the identity anchors on its digest)
     if ! ota_archive_directory "${MOUNT}" "${ota_temp_dir}/rootfs.${OTA_PAYLOAD_TAR_SUFFIX}" \
         "${ota_temp_dir}/rootfs.sha256" "rootfs" "err" \
         --one-file-system \
         --exclude="./dev/*" --exclude="./proc/*" --exclude="./sys/*" --exclude="./tmp/*" --exclude="./run/*"; then
-        rm -rf "${boot_mount}"
+        rm -rf "${boot_mount}" "${boot_stage}"
         return 1
     fi
 
-    rm -rf "${boot_mount}"
+    # 3) identity: marker into the staged boot tree, then seal boot.tar
+    payload_id="$(ota_compute_payload_id \
+        "${ota_temp_dir}/rootfs.${OTA_PAYLOAD_TAR_SUFFIX}" "${boot_stage}" \
+        "${BOARD}" "${RELEASE}" "${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}" \
+        "${IMAGE_VERSION:-${REVISION}}")"
+    printf '%s\n' "${payload_id}" > "${boot_stage}/payload-id"
+    OTA_RECOVERY_PAYLOAD_ID="${payload_id}"
+
+    if [[ -n "${boot_partition}" ]]; then
+        if ! ota_payload_compress_archive "${boot_stage}" "${ota_temp_dir}/boot.${OTA_PAYLOAD_TAR_SUFFIX}"; then
+            rm -rf "${boot_mount}" "${boot_stage}"
+            return 1
+        fi
+        ota_write_sha256_file "${ota_temp_dir}" "boot.${OTA_PAYLOAD_TAR_SUFFIX}" "${ota_temp_dir}/boot.sha256"
+    fi
+
+    # 4) stamp the identity into the image itself: first-boot markers the
+    #    health service / future on-device backup consume as ordinary
+    #    content (the payload tar is already sealed, so it is unaffected).
+    mkdir -p "${MOUNT}/usr/share/armbian-ota" 2>/dev/null || true
+    printf '%s\n' "${payload_id}" > "${MOUNT}/usr/share/armbian-ota/installed-payload-id" 2>/dev/null || \
+        display_alert "OTA payload identity" "failed to stamp rootfs installed-payload-id" "warn"
+    if [[ -n "${boot_partition}" ]]; then
+        printf '%s\n' "${payload_id}" > "${MOUNT}/boot/payload-id" 2>/dev/null || \
+            display_alert "OTA payload identity" "failed to stamp boot payload-id" "warn"
+    fi
+
+    rm -rf "${boot_mount}" "${boot_stage}"
+    display_alert "OTA payload identity" "PAYLOAD_ID=${payload_id}" "info"
 }
 
 function ota_finalize_payload_package() {
@@ -639,6 +758,7 @@ function ota_finalize_payload_package() {
     mkdir -p "${DEST}/images/${BOARD}/ota/"
 
     ota_write_package_env "${ota_temp_dir}" "${manifest_mode}"
+    ota_write_payload_env "${ota_temp_dir}" "${manifest_mode}"
     ota_write_version_file "${ota_temp_dir}" "${base_image_name}"
 
     if ota_payload_encryption_enabled; then

@@ -1,0 +1,438 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1780" font-family="'DejaVu Sans Mono','Liberation Mono','Noto Sans Mono CJK SC',monospace">
+  <style>
+    text { font-family: 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono CJK SC', monospace; }
+    .title    { fill: #f1f5f9; font-size: 16px; font-weight: 700; }
+    .subtitle { fill: #94a3b8; font-size: 10px; font-weight: 400; }
+    .sect-t   { fill: #f1f5f9; font-size: 12px; font-weight: 700; }
+    .sect-s   { fill: #94a3b8; font-size: 9px;  font-weight: 400; }
+    .part-n   { fill: #f1f5f9; font-size: 10px; font-weight: 600; }
+    .part-s   { fill: #94a3b8; font-size: 8px;  font-weight: 400; }
+    .part-xs  { fill: #94a3b8; font-size: 7px;  font-weight: 400; }
+    .env-t    { fill: #fde68a; font-size: 9px;  font-weight: 600; }
+    .env-x    { fill: #fcd34d; font-size: 7px;  font-weight: 400; }
+    .raw-l    { fill: #fbbf24; font-size: 8px;  font-weight: 600; }
+    .sig-l    { fill: #fb7185; font-size: 7px;  font-weight: 600; }
+    .legend-t { fill: #cbd5e1; font-size: 9px;  font-weight: 500; }
+    .legend-s { fill: #94a3b8; font-size: 8px;  font-weight: 400; }
+    .callout  { fill: #fcd34d; font-size: 8px;  font-weight: 500; }
+  </style>
+
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+    </marker>
+  </defs>
+
+  <!-- ═══ Background ═══ -->
+  <rect width="1600" height="1780" fill="#0f172a"/>
+  <rect width="1600" height="1780" fill="url(#grid)"/>
+
+  <!-- ═══ Title ═══ -->
+  <text x="30" y="34" class="title">Rockchip Disk Partition Layouts — Seeed Armbian OTA</text>
+  <text x="30" y="52" class="subtitle">4 build profiles (Recovery / A/B × Plain / Secure) · fixed pre-GPT region · GPT partitions from OFFSET=16 MiB</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- Common pre-GPT strip (drawn once, applies to all four layouts)   -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <text x="30" y="90" class="sect-t">Fixed boot media region (every layout)</text>
+  <text x="30" y="104" class="sect-s">raw areas below the GPT — addressed by sector, not by partition</text>
+
+  <!-- strip: MBR | idbloader | ENV | u-boot.itb | gap | GPT hdr -->
+  <g transform="translate(30, 118)">
+    <!-- MBR/GPT protective -->
+    <rect x="0" y="0" width="36" height="60" fill="#0f172a"/>
+    <rect x="0" y="0" width="36" height="60" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1"/>
+    <text x="18" y="28" fill="#cbd5e1" font-size="8" font-weight="600" text-anchor="middle">MBR</text>
+    <text x="18" y="40" fill="#94a3b8" font-size="7" text-anchor="middle">sec 0</text>
+
+    <!-- idbloader -->
+    <rect x="36" y="0" width="180" height="60" fill="#0f172a"/>
+    <rect x="36" y="0" width="180" height="60" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="126" y="14" class="raw-l" text-anchor="middle">idbloader.img</text>
+    <text x="126" y="26" fill="#cbd5e1" font-size="8" text-anchor="middle">sector 64 · 0x8000</text>
+    <text x="126" y="38" fill="#94a3b8" font-size="7" text-anchor="middle">TPL (DDR) + SPL</text>
+    <text x="126" y="50" class="sig-l" text-anchor="middle">secure: RSA sign, pubkey → SPL dtb</text>
+
+    <!-- U-Boot ENV -->
+    <rect x="216" y="0" width="220" height="60" fill="#0f172a"/>
+    <rect x="216" y="0" width="220" height="60" fill="rgba(120,53,15,0.5)" stroke="#fbbf24" stroke-width="2"/>
+    <text x="326" y="14" class="env-t" text-anchor="middle">★ U-Boot ENV ★</text>
+    <text x="326" y="26" fill="#cbd5e1" font-size="8" text-anchor="middle">sector 8128 · 0x3f8000 · 32 KiB</text>
+    <text x="326" y="38" class="env-x" text-anchor="middle">recovery: bootcmd + armbian.bootdev token</text>
+    <text x="326" y="50" class="env-x" text-anchor="middle">A/B mode additionally writes slot state here — see ④</text>
+
+    <!-- u-boot.itb -->
+    <rect x="436" y="0" width="200" height="60" fill="#0f172a"/>
+    <rect x="436" y="0" width="200" height="60" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="536" y="14" class="raw-l" text-anchor="middle">u-boot.itb</text>
+    <text x="536" y="26" fill="#cbd5e1" font-size="8" text-anchor="middle">sector 16384 · 0x800000</text>
+    <text x="536" y="38" fill="#94a3b8" font-size="7" text-anchor="middle">ATF BL31 + OP-TEE BL32 + U-Boot</text>
+    <text x="536" y="50" class="sig-l" text-anchor="middle">secure: SPL verifies RSA signature</text>
+
+    <!-- gap / GPT -->
+    <rect x="636" y="0" width="120" height="60" fill="#0f172a"/>
+    <rect x="636" y="0" width="120" height="60" fill="rgba(30,41,59,0.5)" stroke="#475569" stroke-width="1" stroke-dasharray="3,3"/>
+    <text x="696" y="28" fill="#64748b" font-size="8" text-anchor="middle">… gap …</text>
+    <text x="696" y="40" fill="#64748b" font-size="7" text-anchor="middle">unused</text>
+
+    <!-- GPT header at OFFSET -->
+    <rect x="756" y="0" width="140" height="60" fill="#0f172a"/>
+    <rect x="756" y="0" width="140" height="60" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1"/>
+    <text x="826" y="14" fill="#cbd5e1" font-size="8" font-weight="600" text-anchor="middle">GPT header</text>
+    <text x="826" y="26" fill="#94a3b8" font-size="7" text-anchor="middle">OFFSET=16 MiB</text>
+    <text x="826" y="38" fill="#94a3b8" font-size="7" text-anchor="middle">table-length=64</text>
+    <text x="826" y="50" fill="#94a3b8" font-size="7" text-anchor="middle">p1 starts here</text>
+
+    <!-- axis -->
+    <line x1="0" y1="72" x2="896" y2="72" stroke="#475569" stroke-width="1"/>
+    <text x="0"   y="84" fill="#64748b" font-size="7" text-anchor="middle">0</text>
+    <text x="36"  y="72" fill="#64748b" font-size="7" text-anchor="middle" dy="10">64</text>
+    <text x="216" y="72" fill="#64748b" font-size="7" text-anchor="middle" dy="10">8128</text>
+    <text x="436" y="72" fill="#64748b" font-size="7" text-anchor="middle" dy="10">16384</text>
+    <text x="756" y="72" fill="#64748b" font-size="7" text-anchor="middle" dy="10">32768</text>
+  </g>
+
+  <!-- chain annotation -->
+  <text x="960" y="132" class="callout">chain of trust (secure-boot only):</text>
+  <text x="960" y="146" class="legend-s">ROM → idbloader → SPL (pubkey baked) → u-boot.itb → boot.itb (in p1)</text>
+  <text x="960" y="158" class="legend-s">ENV is CRC32-only — never signed; SPL/U-Boot are signed; kernel FIT is signed</text>
+  <text x="960" y="170" class="legend-s">files: uboot-env-prefill.sh · secure-boot-uboot.sh · secure-boot-image.sh</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- ① Plain Recovery                                                -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <g transform="translate(30, 240)">
+    <text x="0" y="0" class="sect-t">① Plain Recovery</text>
+    <text x="0" y="14" class="sect-s">./build.sh recovery — single system · boot is ext4 files · no encryption</text>
+
+    <!-- partitions: p1 boot | p2 rootfs | p3 userdata -->
+    <!-- p1 -->
+    <rect x="0" y="28" width="240" height="170" fill="#0f172a"/>
+    <rect x="0" y="28" width="240" height="170" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="120" y="46" class="part-n" text-anchor="middle">p1 · "boot"</text>
+    <text x="120" y="60" class="part-s" text-anchor="middle">512 MiB · ext4</text>
+    <text x="120" y="74" class="part-s" text-anchor="middle">label: armbi_boot</text>
+    <line x1="10" y1="86" x2="230" y2="86" stroke="#22d3ee" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="12" y="100" class="part-xs">├── Image</text>
+    <text x="12" y="112" class="part-xs">├── uInitrd</text>
+    <text x="12" y="124" class="part-xs">├── dtb/</text>
+    <text x="12" y="136" class="part-xs">├── armbianEnv.txt</text>
+    <text x="12" y="148" class="part-xs">└── extlinux/</text>
+    <text x="12" y="168" fill="#22d3ee" font-size="7">mounted at /boot (direct, not overlay)</text>
+    <text x="12" y="180" fill="#22d3ee" font-size="7">U-Boot reads via ext4 driver</text>
+
+    <!-- p2 rootfs -->
+    <rect x="252" y="28" width="240" height="170" fill="#0f172a"/>
+    <rect x="252" y="28" width="240" height="170" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="372" y="46" class="part-n" text-anchor="middle">p2 · "rootfs"</text>
+    <text x="372" y="60" class="part-s" text-anchor="middle">rootfs_size + 20% · ext4</text>
+    <text x="372" y="74" class="part-s" text-anchor="middle">label: armbi_root</text>
+    <line x1="262" y1="86" x2="482" y2="86" stroke="#34d399" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="264" y="100" class="part-xs">read-only overlay lower layer</text>
+    <text x="264" y="112" class="part-xs">replaced wholesale by OTA</text>
+    <text x="264" y="124" class="part-xs">(tar -xzf over it in initramfs)</text>
+    <text x="264" y="146" fill="#34d399" font-size="7">never mounted read-write at runtime</text>
+
+    <!-- p3 userdata -->
+    <rect x="504" y="28" width="240" height="170" fill="#0f172a"/>
+    <rect x="504" y="28" width="240" height="170" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="624" y="46" class="part-n" text-anchor="middle">p3 · "userdata"</text>
+    <text x="624" y="60" class="part-s" text-anchor="middle">512 MiB → grows to fill disk</text>
+    <text x="624" y="74" class="part-s" text-anchor="middle">label: armbi_usrdata</text>
+    <line x1="514" y1="86" x2="734" y2="86" stroke="#a78bfa" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="516" y="100" class="part-xs">overlay upper (writable /)</text>
+    <text x="516" y="112" class="part-xs">/home · /var/lib · apt packages</text>
+    <text x="516" y="124" class="part-xs">ota-recovery/ota_work/   (staged pkg)</text>
+    <text x="516" y="136" class="part-xs">ota-recovery/state/      (state machine)</text>
+    <text x="516" y="156" fill="#a78bfa" font-size="7">OTA never rewrites — survives updates</text>
+
+    <!-- annotation -->
+    <text x="770" y="60" class="legend-s">boot policy: trust files on ext4</text>
+    <text x="770" y="74" class="legend-s">no signing, no encryption</text>
+    <text x="770" y="94" class="legend-s">OTA path: initramfs hook 99-ota-apply</text>
+    <text x="770" y="108" class="legend-s">replaces p1 files + p2 contents</text>
+    <text x="770" y="128" class="legend-s">ENV: only bootcmd token</text>
+    <text x="770" y="142" class="legend-s">(armbian.bootdev=…)</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- ② Plain A/B                                                     -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <g transform="translate(30, 500)">
+    <text x="0" y="0" class="sect-t">② Plain A/B</text>
+    <text x="0" y="14" class="sect-s">./build.sh ab — two complete systems · dual boot+rootfs slots · no encryption</text>
+
+    <!-- p1 boot_a -->
+    <rect x="0" y="28" width="180" height="170" fill="#0f172a"/>
+    <rect x="0" y="28" width="180" height="170" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="90" y="46" class="part-n" text-anchor="middle">p1 · "boot_a"</text>
+    <text x="90" y="60" class="part-s" text-anchor="middle">512 MiB · ext4</text>
+    <text x="90" y="74" class="part-s" text-anchor="middle">armbi_boota</text>
+    <line x1="8" y1="86" x2="172" y2="86" stroke="#22d3ee" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="10" y="100" class="part-xs">Image · uInitrd · dtb/</text>
+    <text x="10" y="112" class="part-xs">armbianEnv.txt</text>
+    <text x="10" y="130" fill="#22d3ee" font-size="7">★ LegacyBIOSBootable</text>
+    <text x="10" y="142" fill="#22d3ee" font-size="7">(deterministic fallback)</text>
+
+    <!-- p2 boot_b -->
+    <rect x="190" y="28" width="180" height="170" fill="#0f172a"/>
+    <rect x="190" y="28" width="180" height="170" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="280" y="46" class="part-n" text-anchor="middle">p2 · "boot_b"</text>
+    <text x="280" y="60" class="part-s" text-anchor="middle">512 MiB · ext4</text>
+    <text x="280" y="74" class="part-s" text-anchor="middle">armbi_bootb</text>
+    <line x1="198" y1="86" x2="362" y2="86" stroke="#22d3ee" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="200" y="100" class="part-xs">Image · uInitrd · dtb/</text>
+    <text x="200" y="112" class="part-xs">armbianEnv.txt</text>
+
+    <!-- p3 rootfs_a -->
+    <rect x="380" y="28" width="180" height="170" fill="#0f172a"/>
+    <rect x="380" y="28" width="180" height="170" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="470" y="46" class="part-n" text-anchor="middle">p3 · "rootfs_a"</text>
+    <text x="470" y="60" class="part-s" text-anchor="middle">rootfs+20% · ext4</text>
+    <text x="470" y="74" class="part-s" text-anchor="middle">armbi_roota</text>
+    <line x1="388" y1="86" x2="552" y2="86" stroke="#34d399" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="390" y="100" class="part-xs">read-only lower</text>
+    <text x="390" y="112" class="part-xs">(slot A)</text>
+
+    <!-- p4 rootfs_b -->
+    <rect x="570" y="28" width="180" height="170" fill="#0f172a"/>
+    <rect x="570" y="28" width="180" height="170" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="660" y="46" class="part-n" text-anchor="middle">p4 · "rootfs_b"</text>
+    <text x="660" y="60" class="part-s" text-anchor="middle">rootfs+20% · ext4</text>
+    <text x="660" y="74" class="part-s" text-anchor="middle">armbi_rootb</text>
+    <line x1="578" y1="86" x2="742" y2="86" stroke="#34d399" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="580" y="100" class="part-xs">read-only lower</text>
+    <text x="580" y="112" class="part-xs">(slot B)</text>
+
+    <!-- p5 userdata -->
+    <rect x="760" y="28" width="180" height="170" fill="#0f172a"/>
+    <rect x="760" y="28" width="180" height="170" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="850" y="46" class="part-n" text-anchor="middle">p5 · "userdata"</text>
+    <text x="850" y="60" class="part-s" text-anchor="middle">512 MiB→fill disk</text>
+    <text x="850" y="74" class="part-s" text-anchor="middle">armbi_usrdata</text>
+    <line x1="768" y1="86" x2="932" y2="86" stroke="#a78bfa" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="770" y="100" class="part-xs">shared across slots</text>
+    <text x="770" y="112" class="part-xs">OTA never touches</text>
+
+    <!-- ENV mini callout -->
+    <rect x="970" y="28" width="380" height="170" rx="8" fill="#0f172a"/>
+    <rect x="970" y="28" width="380" height="170" rx="8" fill="rgba(120,53,15,0.2)" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6,3"/>
+    <text x="982" y="48" class="env-t">★ ENV @ 0x3f8000 — A/B slot state ★</text>
+    <line x1="982" y1="56" x2="1338" y2="56" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="982" y="72" class="env-x">boot_slot=a|b          next slot</text>
+    <text x="982" y="84" class="env-x">boot_success=a|b       rollback target</text>
+    <text x="982" y="96" class="env-x">ota_in_progress=0|1    pending verify</text>
+    <text x="982" y="108" class="env-x">slot_retry_max=3 / slot_retry_left=3</text>
+    <text x="982" y="120" class="env-x">ab_boot_mode=filesystem</text>
+    <text x="982" y="132" class="env-x">ab_preboot=…retry, hard rollback…</text>
+    <line x1="982" y1="140" x2="1338" y2="140" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="982" y="156" fill="#fcd34d" font-size="7">U-Boot reads ENV → picks slot →</text>
+    <text x="982" y="168" fill="#fcd34d" font-size="7">loads boot_a|boot_b ext4 files.</text>
+    <text x="982" y="184" fill="#fcd34d" font-size="7">No signing — ext4 trust only.</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- ③ Auto-Decrypt Secure Recovery                                  -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <g transform="translate(30, 760)">
+    <text x="0" y="0" class="sect-t">③ Auto-Decrypt Secure Recovery</text>
+    <text x="0" y="14" class="sect-s">./build.sh recovery secure-boot — p1 becomes a signed raw FIT partition · no /boot filesystem · LUKS rootfs+userdata</text>
+
+    <!-- p1 raw FIT -->
+    <rect x="0" y="28" width="240" height="200" fill="#0f172a"/>
+    <rect x="0" y="28" width="240" height="200" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="2"/>
+    <text x="120" y="46" class="part-n" text-anchor="middle">p1 · "boot"</text>
+    <text x="120" y="60" class="part-s" text-anchor="middle">512 MiB · raw FIT partition</text>
+    <text x="120" y="74" class="part-s" text-anchor="middle">(no filesystem · no label)</text>
+    <line x1="10" y1="86" x2="230" y2="86" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+
+    <!-- inner FIT box -->
+    <rect x="20" y="98" width="200" height="92" rx="4" fill="#0f172a"/>
+    <rect x="20" y="98" width="200" height="92" rx="4" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="120" y="114" class="sig-l" text-anchor="middle" font-size="9">★ boot.itb (kernel FIT) ★</text>
+    <text x="120" y="128" fill="#cbd5e1" font-size="8" text-anchor="middle">kernel + dtb + initrd</text>
+    <text x="120" y="140" fill="#cbd5e1" font-size="8" text-anchor="middle">overlays baked via fdtoverlay</text>
+    <text x="120" y="152" fill="#fb7185" font-size="7" text-anchor="middle">RSA-PSS signed (mkimage -E -r)</text>
+    <text x="120" y="164" fill="#fb7185" font-size="7" text-anchor="middle">U-Boot verifies against SPL pubkey</text>
+    <text x="120" y="180" fill="#94a3b8" font-size="7" text-anchor="middle">mkimage: rockchip prebuilt (max-salt)</text>
+
+    <text x="12" y="204" fill="#fbbf24" font-size="7">written by dd at build time</text>
+    <text x="12" y="216" fill="#fbbf24" font-size="7">secure-boot-image.sh: rk_secure_boot_flash_fit_kernel</text>
+
+    <!-- p2 security -->
+    <rect x="252" y="28" width="180" height="200" fill="#0f172a"/>
+    <rect x="252" y="28" width="180" height="200" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="342" y="46" class="part-n" text-anchor="middle">p2 · "security"</text>
+    <text x="342" y="60" class="part-s" text-anchor="middle">4 MiB · raw</text>
+    <line x1="262" y1="86" x2="422" y2="86" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="264" y="100" class="part-xs">OP-TEE keybox TA</text>
+    <text x="264" y="112" class="part-xs">stores LUKS passphrase</text>
+    <text x="264" y="124" class="part-xs">no filesystem</text>
+    <text x="264" y="146" fill="#fbbf24" font-size="7">initramfs reads once,</text>
+    <text x="264" y="158" fill="#fbbf24" font-size="7">stashes to /run</text>
+
+    <!-- p3 rootfs LUKS -->
+    <rect x="444" y="28" width="180" height="200" fill="#0f172a"/>
+    <rect x="444" y="28" width="180" height="200" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="534" y="46" class="part-n" text-anchor="middle">p3 · "rootfs"</text>
+    <text x="534" y="60" class="part-s" text-anchor="middle">🔒 LUKS + ext4</text>
+    <text x="534" y="74" class="part-s" text-anchor="middle">label: armbi_root</text>
+    <line x1="454" y1="86" x2="614" y2="86" stroke="#fb7185" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="456" y="100" class="part-xs">/dev/mapper/armbian-root</text>
+    <text x="534" y="124" fill="#fb7185" font-size="7" text-anchor="middle">locked at rest</text>
+    <text x="534" y="138" fill="#fb7185" font-size="7" text-anchor="middle">unlocked by keybox</text>
+
+    <!-- p4 userdata LUKS -->
+    <rect x="636" y="28" width="180" height="200" fill="#0f172a"/>
+    <rect x="636" y="28" width="180" height="200" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="726" y="46" class="part-n" text-anchor="middle">p4 · "userdata"</text>
+    <text x="726" y="60" class="part-s" text-anchor="middle">🔒 LUKS + ext4</text>
+    <text x="726" y="74" class="part-s" text-anchor="middle">label: armbi_usrdata</text>
+    <line x1="646" y1="86" x2="806" y2="86" stroke="#fb7185" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="648" y="100" class="part-xs">/dev/mapper/armbian-userdata</text>
+    <text x="726" y="124" fill="#fb7185" font-size="7" text-anchor="middle">same passphrase as rootfs</text>
+
+    <!-- annotation -->
+    <text x="846" y="60" class="legend-s">/boot filesystem ❌ gone</text>
+    <text x="846" y="74" class="legend-s">nothing on p1 can be edited at runtime</text>
+    <text x="846" y="94" class="legend-s">overlay change → re-sign FIT → dd p1</text>
+    <text x="846" y="108" class="legend-s">(use scripts/repack-fit.sh)</text>
+    <text x="846" y="128" class="legend-s">ENV: bootcmd with token</text>
+    <text x="846" y="142" class="legend-s">+ recovery path (no A/B vars)</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <!-- ④ Auto-Decrypt Secure A/B                                       -->
+  <!-- ═══════════════════════════════════════════════════════════════ -->
+  <g transform="translate(30, 1080)">
+    <text x="0" y="0" class="sect-t">④ Auto-Decrypt Secure A/B</text>
+    <text x="0" y="14" class="sect-s">./build.sh ab secure-boot — two raw FIT slots · dual rootfs · shared keybox+userdata · ENV carries slot state</text>
+
+    <!-- p1 boot_a raw FIT -->
+    <rect x="0" y="28" width="200" height="200" fill="#0f172a"/>
+    <rect x="0" y="28" width="200" height="200" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="2"/>
+    <text x="100" y="46" class="part-n" text-anchor="middle">p1 · "boot_a"</text>
+    <text x="100" y="60" class="part-s" text-anchor="middle">512 MiB · raw FIT</text>
+    <line x1="10" y1="86" x2="190" y2="86" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <rect x="15" y="98" width="170" height="78" rx="4" fill="#0f172a"/>
+    <rect x="15" y="98" width="170" height="78" rx="4" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="100" y="114" class="sig-l" text-anchor="middle" font-size="9">boot.itb (slot A)</text>
+    <text x="100" y="128" fill="#cbd5e1" font-size="8" text-anchor="middle">kernel + dtb + initrd</text>
+    <text x="100" y="140" fill="#fb7185" font-size="7" text-anchor="middle">RSA-PSS signed</text>
+    <text x="100" y="152" fill="#fb7185" font-size="7" text-anchor="middle">active when boot_slot=a</text>
+    <text x="100" y="200" fill="#fbbf24" font-size="7" text-anchor="middle">❌ no LegacyBIOSBootable</text>
+    <text x="100" y="212" fill="#fbbf24" font-size="7" text-anchor="middle">(raw mode skips the attr)</text>
+
+    <!-- p2 boot_b raw FIT -->
+    <rect x="212" y="28" width="200" height="200" fill="#0f172a"/>
+    <rect x="212" y="28" width="200" height="200" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="2"/>
+    <text x="312" y="46" class="part-n" text-anchor="middle">p2 · "boot_b"</text>
+    <text x="312" y="60" class="part-s" text-anchor="middle">512 MiB · raw FIT</text>
+    <line x1="222" y1="86" x2="402" y2="86" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <rect x="227" y="98" width="170" height="78" rx="4" fill="#0f172a"/>
+    <rect x="227" y="98" width="170" height="78" rx="4" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="312" y="114" class="sig-l" text-anchor="middle" font-size="9">boot.itb (slot B)</text>
+    <text x="312" y="128" fill="#cbd5e1" font-size="8" text-anchor="middle">kernel + dtb + initrd</text>
+    <text x="312" y="140" fill="#fb7185" font-size="7" text-anchor="middle">RSA-PSS signed</text>
+    <text x="312" y="152" fill="#fb7185" font-size="7" text-anchor="middle">active when boot_slot=b</text>
+
+    <!-- p3 security -->
+    <rect x="424" y="28" width="140" height="200" fill="#0f172a"/>
+    <rect x="424" y="28" width="140" height="200" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="494" y="46" class="part-n" text-anchor="middle">p3 · "security"</text>
+    <text x="494" y="60" class="part-s" text-anchor="middle">4 MiB · raw</text>
+    <text x="494" y="100" fill="#fbbf24" font-size="7" text-anchor="middle">shared across</text>
+    <text x="494" y="112" fill="#fbbf24" font-size="7" text-anchor="middle">both slots</text>
+
+    <!-- p4 rootfs_a LUKS -->
+    <rect x="576" y="28" width="140" height="200" fill="#0f172a"/>
+    <rect x="576" y="28" width="140" height="200" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="646" y="46" class="part-n" text-anchor="middle">p4 · "rootfs_a"</text>
+    <text x="646" y="60" class="part-s" text-anchor="middle">🔒 LUKS+ext4</text>
+    <text x="646" y="74" class="part-s" text-anchor="middle">armbi_roota</text>
+
+    <!-- p5 rootfs_b LUKS -->
+    <rect x="728" y="28" width="140" height="200" fill="#0f172a"/>
+    <rect x="728" y="28" width="140" height="200" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="798" y="46" class="part-n" text-anchor="middle">p5 · "rootfs_b"</text>
+    <text x="798" y="60" class="part-s" text-anchor="middle">🔒 LUKS+ext4</text>
+    <text x="798" y="74" class="part-s" text-anchor="middle">armbi_rootb</text>
+
+    <!-- p6 userdata LUKS -->
+    <rect x="880" y="28" width="180" height="200" fill="#0f172a"/>
+    <rect x="880" y="28" width="180" height="200" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="970" y="46" class="part-n" text-anchor="middle">p6 · "userdata"</text>
+    <text x="970" y="60" class="part-s" text-anchor="middle">🔒 LUKS+ext4</text>
+    <text x="970" y="74" class="part-s" text-anchor="middle">armbi_usrdata</text>
+    <text x="970" y="100" fill="#fb7185" font-size="7" text-anchor="middle">shared across slots</text>
+    <text x="970" y="112" fill="#fb7185" font-size="7" text-anchor="middle">never rewritten by OTA</text>
+
+    <!-- ENV highlight callout -->
+    <rect x="1080" y="28" width="490" height="200" rx="8" fill="#0f172a"/>
+    <rect x="1080" y="28" width="490" height="200" rx="8" fill="rgba(120,53,15,0.2)" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6,3"/>
+    <text x="1092" y="48" class="env-t">★ U-Boot ENV @ 0x3f8000 — A/B state machine ★</text>
+    <line x1="1092" y1="56" x2="1558" y2="56" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="1092" y="72" class="env-x">boot_slot=a|b            next slot to boot</text>
+    <text x="1092" y="84" class="env-x">boot_success=a|b         last healthy slot (rollback target)</text>
+    <text x="1092" y="96" class="env-x">ota_in_progress=0|1      pending verification</text>
+    <text x="1092" y="108" class="env-x">slot_retry_max=3         boot-attempt budget</text>
+    <text x="1092" y="120" class="env-x">slot_retry_left=3        decremented by ab_preboot</text>
+    <text x="1092" y="132" class="env-x">ab_boot_mode=raw-fit     forced by uboot-env-prefill</text>
+    <text x="1092" y="144" class="env-x">ab_preboot=…retry logic, rolls back when exhausted…</text>
+    <text x="1092" y="156" class="env-x">ab_select_fit_slot=…maps slot → boot_fit_part=boot_a|b…</text>
+    <text x="1092" y="168" class="env-x">bootcmd=run ab_preboot; … armbian.bootdev=…; boot_fit</text>
+    <line x1="1092" y1="178" x2="1558" y2="178" stroke="#fbbf24" stroke-width="0.5" stroke-opacity="0.5"/>
+    <text x="1092" y="194" fill="#fcd34d" font-size="7">U-Boot reads ENV, picks slot, calls boot_fit on the raw FIT partition,</text>
+    <text x="1092" y="206" fill="#fcd34d" font-size="7">verifies RSA-PSS, jumps into kernel — no ext4 driver, no /boot filesystem.</text>
+    <text x="1092" y="218" fill="#fcd34d" font-size="7">Plain profiles (①②) carry only bootcmd + armbian.bootdev token here.</text>
+  </g>
+
+  <!-- ═══ Legend ═══ -->
+  <g transform="translate(30, 1380)">
+    <text x="0" y="0" class="legend-t" font-weight="700">Legend</text>
+
+    <rect x="0" y="14" width="20" height="12" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+    <text x="26" y="24" class="legend-s">raw area / FIT partition (no filesystem)</text>
+
+    <rect x="0" y="34" width="20" height="12" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/>
+    <text x="26" y="44" class="legend-s">plaintext ext4 boot files</text>
+
+    <rect x="0" y="54" width="20" height="12" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1"/>
+    <text x="26" y="64" class="legend-s">plaintext ext4 rootfs (read-only lower)</text>
+
+    <rect x="0" y="74" width="20" height="12" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1"/>
+    <text x="26" y="84" class="legend-s">plaintext ext4 userdata (overlay upper)</text>
+
+    <rect x="0" y="94" width="20" height="12" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1"/>
+    <text x="26" y="104" class="legend-s">🔒 LUKS-encrypted partition / signed FIT</text>
+
+    <text x="320" y="24" class="legend-s">sector 64    idbloader.img  (TPL+SPL, RSA-signed on secure-boot)</text>
+    <text x="320" y="44" class="legend-s">sector 8128  U-Boot ENV     (32 KiB, CRC32, pre-filled at build)</text>
+    <text x="320" y="64" class="legend-s">sector 16384 u-boot.itb     (U-Boot's own FIT: ATF+OP-TEE+U-Boot)</text>
+    <text x="320" y="84" class="legend-s">p1..p6       GPT partitions from OFFSET=16 MiB</text>
+    <text x="320" y="104" class="legend-s">boot.itb     kernel FIT inside p1 (③) or p1+p2 (④) — distinct from u-boot.itb</text>
+
+    <text x="780" y="24" class="legend-s">ENV vars (A/B only): boot_slot · boot_success · ota_in_progress · retry budget</text>
+    <text x="780" y="44" class="legend-s">ENV vars (all):      bootcmd with armbian.bootdev=… / armbian.bootdevnum=…</text>
+    <text x="780" y="64" class="legend-s">FIT content:         kernel + dtb (overlays baked) + initrd + RSA-PSS signature</text>
+    <text x="780" y="84" class="legend-s">Verification:        SPL pubkey (in dtb) → u-boot.itb → boot.itb → LUKS unlock</text>
+    <text x="780" y="104" class="legend-s">OTA never touches:   userdata, security, ENV (only runtime slot flips)</text>
+  </g>
+
+  <!-- footer -->
+  <text x="30" y="1530" fill="#475569" font-size="8">
+    sources: armbian-ota/{recovery,ab}/build-hooks/partitions.sh · common/build-hooks/{partitions,uboot-env-prefill}.sh · rk_secure-disk-encryption/build-hooks/secure-boot-{uboot,image}.sh · docs/{03-ota-recovery,04-ota-ab,06-secure-boot}.md
+  </text>
+</svg>

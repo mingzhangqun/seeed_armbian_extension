@@ -25,6 +25,9 @@ copy_exec_first() {
     done
     return 0
 }
+# NOTE: everything below feeds a `while read` loop over a heredoc -- the
+# heredoc body is DATA, shell comments inside it would be parsed as a
+# dest/candidates line. Keep commentary here, never inside the EOF block.
 
 copy_ota_lib() {
     lib="$1"
@@ -102,6 +105,33 @@ done <<'EOF'
 /usr/sbin /usr/sbin/reboot /sbin/reboot
 EOF
 
+# fw_setenv/fw_printenv: stage explicitly (binaries + the private
+# libubootenv.so.0) instead of copy_exec -- copy_exec resolves dependencies
+# through ldd and silently dropped these two on the build host (observed:
+# every other binary stages fine, fw_* vanish without an error).
+fw_env_staged=0
+for fw_bin in fw_setenv fw_printenv; do
+    for pfx in /usr/bin /usr/sbin /sbin; do
+        if [ -x "${pfx}/${fw_bin}" ]; then
+            mkdir -p "${DESTDIR}${pfx}"
+            cp -p "${pfx}/${fw_bin}" "${DESTDIR}${pfx}/${fw_bin}"
+            fw_env_staged=$((fw_env_staged + 1))
+            break
+        fi
+    done
+done
+if [ "${fw_env_staged}" -eq 2 ]; then
+    for lib in /usr/lib/aarch64-linux-gnu/libubootenv.so.0* \
+               /lib/aarch64-linux-gnu/libubootenv.so.0*; do
+        [ -e "${lib}" ] || continue
+        mkdir -p "${DESTDIR}/usr/lib/aarch64-linux-gnu"
+        cp -p "${lib}" "${DESTDIR}/usr/lib/aarch64-linux-gnu/"
+    done
+    echo "[99-copy-tools] staged fw_setenv/fw_printenv + libubootenv" >&2
+else
+    echo "[99-copy-tools] WARN: fw_setenv/fw_printenv not found in rootfs (${fw_env_staged}/2); OTA env writes will fail on device" >&2
+fi
+
 # e2fsprogs ships mkfs.ext4 as a symlink to mke2fs. The initramfs busybox
 # already installs its own mke2fs applet hardlink at that path, and busybox
 # has no "mkfs.ext4" applet name, so the copied symlink dispatches into
@@ -113,6 +143,7 @@ copy_exec_first /usr/sbin /usr/sbin/mke2fs /sbin/mke2fs
 
 copy_ota_lib state.sh
 copy_ota_lib find-userdata.sh
+copy_ota_lib fwenv.sh
 copy_recovery_initramfs_lib log.sh
 copy_recovery_initramfs_lib device.sh
 copy_recovery_initramfs_lib payload.sh

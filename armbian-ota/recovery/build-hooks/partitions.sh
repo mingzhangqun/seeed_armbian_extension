@@ -2,6 +2,12 @@
 
 function extension_prepare_config__install_recovery_ota() {
     ota_install_overlayroot_dependencies
+    # v0.8: zstd packs/unpacks the lazy backup and the OTA payloads.
+    # fw_setenv/fw_printenv come from the Debian bookworm libubootenv-tool
+    # debs installed by ota_install_recovery_fw_env_tools (runtime-install.sh):
+    # Ubuntu noble's u-boot-tools ships no fw_* binaries and uboot-envtools
+    # has no arm64 installation candidate on ports.ubuntu.com.
+    add_packages_to_image zstd
 }
 
 function pre_prepare_partitions__recovery_ota() {

@@ -83,7 +83,13 @@ call_mode_action() {
     local mode="$1" action="$2" package="${3:-}"
     require_mode_backend "${mode}"
     case "${action}" in
-        start) "${mode}_start_ota" "${package}" ;;
+        start)
+            if [ "${mode}" = "recovery" ]; then
+                recovery_start_ota "${package}" "${OTA_CLI_FORCE:-}" "${OTA_CLI_NO_BACKUP:-}"
+            else
+                "${mode}_start_ota" "${package}"
+            fi
+            ;;
         status|mark-success|rollback) "${mode}_${action//-/_}" ;;
         *) error_exit "Unsupported action: ${action}" ;;
     esac
@@ -108,8 +114,17 @@ case "${1:-}" in
     start)
         shift
         ensure_root
-        [ $# -eq 1 ] || error_exit "start requires exactly one argument: the OTA package path"
-        case "$1" in -*) error_exit "Unknown option: $1" ;; esac
+        OTA_CLI_FORCE=""
+        OTA_CLI_NO_BACKUP=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --force)     OTA_CLI_FORCE="yes"; shift ;;
+                --no-backup) OTA_CLI_NO_BACKUP="yes"; shift ;;
+                -*)          error_exit "Unknown option: $1 (supported: --force, --no-backup)" ;;
+                *)           break ;;
+            esac
+        done
+        [ $# -eq 1 ] || error_exit "start requires exactly one argument: the OTA package path (options: --force, --no-backup)"
         OTA_CLI_PACKAGE="$1"
         check_ota_pkg "${OTA_CLI_PACKAGE}"
         call_mode_action "${OTA_CLI_MODE}" "start" "${OTA_CLI_PACKAGE}"
@@ -139,9 +154,13 @@ case "${1:-}" in
     *)
         cat <<'EOF'
 Usage:
-  armbian-ota start <ota-package.tar.gz>
+  armbian-ota start [--force] [--no-backup] <ota-package.tar.gz>
   armbian-ota status
   armbian-ota switch-slot [a|b]
+
+Options (recovery mode):
+  --force      bypass the INSTALLED_ID duplicate check (reinstall repair)
+  --no-backup  skip the lazy last-good backup creation for this transaction
 EOF
         exit 1
         ;;

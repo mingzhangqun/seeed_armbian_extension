@@ -34,7 +34,7 @@ ota_resolve_payload_names() {
 
     OTA_PAYLOAD_ROOTFS_TAR=""
     OTA_PAYLOAD_BOOT_TAR=""
-    for suffix in tar.xz tar.gz; do
+    for suffix in tar.zst tar.xz tar.gz; do
         if [ -z "${OTA_PAYLOAD_ROOTFS_TAR}" ] && { [ -f "${work_dir}/rootfs.${suffix}" ] || [ -f "${work_dir}/rootfs.${suffix}.enc" ]; }; then
             OTA_PAYLOAD_ROOTFS_TAR="rootfs.${suffix}"
         fi
@@ -99,8 +99,8 @@ ota_assert_payload_matches_system() {
 # armbian-ota deb version; bump it whenever OTA_RUNTIME_FORMATS or the apply
 # hook contract changes. Packages declare PAYLOAD_FORMAT / MIN_RUNTIME_VERSION
 # in package.env and phase 1 negotiates against these (docs/10-ota-package-formats.md).
-OTA_RUNTIME_VERSION="1.2"
-OTA_RUNTIME_FORMATS="gz xz"
+OTA_RUNTIME_VERSION="1.3"
+OTA_RUNTIME_FORMATS="gz xz zst"
 OTA_HOOK_API="1"
 OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
 # Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.

@@ -1,11 +1,14 @@
 #!/bin/sh
 #
-# Recovery initramfs init-premount hook: OTA update orchestrator.
+# Recovery initramfs orchestrator (v0.8 plain design).
 #
-# Recovery OTA is applied in a single linear transaction. All helpers live in
-# the initramfs-specific POSIX sh libraries under /usr/share/armbian-ota/:
-# recovery/log.sh, recovery/device.sh, recovery/payload.sh, plus state.sh.
-# This script only sources them and drives the ordered steps.
+# The SAME initramfs boots in two roles: normal (no marker; premount does
+# nothing -- the /run marker copy for the health service lives in
+# init-bottom/99-ota-normal-marker) and Rescue (armbian.ota_role=recovery,
+# set only by ota_rescue_boot). The Rescue role reconciles state + U-Boot env
+# after any power cut, then drives the campaign state machine:
+# prepared -> applied -> reboot (normal one-shot handoff), with retries and
+# the exhaustion-triggered backup restore (design sections 6, 7, 15.4).
 
 PREREQ=""
 
@@ -22,6 +25,7 @@ esac
 
 . /usr/share/armbian-ota/state.sh
 . /usr/share/armbian-ota/find-userdata.sh
+. /usr/share/armbian-ota/fwenv.sh
 . /usr/share/armbian-ota/recovery/log.sh
 . /usr/share/armbian-ota/recovery/device.sh
 . /usr/share/armbian-ota/recovery/payload.sh
@@ -36,26 +40,58 @@ ROOT_MNT="/mnt/root"
 BOOT_MNT="/mnt/boot"
 USERDATA_MNT="/mnt/userdata"
 RECOVERY_TRANSACTION_DIR="${USERDATA_MNT}/ota-recovery"
-STATE_DIR=""
-STATE_FILE=""
+PAYLOADS_DIR="${RECOVERY_TRANSACTION_DIR}/payloads"
+STATE_DIR="${RECOVERY_TRANSACTION_DIR}/state"
+STATE_FILE="${STATE_DIR}/ota-state.env"
 OTA_DIR=""
 ROOTFS_TAR=""
 BOOT_TAR=""
 BOOT_ITB=""
+USERDATA_DEV=""
+OTA_RETRY_MAX="${OTA_RETRY_MAX:-3}"
+
+# ===== role detection =========================================================
+
+case " $(cat /proc/cmdline 2>/dev/null) " in
+    *" armbian.ota_role=recovery "*) OTA_ROLE=recovery ;;
+    *) OTA_ROLE=normal ;;
+esac
+
+if [ "${OTA_ROLE}" != "recovery" ]; then
+    exit 0
+fi
+
+mkdir -p "$LOGDIR"
+log "init-premount ota hook start (role=recovery)"
+log "LOGFILE=${LOGFILE}"
+touch "${LOGDIR}/ota_ran.init-premount"
+
+# Disarm the hardware watchdog for the whole Rescue stay. The reboot that
+# entered Rescue armed it (RebootWatchdogSec on the external PCF8563 leaves
+# ~30 s on the counter) and nobody feeds /dev/watchdog inside the initramfs:
+# the minutes-long mkfs + payload untar would be killed mid-flight and the
+# campaign state left half-written. Magic-close stops the watchdog cleanly
+# (WATCHDOG_NOWAYOUT off, driver advertises WDIOF_MAGICCLOSE); the real
+# system's systemd re-arms it after switch_root. This only works here -- at
+# runtime systemd holds the single-open fd and the write would fail EBUSY.
+if [ -c /dev/watchdog ]; then
+    echo V > /dev/watchdog 2>/dev/null || true
+    log "hardware watchdog disarmed for Rescue (magic close)"
+fi
+
+# ===== helpers ================================================================
 
 find_userdata_device() {
-    local dev
+    dev=""
 
     if [ -b /dev/mapper/armbian-userdata ]; then
         printf '%s\n' /dev/mapper/armbian-userdata
         return 0
     fi
 
-    # Multiple disks can carry identical dd-flashed images, each with a
-    # PARTLABEL=userdata partition; blkid | head -n1 below then picks
-    # arbitrarily and the prepared state on the boot disk is silently
-    # missed. Anchor to the rootfs disk first, same helper as
-    # 00-seeed-bind-userdata; keep the label lookups as fallback only.
+    # Multiple disks can carry identical dd-flashed images; anchor to the
+    # rootfs disk first (same helper as 00-seeed-bind-userdata), keep the
+    # label lookups as fallback only.
     if [ -n "${ROOT_DEV}" ]; then
         dev="$(find_user_data__partition_for_root "${ROOT_DEV}" 2>/dev/null || true)"
         if [ -n "${dev}" ] && [ "$(blkid -s TYPE -o value "${dev}" 2>/dev/null || true)" = "ext4" ]; then
@@ -76,36 +112,13 @@ find_userdata_device() {
     fi
 }
 
-mount_recovery_transaction_store() {
-    local userdata_dev
-
-    userdata_dev="$(find_userdata_device)"
-    [ -n "${userdata_dev}" ] || {
-        log "userdata partition is unavailable"
-        return 1
-    }
-
-    mkdir -p "${USERDATA_MNT}"
-    mount -t ext4 -o rw "${userdata_dev}" "${USERDATA_MNT}" || {
-        log "failed to mount userdata ${userdata_dev}"
-        return 1
-    }
-
-    STATE_DIR="${RECOVERY_TRANSACTION_DIR}/state"
-    STATE_FILE="${STATE_DIR}/ota-state.env"
-    OTA_DIR="${RECOVERY_TRANSACTION_DIR}/ota_work"
-    ROOTFS_TAR="$(ota_resolve_payload "${OTA_DIR}" rootfs)"
-    BOOT_TAR="$(ota_resolve_payload "${OTA_DIR}" boot)"
-    BOOT_ITB="${OTA_DIR}/boot.itb"
-}
-
-# Return the payload file actually staged for $2 (rootfs|boot); xz packages
-# win over legacy gz. Prints the path, empty when nothing is staged.
+# Return the payload file staged for $2 (rootfs|boot); zst wins over xz over
+# legacy gz. Prints the path, empty when nothing is staged.
 ota_resolve_payload() {
     mnt_dir="$1"
     base="$2"
 
-    for suffix in tar.xz tar.gz; do
+    for suffix in tar.zst tar.xz tar.gz; do
         if [ -f "${mnt_dir}/${base}.${suffix}" ]; then
             printf '%s\n' "${mnt_dir}/${base}.${suffix}"
             return 0
@@ -114,151 +127,294 @@ ota_resolve_payload() {
     return 0
 }
 
+mount_recovery_transaction_store() {
+    userdata_dev="$(find_userdata_device)"
+    [ -n "${userdata_dev}" ] || {
+        log "ERROR: userdata partition is unavailable"
+        rescue_shell "userdata not found; cannot reconcile OTA state"
+    }
+    USERDATA_DEV="${userdata_dev}"
+
+    mkdir -p "${USERDATA_MNT}"
+    mount -t ext4 -o rw "${userdata_dev}" "${USERDATA_MNT}" || {
+        log "ERROR: failed to mount userdata ${userdata_dev}"
+        rescue_shell "cannot mount userdata"
+    }
+}
+
 unmount_recovery_transaction_store() {
     if mountpoint -q "${USERDATA_MNT}"; then
         umount "${USERDATA_MNT}" 2>/dev/null || log "WARN: failed to unmount ${USERDATA_MNT}"
     fi
 }
 
-mkdir -p "$LOGDIR"
-log "init-premount ota hook start"
-log "LOGFILE=${LOGFILE}"
-touch "${LOGDIR}/ota_ran.init-premount"
+# Drop into the Rescue shell. Never switch_root from a failed campaign --
+# the root may be half written at this point (design section 2).
+rescue_shell() {
+    log "RESCUE SHELL: $*"
+    echo "OTA_RESCUE: $*" > /dev/kmsg 2>/dev/null || true
+    if type panic >/dev/null 2>&1; then
+        panic "OTA Rescue: $* -- rootfs may be inconsistent, do NOT continue boot; press Enter for a shell"
+    fi
+    # panic unavailable (non-initramfs-tools context): block here
+    while :; do sleep 3600; done
+}
+
+ota_sync_reboot() {
+    sync
+    ota_reboot
+}
+
+# Full-content verification of a payload directory (used at the exhaustion
+# decision point only -- section 15.4 note 4: minutes are acceptable there).
+ota_payload_verify_full() {
+    dir="$1"
+
+    [ -d "${dir}" ] || return 1
+    [ -f "${dir}/payload.env" ] || return 1
+    (cd "${dir}" && sha256sum -c rootfs.sha256 >/dev/null 2>&1) || {
+        log "backup verification: rootfs.sha256 failed for ${dir}"
+        return 1
+    }
+    (cd "${dir}" && sha256sum -c boot.sha256 >/dev/null 2>&1) || {
+        log "backup verification: boot.sha256 failed for ${dir}"
+        return 1
+    }
+    return 0
+}
+
+# ===== campaign failure ladder ================================================
+
+campaign_fail() {
+    reason="$1"
+
+    log "ERROR: campaign failed: ${reason}"
+    ota_unmount_all 2>/dev/null || true
+
+    retry="$(state_get RETRY_COUNT)"
+    if [ -z "${retry}" ]; then retry=0; fi
+    if [ "${retry}" -lt "${OTA_RETRY_MAX}" ]; then
+        log "retry not exhausted (${retry}/${OTA_RETRY_MAX}); rebooting back into Rescue"
+        state_set "ERROR_MSG" "${reason}" 2>/dev/null || true
+        ota_sync_reboot
+    fi
+
+    restore_mode="$(state_get RESTORE_MODE)"
+    backup_id="$(state_get BACKUP_ID)"
+    if [ "${restore_mode}" = "0" ] && [ -n "${backup_id}" ] &&
+        ota_payload_verify_full "${PAYLOADS_DIR}/${backup_id}"; then
+        log "candidate exhausted; switching to backup campaign ${backup_id}"
+        state_switch_restore "${backup_id}" "${reason}" ||
+            rescue_shell "cannot persist restore switch"
+        ota_sync_reboot
+    fi
+
+    state_mark_failed "${reason}" ||
+        rescue_shell "cannot persist failed state"
+    rescue_shell "no automatic path left: ${reason}"
+}
+
+# ===== success reconciliation (env-clear window / CRC rebuild) ================
+
+reconcile_success_and_clear() {
+    installed_id="$1"
+
+    mkdir -p "${ROOT_MNT}"
+    if ! mount -t ext4 -o ro "${ROOT_DEV}" "${ROOT_MNT}" 2>/dev/null; then
+        rescue_shell "cannot mount rootfs for success reconciliation"
+    fi
+    root_marker="$(cat "${ROOT_MNT}/usr/share/armbian-ota/installed-payload-id" 2>/dev/null)"
+    umount "${ROOT_MNT}" 2>/dev/null || true
+
+    if [ "${HAS_BOOT_PART:-0}" -eq 1 ]; then
+        mkdir -p "${BOOT_MNT}"
+        if mount -t ext4 -o ro "${BOOT_DEV}" "${BOOT_MNT}" 2>/dev/null; then
+            boot_marker="$(cat "${BOOT_MNT}/payload-id" 2>/dev/null)"
+            umount "${BOOT_MNT}" 2>/dev/null || true
+        fi
+    fi
+
+    if [ "${root_marker}" != "${installed_id}" ] || [ "${boot_marker}" != "${installed_id}" ]; then
+        log "ERROR: success reconciliation marker mismatch (root=${root_marker:-none} boot=${boot_marker:-none} installed=${installed_id})"
+        rescue_shell "success markers do not match INSTALLED_ID"
+    fi
+
+    log "success reconciliation passed; clearing ota_in_progress"
+    fw_env_set "ota_in_progress" "0" ||
+        rescue_shell "cannot clear ota_in_progress"
+    ota_sync_reboot
+}
+
+# ===== the campaign ===========================================================
+
+run_campaign() {
+    candidate_id="$1"
+
+    OTA_DIR="${PAYLOADS_DIR}/${candidate_id}"
+    ROOTFS_TAR="$(ota_resolve_payload "${OTA_DIR}" rootfs)"
+    BOOT_TAR="$(ota_resolve_payload "${OTA_DIR}" boot)"
+    BOOT_ITB="${OTA_DIR}/boot.itb"
+
+    retry=$(( $(state_get RETRY_COUNT 2>/dev/null || echo 0) + 1 ))
+    state_set "RETRY_COUNT" "${retry}" ||
+        campaign_fail "cannot persist RETRY_COUNT"
+
+    log "campaign ${candidate_id} attempt ${retry}/${OTA_RETRY_MAX} (RESTORE_MODE=$(state_get RESTORE_MODE), ROOTFS_TOUCHED=$(state_get ROOTFS_TOUCHED))"
+
+    # structure recheck BEFORE any destructive write (section 7 step 2):
+    # a missing dual tar fails the campaign while the rootfs is still intact.
+    if [ ! -f "${OTA_DIR}/payload.env" ] || [ -z "${ROOTFS_TAR}" ] || [ ! -f "${ROOTFS_TAR}" ] ||
+       { [ -z "${BOOT_TAR}" ] && [ ! -f "${BOOT_ITB}" ]; }; then
+        campaign_fail "payload structure incomplete in ${OTA_DIR}"
+    fi
+
+    state_set "ROOTFS_TOUCHED" "1" ||
+        campaign_fail "cannot persist ROOTFS_TOUCHED"
+
+    # identity the payload must prove on both partitions (marker gates)
+    OTA_EXPECT_PAYLOAD_ID="${candidate_id}"
+    export OTA_EXPECT_PAYLOAD_ID
+
+    mkdir -p "${ROOT_MNT}"
+    log "mounting ${ROOT_DEV} -> ${ROOT_MNT} ..."
+    mount -t ext4 -o rw "${ROOT_DEV}" "${ROOT_MNT}" ||
+        campaign_fail "cannot mount ${ROOT_DEV}"
+
+    DO_BOOT_OTA="${DO_BOOT_OTA:-0}"
+    if ota_source_staged_hook; then
+        OTA_HOOK_MODE="recovery"
+        export OTA_HOOK_API OTA_HOOK_MODE OTA_HOOK_PATH
+    else
+        OTA_HOOK_PATH=""
+    fi
+
+    # hook_pre_apply: old rootfs still readable/writable.
+    ota_call_hook hook_pre_apply ||
+        campaign_fail "hook_pre_apply failed"
+
+    if [ -n "${OTA_HOOK_PATH}" ] && type hook_apply >/dev/null 2>&1; then
+        log "hook_apply takes over payload application"
+        ota_capture_pre_ota_env
+        start_heartbeat "OTA hook hook_apply running"
+        hook_apply
+        hook_rc=$?
+        stop_heartbeat
+        [ "${hook_rc}" -eq 0 ] ||
+            campaign_fail "hook_apply failed rc=${hook_rc}"
+        if [ "${HAS_BOOT_PART:-0}" -eq 1 ] && ! mountpoint -q "${BOOT_MNT:-/mnt/boot}"; then
+            BOOT_MNT="/mnt/boot"
+            mkdir -p "${BOOT_MNT}"
+            if mount -t ext4 -o rw "${BOOT_DEV}" "${BOOT_MNT}"; then
+                DO_BOOT_OTA=1
+            else
+                BOOT_MNT=""
+                log "WARN: cannot mount ${BOOT_DEV} for config patch after hook"
+            fi
+        fi
+    else
+        ota_apply_rootfs ||
+            campaign_fail "rootfs apply failed"
+
+        ota_write_rootfs_marker "${candidate_id}" ||
+            campaign_fail "cannot write rootfs payload marker"
+
+        ota_clean_overlay_upper
+
+        ota_apply_boot ||
+            campaign_fail "boot apply failed"
+    fi
+
+    ota_patch_config
+
+    ota_call_hook hook_post_apply ||
+        campaign_fail "hook_post_apply failed"
+    if [ -n "${OTA_HOOK_PATH}" ] && type hook_firstboot >/dev/null 2>&1; then
+        if mkdir -p "${ROOT_MNT}/usr/share/armbian-ota" && \
+           cp "${OTA_HOOK_PATH}" "${ROOT_MNT}/usr/share/armbian-ota/firstboot-hook.sh"; then
+            log "staged firstboot hook into new rootfs"
+        else
+            log "WARN: failed to stage firstboot hook"
+        fi
+    fi
+
+    # commit: applied, then the one-shot handoff token
+    state_set_multi "STATUS=applied" ||
+        campaign_fail "cannot persist STATUS=applied"
+
+    fw_env_set "ota_boot_next" "normal" ||
+        campaign_fail "cannot persist ota_boot_next=normal"
+
+    log "applied ${candidate_id}; handing off to normal"
+    ota_unmount_all
+    unmount_recovery_transaction_store
+    ota_sync_reboot
+}
+
+# ===== main flow ==============================================================
 
 # 1) probe devices (sets ROOT_DEV, ROOT_UUID, BOOT_DEV, BOOT_UUID,
 #    HAS_BOOT_PART, AUTO_DECRYPT_MODE)
 ota_detect_devices
 
-# 2) mount root + validate state
 if [ -z "${ROOT_DEV}" ]; then
-    log "ROOT_DEV is empty, skip OTA"
-    exit 0
+    rescue_shell "ROOT_DEV empty; cannot run Rescue"
 fi
 
-if ! mount_recovery_transaction_store; then
-    exit 0
-fi
+# 2) mount the transaction store (userdata)
+mount_recovery_transaction_store
+state_init
 
-mkdir -p "${ROOT_MNT}"
-log "mounting ${ROOT_DEV} -> ${ROOT_MNT} ..."
-if ! mount -t ext4 -o rw "${ROOT_DEV}" "${ROOT_MNT}"; then
-    log "cannot mount ${ROOT_DEV}, skip OTA"
-    unmount_recovery_transaction_store
-    exit 0
-fi
-
-ota_validate_recovery_state || {
-    umount "${ROOT_MNT}" 2>/dev/null || true
-    unmount_recovery_transaction_store
-    exit 0
+# 3) env access + reconciliation (section 6)
+fw_disk="$(fw_env_ensure_config "${USERDATA_DEV}")" || {
+    log "ERROR: cannot resolve boot disk for fw_env (anchor=${USERDATA_DEV})"
+    rescue_shell "fw_env unusable"
 }
 
-# Raise printk only now that an OTA is confirmed to be pending. On a normal
-# boot the early-exit paths above leave console_loglevel untouched so the
-# real rootfs stays quiet; the OTA-apply path gets full console visibility
-# for the extract/patch work below.
-ota_log_init
-log "OTA confirmed, applying..."
-log "tools: PATH=${PATH} tar=$(command -v tar 2>/dev/null) xz=$(command -v xz 2>/dev/null) tar-flavor=$(/usr/bin/tar --version 2>/dev/null | head -n1)"
+STATUS="$(state_get STATUS)"
 
-# 3) source the staged OTA hook once (definition-only script), then run the
-# fixed call points around the built-in apply (docs/10-ota-package-formats.md).
-# Mounting, config patching, state commit, unmount and reboot stay here.
-DO_BOOT_OTA="${DO_BOOT_OTA:-0}"
-if ota_source_staged_hook; then
-    OTA_HOOK_MODE="recovery"
-    export OTA_HOOK_API OTA_HOOK_MODE OTA_HOOK_PATH
-else
-    OTA_HOOK_PATH=""
+if fw_env_crc_bad; then
+    log "env CRC bad; state is authoritative (STATUS=${STATUS})"
+    case "${STATUS}" in
+        prepared|applied)
+            # fw_setenv starts from an EMPTY env on bad CRC: the complete
+            # routing set must come back or the default bootcmd traps the
+            # device in an endless Rescue loop.
+            fw_env_write_routing_set "1" "recovery" ||
+                rescue_shell "env CRC rebuild failed"
+            log "env rebuilt from state (full routing set); continuing transaction"
+            run_campaign "$(state_get CANDIDATE_ID)"
+            ;;
+        success)
+            reconcile_success_and_clear "$(state_get INSTALLED_ID)"
+            ;;
+        *)
+            fw_env_write_routing_set "0" "recovery" 2>/dev/null || true
+            rescue_shell "env CRC bad and STATUS=${STATUS}"
+            ;;
+    esac
+    rescue_shell "unreachable CRC branch"
 fi
 
-# hook_pre_apply: old rootfs is still readable/writable, nothing rebuilt yet.
-if ! ota_call_hook hook_pre_apply; then
-    log "ERROR: hook_pre_apply failed, abort OTA"
-    umount "${ROOT_MNT}" 2>/dev/null || true
-    unmount_recovery_transaction_store
-    exit 0
+if [ "$(fw_env_get ota_in_progress)" != "1" ]; then
+    rescue_shell "Rescue entered with ota_in_progress=0 (normal boot failed or manual entry); fix and reboot manually"
 fi
 
-# hook_apply (optional): replaces the built-in payload application entirely.
-if [ -n "${OTA_HOOK_PATH}" ] && type hook_apply >/dev/null 2>&1; then
-    log "hook_apply takes over payload application"
-    ota_capture_pre_ota_env
-    start_heartbeat "OTA hook hook_apply running"
-    hook_apply
-    hook_rc=$?
-    stop_heartbeat
-    if [ "${hook_rc}" -ne 0 ]; then
-        log "ERROR: hook_apply failed rc=${hook_rc}, abort OTA"
-        umount "${ROOT_MNT}" 2>/dev/null || true
-        unmount_recovery_transaction_store
-        exit 0
-    fi
-    # Expose the boot partition to the config patcher, mirroring the state
-    # ota_apply_boot would have left behind. BOOT_MNT is pre-initialized to
-    # "/mnt/boot" at the top, so test for an actual mount, not emptiness --
-    # otherwise the armbianEnv patch is silently skipped after hook_apply.
-    if [ "${HAS_BOOT_PART:-0}" -eq 1 ] && ! mountpoint -q "${BOOT_MNT:-/mnt/boot}"; then
-        BOOT_MNT="/mnt/boot"
-        mkdir -p "${BOOT_MNT}"
-        if mount -t ext4 -o rw "${BOOT_DEV}" "${BOOT_MNT}"; then
-            DO_BOOT_OTA=1
-        else
-            BOOT_MNT=""
-            log "WARN: cannot mount ${BOOT_DEV} for config patch after hook"
-        fi
-    fi
-else
-    # built-in apply rootfs (mkfs rebuild or rm -rf clean, then extract)
-    ota_apply_rootfs || {
-        umount "${ROOT_MNT}" 2>/dev/null || true
-        unmount_recovery_transaction_store
-        exit 0
-    }
+case "${STATUS}" in
+    success)
+        reconcile_success_and_clear "$(state_get INSTALLED_ID)"
+        ;;
+    idle)
+        rescue_shell "state/env inconsistent: env armed but STATUS=idle"
+        ;;
+    failed)
+        rescue_shell "transaction already failed (see ERROR_MSG)"
+        ;;
+    prepared|applied)
+        run_campaign "$(state_get CANDIDATE_ID)"
+        ;;
+    *)
+        rescue_shell "unknown STATUS=${STATUS}"
+        ;;
+esac
 
-    # built-in apply boot (mount + extract boot payload, write boot.itb)
-    ota_apply_boot || {
-        if [ "$DO_BOOT_OTA" -eq 1 ] && [ -n "${BOOT_MNT}" ]; then
-            umount "${BOOT_MNT}" 2>/dev/null || true
-        fi
-        umount "${ROOT_MNT}" 2>/dev/null || true
-        unmount_recovery_transaction_store
-        exit 0
-    }
-fi
-
-# 7) fix UUIDs in armbianEnv.txt / fstab / crypttab
-ota_patch_config
-
-# 7.5) hook_post_apply: new rootfs is final and still mounted; last chance to
-# inject or migrate. Then carry hook_firstboot into the new system.
-if ! ota_call_hook hook_post_apply; then
-    log "ERROR: hook_post_apply failed, abort OTA"
-    ota_unmount_all
-    unmount_recovery_transaction_store
-    exit 0
-fi
-if [ -n "${OTA_HOOK_PATH}" ] && type hook_firstboot >/dev/null 2>&1; then
-    if mkdir -p "${ROOT_MNT}/usr/share/armbian-ota" && \
-       cp "${OTA_HOOK_PATH}" "${ROOT_MNT}/usr/share/armbian-ota/firstboot-hook.sh"; then
-        log "staged firstboot hook into new rootfs"
-    else
-        log "WARN: failed to stage firstboot hook"
-    fi
-fi
-
-# 8) cleanup payload
-log "  delete OTA payload directory ${OTA_DIR} ..."
-rm -rf "${OTA_DIR}" || true
-
-# 9) commit success state
-ota_commit_success_state
-
-# 10) unmount partitions
-ota_unmount_all
-unmount_recovery_transaction_store
-
-sync
-
-# 11) reboot
-ota_reboot
+rescue_shell "unreachable reconciliation branch"

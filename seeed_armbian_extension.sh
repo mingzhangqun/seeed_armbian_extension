@@ -38,8 +38,11 @@ fi
 # Central default for the OTA package payload format. Every build path
 # (build.sh wrapper, CI, bare compile.sh) funnels through this file before
 # ota-support sources package-create.sh. Override per build via
-# OTA_PAYLOAD_COMP=gz|zstd in the environment or build.sh --ota-format.
-export OTA_PAYLOAD_COMP="${OTA_PAYLOAD_COMP:-xz}"
+# OTA_PAYLOAD_COMP=gz|zstd comes from the environment or build.sh --ota-format.
+# The DEFAULT lives in armbian-ota/common/build-hooks/package-create.sh
+# (zstd for plain recovery v0.8 -- same format as the on-device lazy backup;
+# xz for A/B). Only forward explicitly set values, never pin one here.
+[[ -n "${OTA_PAYLOAD_COMP:-}" ]] && export OTA_PAYLOAD_COMP
 
 if [[ "${OTA_ENABLE}" == "yes" ]]; then
 	display_alert "OTA_ENABLE" "Enable OTA extension ota-support" "info"

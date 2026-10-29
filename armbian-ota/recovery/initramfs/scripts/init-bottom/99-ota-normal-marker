@@ -1,0 +1,41 @@
+#!/bin/sh
+#
+# init-bottom hook (normal role): copy the rootfs payload marker into tmpfs
+# before switch_root so the health service can compare it against
+# CANDIDATE_ID without touching the overlay (v0.8 design section 4).
+#
+# Runs on EVERY normal boot -- after overlayroot has assembled /root, so the
+# marker read is lower-layer-visible (upper shadowing would be the correct,
+# newer identity anyway). Missing marker (fresh pre-v0.8 root) is not an
+# error here; the health service owns that judgement.
+
+PREREQ=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+MARKER_SRC="/root/usr/share/armbian-ota/installed-payload-id"
+MARKER_DST_DIR="/run/armbian-ota"
+
+# Rescue role never reaches init-bottom through this path, but stay defensive:
+# the marker is only meaningful for the health service in the normal system.
+case " $(cat /proc/cmdline 2>/dev/null) " in
+    *" armbian.ota_role=recovery "*) exit 0 ;;
+esac
+
+[ -f "${MARKER_SRC}" ] || exit 0
+
+mkdir -p "${MARKER_DST_DIR}" || exit 0
+if cp "${MARKER_SRC}" "${MARKER_DST_DIR}/installed-payload-id" 2>/dev/null; then
+    echo "armbian-ota: payload marker staged to ${MARKER_DST_DIR}" >&2
+fi
+
+exit 0

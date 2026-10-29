@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# Recovery OTA health confirmation (v0.8 design section 9).
+#
+# Runs on EVERY boot as a oneshot after local-fs. When no transaction is in
+# flight it exits silently before touching anything, so normal daily boots
+# never produce HEALTH_FAIL noise. When a candidate booted (one-shot normal
+# handoff consumed), the six checks run; on pass the transaction commits
+# (success + backup roll + env clear), on failure the system schedules a
+# controlled 60 s delayed reboot back into Rescue -- detected failures
+# recover automatically, only a true hang needs a human power cycle.
+
+OTA_RUNTIME_DIR="/usr/share/armbian-ota"
+. "${OTA_RUNTIME_DIR}/common.sh"
+. "${OTA_RUNTIME_DIR}/fwenv.sh"
+
+RECOVERY_OVERLAY_BACKING_DIR="/media/root-rw"
+RECOVERY_TRANSACTION_DIR="${RECOVERY_OVERLAY_BACKING_DIR}/ota-recovery"
+OTA_STATE_DIR="${RECOVERY_TRANSACTION_DIR}/state"
+OTA_STATE_FILE="${OTA_STATE_DIR}/ota-state.env"
+
+HEALTH_FAIL_ITEMS=""
+
+health_fail() {
+    HEALTH_FAIL_ITEMS="${HEALTH_FAIL_ITEMS} $1"
+    echo "HEALTH_FAIL: $1" >&2
+}
+
+ota_health_schedule_reboot() {
+    echo "OTA health check failed:${HEALTH_FAIL_ITEMS}" >&2
+    echo "Controlled reboot into Rescue in 60 s (SSH window for triage; power-cycle to skip)" >&2
+    # Detected failure: the system is alive and may reboot itself. This is a
+    # userspace decision, not a watchdog (no panic=, no hardware wd).
+    if command -v systemd-run >/dev/null 2>&1; then
+        systemd-run --unit=ota-health-reboot --on-active=60s \
+            systemctl reboot >/dev/null 2>&1 ||
+            nohup sh -c 'sleep 60; systemctl reboot' >/dev/null 2>&1 &
+    else
+        nohup sh -c 'sleep 60; systemctl reboot' >/dev/null 2>&1 &
+    fi
+    exit 1
+}
+
+# --- early exit: no transaction in flight ------------------------------------
+lower_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
+[ -n "${lower_src}" ] || lower_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+if ! fw_env_ensure_config "${lower_src}" >/dev/null 2>&1; then
+    # Cannot see the env at all (tools/config missing): never fail a healthy
+    # boot for that; the Rescue side owns env repair.
+    echo "OTA health: fw_env unavailable, skipping checks"
+    exit 0
+fi
+
+if fw_env_crc_bad; then
+    # Default env booted us here -- the Rescue reconciliation owns CRC
+    # repair; do not touch anything from a booted candidate.
+    echo "OTA health: env CRC bad, leaving repair to Rescue"
+    exit 0
+fi
+
+in_progress="$(fw_env_get ota_in_progress)"
+if [ "${in_progress}" != "1" ]; then
+    exit 0
+fi
+
+state_init
+status="$(state_get STATUS)"
+candidate="$(state_get CANDIDATE_ID)"
+echo "OTA health: transaction in flight (STATUS=${status} CANDIDATE=${candidate})"
+
+[ "${status}" = "applied" ] || {
+    # in_progress=1 with a non-applied state should not have booted normal at
+    # all; treat as health failure so the ladder sorts it out.
+    health_fail "STATUS=${status} while ota_in_progress=1"
+    ota_health_schedule_reboot
+}
+[ -n "${candidate}" ] || { health_fail "empty CANDIDATE_ID"; ota_health_schedule_reboot; }
+
+# --- the six checks -----------------------------------------------------------
+[ -r /proc/version ] || health_fail "/proc/version unreadable"
+
+for fs_mount in /proc /sys /dev; do
+    mountpoint -q "${fs_mount}" || health_fail "${fs_mount} not mounted"
+done
+
+root_fstype="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
+[ "${root_fstype}" = "overlay" ] || health_fail "root fstype is '${root_fstype}', expected overlay"
+
+env_now="$(fw_env_get ota_in_progress)"
+[ "${env_now}" = "1" ] || health_fail "ota_in_progress changed to '${env_now}' during boot"
+
+run_marker="$(cat /run/armbian-ota/installed-payload-id 2>/dev/null || true)"
+[ -n "${run_marker}" ] || health_fail "/run/armbian-ota/installed-payload-id missing (normal-role initramfs hook did not run?)"
+[ "${run_marker}" = "${candidate}" ] || health_fail "/run marker ${run_marker:-none} != CANDIDATE_ID"
+
+boot_marker="$(cat /boot/payload-id 2>/dev/null || true)"
+[ -n "${boot_marker}" ] || health_fail "/boot/payload-id missing"
+[ "${boot_marker}" = "${candidate}" ] || health_fail "/boot marker ${boot_marker:-none} != CANDIDATE_ID"
+
+[ -n "${HEALTH_FAIL_ITEMS}" ] && ota_health_schedule_reboot
+
+# --- pass: terminal commit ----------------------------------------------------
+. "${OTA_RUNTIME_DIR}/recovery/backend.sh"
+
+acquire_lock || {
+    echo "OTA health: cannot acquire lock; deferring commit (next boot retries)"
+    exit 1
+}
+recovery_commit_success
+echo "OTA health: confirmed ${candidate}; transaction committed"
+exit 0

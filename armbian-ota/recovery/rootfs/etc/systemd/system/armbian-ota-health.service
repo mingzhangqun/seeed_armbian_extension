@@ -1,0 +1,21 @@
+[Unit]
+Description=Armbian OTA health confirmation (recovery mode)
+Documentation=file:///usr/share/armbian-ota/recovery/backend.sh
+# Section 9: every boot, seconds after switch_root. The six checks only need
+# the overlay root, the /run marker and fw_printenv -- desktop and network are
+# explicitly NOT waited for.
+After=local-fs.target
+Wants=armbian-resize-userdata.service
+After=armbian-resize-userdata.service
+ConditionPathExists=/usr/lib/armbian/armbian-ota-health-recovery
+ConditionPathIsMountPoint=/media/root-rw
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/armbian/armbian-ota-health-recovery
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

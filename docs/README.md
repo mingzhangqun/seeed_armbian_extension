@@ -13,8 +13,12 @@ Read in order for a full walkthrough, or jump to what you need.
 | 6 | [Secure Boot](06-secure-boot.md) | Signed bootchain and signing keys |
 | 7 | [Tools & CI](07-tools-and-ci.md) | Offline FIT re-signing, deb release, CI builds |
 | 8 | [Hardening](08-hardening.md) | Always-on brute-force defense and ssh-protect |
+<<<<<<< Updated upstream
 | 9 | [OTA Internals](09-ota-internals.md) | Developer reference: flow, payloads, state machines |
 | 10 | [OTA Package Formats](10-ota-package-formats.md) | Format negotiation, apply hooks, compatibility |
+=======
+| 9 | [Partition Layouts](09-partition-layouts.md) | Plain / A/B / Secure Recovery / Secure A/B — on-disk structure with diagram |
+>>>>>>> Stashed changes
 
 ## Pick your path
 
@@ -28,6 +32,7 @@ Read in order for a full walkthrough, or jump to what you need.
 - **"The bootchain must resist tampering"** → [Secure Boot](06-secure-boot.md).
 - **"What is my image already protected against?"** → [Hardening](08-hardening.md).
 - **"I want to change device-tree overlays on a signed image without rebuilding"** → [Tools & CI](07-tools-and-ci.md) (`repack-fit.sh`).
+- **"What does the disk actually look like under each profile?"** → [Partition Layouts](09-partition-layouts.md) (one diagram, four profiles).
 
 ## Conventions
 
