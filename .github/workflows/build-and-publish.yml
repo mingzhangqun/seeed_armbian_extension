@@ -451,14 +451,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SDK_RELEASE_TAG: 'rockchip-sdk-debs'
           REPO: ${{ github.repository }}
+          SDK_FALLBACK_REPO: 'Seeed-Studio/seeed_armbian_extension'
         run: |
           echo "=== Downloading SDK debs from Release: ${SDK_RELEASE_TAG} ==="
           TMPDIR=$(mktemp -d)
-          gh release download "${SDK_RELEASE_TAG}" \
-            --repo "${REPO}" \
-            --dir "${TMPDIR}" \
-            --pattern '*arm64*.tar.xz' \
-            --clobber || { echo "WARNING: Release ${SDK_RELEASE_TAG} not found, skipping SDK debs"; exit 0; }
+          # Forks don't inherit Releases — if the tag is missing from the
+          # current repo, fall back to the upstream repo that owns the SDK.
+          download_sdk() {
+            gh release download "${SDK_RELEASE_TAG}" \
+              --repo "$1" \
+              --dir "${TMPDIR}" \
+              --pattern '*arm64*.tar.xz' \
+              --clobber
+          }
+          if ! download_sdk "${REPO}"; then
+            echo "::warning::Release ${SDK_RELEASE_TAG} not found in ${REPO}, trying upstream ${SDK_FALLBACK_REPO}"
+            if ! download_sdk "${SDK_FALLBACK_REPO}"; then
+              echo "::warning::Release ${SDK_RELEASE_TAG} not found in ${REPO} or ${SDK_FALLBACK_REPO}, skipping SDK debs"
+              exit 0
+            fi
+          fi
           echo "Extracting archives..."
           for archive in "${TMPDIR}"/*.tar.xz; do
             echo "  Extracting: $(basename "${archive}")"
