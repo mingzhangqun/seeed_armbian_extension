@@ -345,6 +345,10 @@ function ota_create_final_tarball() {
     esac
 
     (
+        # pipefail: the codec is the last pipeline stage and exits 0 on a
+        # truncated stream, so without this a failed tar would pass off a
+        # partial package as success.
+        set -o pipefail
         cd "${ota_temp_dir}" &&
         {
             printf '%s\0' "package.env"
