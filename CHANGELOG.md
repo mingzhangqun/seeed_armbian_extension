@@ -156,6 +156,36 @@ Covers the work against the initial import (merge base `9980aee`,
 - **Mirror/cache passthrough** through the build wrapper.
 - **PCIe ASPM disabled** in generated images via `extraargs=pcie_aspm=off`.
 
+#### CI
+
+- **`build-and-publish.yml`: rk3576-module board, family-scoped kernel.**
+  New `build_rk3576_module` dispatch input extends the per-board matrix.
+  Kernel debs are family-scoped in Armbian (`linux-image`/`-headers`/
+  `-dtb` are per LINUXFAMILY and the DTB deb carries every family DTB),
+  so the first selected board of each family compiles the kernel once
+  and sibling boards build only their board-specific U-Boot — no
+  duplicate same-named kernel debs in the publish merge, no extra
+  kernel CI time per added board.
+- **`build-and-publish.yml`: rk3576-industrial board.** New
+  `build_rk3576_industrial` dispatch input (default on). Each matrix job
+  checks the board config exists in the selected `armbian_build_ref` and
+  skips gracefully with a notice when it does not — the board is not in
+  `Seeed-Studio/armbian-build` main yet, so default runs skip it until
+  the branch lands (meanwhile dispatch with
+  `armbian_build_ref=rk3576-industrial`).
+- **`build-and-publish.yml`: kernel compilation now opt-in.** New
+  `build_kernel` dispatch input (default false): the official Armbian
+  apt already hosts the `vendor-seeed-rk3576`/`rk3588` family kernels,
+  so the matrix builds U-Boot only by default; enable the input to
+  rebuild and publish family kernels (hotfix channel — the version
+  must outrank the official one to reach devices).
+- **`build-and-publish.yml`: kernel and U-Boot build in parallel.** The
+  board matrix carries a `target` dimension (`uboot` per selected board,
+  `kernel` per family when `build_kernel` is on), so each entry is an
+  independent job — a board's U-Boot no longer serializes behind its
+  kernel compile. Artifact names carry the target
+  (`debs-uboot-<board>`, `debs-kernel-<board>`).
+
 ### Changed
 
 - **Stock image naming; OTA packages under `ota/`.** Recovery images no

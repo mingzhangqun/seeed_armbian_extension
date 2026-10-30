@@ -16,11 +16,26 @@ on:
         required: false
         type: boolean
         default: true
+      build_rk3576_module:
+        description: 'recomputer-rk3576-module-devkit'
+        required: false
+        type: boolean
+        default: true
+      build_rk3576_industrial:
+        description: 'recomputer-rk3576-industrial'
+        required: false
+        type: boolean
+        default: true
       build_rk3588:
         description: 'recomputer-rk3588-devkit'
         required: false
         type: boolean
         default: true
+      build_kernel:
+        description: 'Build kernel debs (hotfix; U-Boot always builds) — default off, kernels come from official Armbian apt'
+        required: false
+        type: boolean
+        default: false
 
 # ──────────────────────────────────────────────────
 # Single workflow: userspace debs (ARM) and kernel +
@@ -44,24 +59,47 @@ jobs:
         id: gen
         env:
           INPUT_RK3576: ${{ inputs.build_rk3576 || 'true' }}
+          INPUT_RK3576_MODULE: ${{ inputs.build_rk3576_module || 'true' }}
+          INPUT_RK3576_INDUSTRIAL: ${{ inputs.build_rk3576_industrial || 'true' }}
           INPUT_RK3588: ${{ inputs.build_rk3588 || 'true' }}
+          INPUT_BUILD_KERNEL: ${{ inputs.build_kernel || 'false' }}
           INPUT_REF: ${{ inputs.armbian_build_ref || 'main' }}
         run: |
           set -eu
+          # Matrix entries: one uboot per selected board, one kernel per
+          # family when INPUT_BUILD_KERNEL is on. Kernel debs are
+          # family-scoped, so each kernel entry builds on the first
+          # selected board of its family — sibling boards would rebuild
+          # the same package and collide in the publish merge.
           boards=()
           [[ "${INPUT_RK3576}" == 'true' ]] && boards+=('recomputer-rk3576-devkit')
+          [[ "${INPUT_RK3576_MODULE}" == 'true' ]] && boards+=('recomputer-rk3576-module-devkit')
+          [[ "${INPUT_RK3576_INDUSTRIAL}" == 'true' ]] && boards+=('recomputer-rk3576-industrial')
           [[ "${INPUT_RK3588}" == 'true' ]] && boards+=('recomputer-rk3588-devkit')
           if [ ${#boards[@]} -eq 0 ]; then
-            echo "::error::No boards selected (enable build_rk3576 or build_rk3588)."
+            echo "::error::No boards selected (enable at least one build_* input)."
             exit 1
           fi
+          family_of() {
+            case "$1" in
+              recomputer-rk3576-*) echo 'rk3576' ;;
+              recomputer-rk3588-*) echo 'rk3588' ;;
+              *)                   echo 'unknown' ;;
+            esac
+          }
+          matrix=''
+          seen_families=''
           for b in "${boards[@]}"; do
-            if [[ ! "$b" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-              echo "::error::Invalid board name: '$b'"
-              exit 1
+            fam="$(family_of "$b")"
+            matrix+="{\"target\":\"uboot\",\"board\":\"${b}\",\"family\":\"${fam}\"},"
+            if [[ "${seen_families}" != *"|${fam}|"* ]]; then
+              seen_families="${seen_families}|${fam}|"
+              if [[ "${INPUT_BUILD_KERNEL}" == 'true' ]]; then
+                matrix+="{\"target\":\"kernel\",\"board\":\"${b}\",\"family\":\"${fam}\"},"
+              fi
             fi
           done
-          matrix=$(printf '%s\n' "${boards[@]}" | jq -Rc '{board: .}' | jq -sc '.')
+          matrix="[${matrix%,}]"
           {
             echo "matrix<<EOF"
             echo "${matrix}"
@@ -82,6 +120,7 @@ jobs:
           fi
           echo "armbian_ref=${RESOLVED}" >> "$GITHUB_OUTPUT"
           echo "Selected boards: ${boards[*]}"
+          echo "U-Boot: every selected board; kernel entries: ${INPUT_BUILD_KERNEL} (families: ${seen_families//|/ })"
           echo "armbian-build ref: ${RESOLVED}"
 
   # ──────────────────────────────────────────────────
@@ -249,13 +288,16 @@ jobs:
           if-no-files-found: error
 
   # ──────────────────────────────────────────────────
-  # Per-board matrix build: kernel + U-Boot (x86 cross-compile)
-  # via scripts/build.sh (wraps armbian-build's compile.sh, sets
-  # ENABLE_SEEED_RK_EXTENSION, RK_COMPILE_USBPLUG, cache
-  # invalidation, etc.)
+  # Board debs (x86 cross-compile) via scripts/build.sh.
+  # Matrix target dimension, all entries parallel:
+  #   uboot  — per selected board, always (official apt has no U-Boot
+  #            for these boards)
+  #   kernel — per family, only with build_kernel (hotfix; official
+  #            apt hosts the vendor-seeed kernels)
+  # Boards missing from armbian_build_ref skip gracefully.
   # Output: armbian-build/output/debs/*.deb
   # ──────────────────────────────────────────────────
-  build-kernel:
+  build-kernel-uboot:
     needs: prepare
     runs-on: ubuntu-24.04
     strategy:
@@ -272,7 +314,7 @@ jobs:
           MATRIX_BOARD: ${{ matrix.value.board }}
         run: |
           echo "name=${MATRIX_BOARD}" >> "$GITHUB_OUTPUT"
-          echo "Resolved board: ${MATRIX_BOARD}"
+          echo "Target: ${{ matrix.value.target }} / board: ${MATRIX_BOARD} (family: ${{ matrix.value.family }})"
 
       - name: Checkout armbian-build
         uses: actions/checkout@v4
@@ -301,7 +343,22 @@ jobs:
           echo "Staged build.sh -> armbian-build/build.sh"
           echo "Copied extension -> armbian-build/userpatches/extensions/seeed_armbian_extension"
 
+      - name: Check board exists in armbian-build ref
+        id: board_exists
+        env:
+          BOARD: ${{ matrix.value.board }}
+          ARMBIAN_REF: ${{ needs.prepare.outputs.armbian_ref }}
+        run: |
+          if [ -f "armbian-build/config/boards/${BOARD}.conf" ] || [ -f "armbian-build/config/boards/${BOARD}.csc" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Board ${BOARD} found in armbian-build ${ARMBIAN_REF}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Board ${BOARD} is not in armbian-build ${ARMBIAN_REF} yet; skipping this job's builds."
+          fi
+
       - name: Install build dependencies
+        if: steps.board_exists.outputs.exists == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -311,14 +368,16 @@ jobs:
             cpio rsync curl wget git \
             dwarves
 
-      - name: Compile kernel (scripts/build.sh --kernel)
+      - name: Compile kernel
+        if: ${{ matrix.value.target == 'kernel' && steps.board_exists.outputs.exists == 'true' }}
         working-directory: armbian-build
         env:
           BOARD: ${{ steps.board.outputs.name }}
         run: |
           ./build.sh --kernel -b "${BOARD}"
 
-      - name: Compile U-Boot (scripts/build.sh --uboot)
+      - name: Compile U-Boot
+        if: ${{ matrix.value.target == 'uboot' && steps.board_exists.outputs.exists == 'true' }}
         working-directory: armbian-build
         env:
           BOARD: ${{ steps.board.outputs.name }}
@@ -326,6 +385,7 @@ jobs:
           ./build.sh --uboot -b "${BOARD}"
 
       - name: List built debs
+        if: steps.board_exists.outputs.exists == 'true'
         env:
           BOARD: ${{ steps.board.outputs.name }}
         run: |
@@ -333,9 +393,10 @@ jobs:
           find armbian-build/output/debs -name '*.deb' -exec ls -lh {} \;
 
       - name: Upload debs
+        if: steps.board_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: debs-${{ steps.board.outputs.name }}
+          name: debs-${{ matrix.value.target }}-${{ steps.board.outputs.name }}
           path: armbian-build/output/debs/**/*.deb
 
   # ──────────────────────────────────────────────────
@@ -345,7 +406,7 @@ jobs:
   # regenerates the entire apt repo + an index HTML page.
   # ──────────────────────────────────────────────────
   publish:
-    needs: [build-userspace, build-kernel, build-camera-engine]
+    needs: [build-userspace, build-kernel-uboot, build-camera-engine]
     runs-on: ubuntu-latest
     permissions:
       contents: write
