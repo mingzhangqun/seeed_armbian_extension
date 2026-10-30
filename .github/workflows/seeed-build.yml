@@ -22,30 +22,10 @@ on:
         type: boolean
         default: false
 
-      # ── Releases ──────────────────────────────────────────────────────
-      release_trixie:
-        description: "Release: Debian 13 (trixie)"
-        type: boolean
-        default: true
-      release_resolute:
-        description: "Release: Ubuntu 26.04 (resolute)"
-        type: boolean
-        default: false
-
-      # ── Tiers ─────────────────────────────────────────────────────────
-      # cli = no-desktop (--minimal). tier_desktop adds ONE entry whose
-      # tier comes from the desktop_tier choice below — tiers are a choice,
-      # not checkbox matrix entries, because the desktop tier is NOT part
-      # of Armbian image filenames and two tiers in one run would clobber
-      # each other in the flat release asset list.
-      tier_cli:
-        description: "Tier: cli (no desktop, build.sh --minimal)"
-        type: boolean
-        default: false
-      tier_desktop:
-        description: "Tier: desktop (minimal/mid/full via desktop_tier)"
-        type: boolean
-        default: true
+      # ── Variants (always built, release bound to variant) ────────────
+      # Every run builds BOTH variants:
+      #   cli   → Debian 13 (trixie)       — build.sh --minimal
+      #   gnome → Ubuntu 26.04 (resolute)  — desktop, sized by desktop_tier
 
       # ── OTA modes (each selected mode becomes a separate matrix entry) ──
       ota_recovery:
@@ -68,19 +48,8 @@ on:
         default: false
 
       # ── Other options ─────────────────────────────────────────────────
-      desktop_env:
-        description: "Desktop environment (effective when tier_desktop is checked)"
-        required: true
-        type: choice
-        options:
-          - gnome
-          - xfce
-          - kde-plasma
-          - mate
-          - cinnamon
-        default: gnome
       desktop_tier:
-        description: "Desktop tier (effective when tier_desktop is checked)"
+        description: "Desktop tier size for the gnome variant"
         required: true
         type: choice
         options:
@@ -88,24 +57,11 @@ on:
           - mid
           - full
         default: mid
-      build_mode:
-        description: "Build mode (full = kernel+uboot+rootfs+image)"
-        required: true
-        type: choice
-        options:
-          - full
-          - minimal
-        default: full
-      extension_ref:
-        description: "seeed_armbian_extension ref (branch:x / tag:x / commit:sha)"
+      armbian_build_repo:
+        description: "armbian-build source as owner/repo:branch (industrial board lives on rk3576-industrial until merged to main)"
         required: true
         type: string
-        default: "branch:main"
-      armbian_build_ref:
-        description: "Seeed-Studio/armbian-build branch/tag (recomputer-rk3576-industrial lives on rk3576-industrial until merged to main)"
-        required: true
-        type: string
-        default: "main"
+        default: "Seeed-Studio/armbian-build:main"
       clear_kernel_cache:
         description: "Clear kernel deb/worktree cache before build"
         required: false
@@ -121,11 +77,6 @@ on:
         required: false
         type: boolean
         default: false
-      release_tag_suffix:
-        description: "Release tag suffix (auto: v{YYYYMMDD-HHMM} if empty)"
-        required: false
-        type: string
-        default: ""
 
 env:
   PRIVATE_CCACHE: "yes"
@@ -191,12 +142,9 @@ jobs:
 
           # Resolve the release tag ONCE here so every job in this run
           # (init-release, per-entry asset uploads, publish) agrees on it.
-          suffix="${{ inputs.release_tag_suffix }}"
-          if [ -n "$suffix" ]; then
-            tag="v${suffix}"
-          else
-            tag="v$(date -u +%Y%m%d-%H%M)"
-          fi
+          # Auto tag YYMMDD-HHMM (UTC); init-release deletes any existing
+          # release+tag with the same name before creating a fresh one.
+          tag="$(date -u +%y%m%d-%H%M)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
           if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.upload_release }}" != "true" ]; then
@@ -218,16 +166,10 @@ jobs:
           if flag("BOARD_RK3576_MODULE"): boards.append("recomputer-rk3576-module-devkit")
           if flag("BOARD_RK3576_INDUSTRIAL"): boards.append("recomputer-rk3576-industrial")
 
-          # Releases
-          releases = []
-          if flag("REL_TRIXIE"): releases.append("trixie")
-          if flag("REL_RESOLUTE"): releases.append("resolute")
-
-          # Tiers. cli = no-desktop (--minimal); the desktop checkbox adds
-          # ONE entry at the tier picked in the desktop_tier choice.
-          tiers = []
-          if flag("TIER_CLI"): tiers.append("cli")
-          if flag("TIER_DESKTOP"): tiers.append(os.environ.get("DESKTOP_TIER", "mid"))
+          # Variants are fixed: cli on Debian 13, gnome desktop on
+          # Ubuntu 26.04 — the release is bound to the variant.
+          # (tier, release)
+          variants = [("cli", "trixie"), ("gnome", "resolute")]
 
           # OTA modes. Each selected mode becomes its own matrix entry.
           # If none selected, fall back to recovery — plain (no OTA)
@@ -248,19 +190,15 @@ jobs:
           if not securities:
               securities = [""]  # unencrypted only
 
-          errs = []
-          if not boards:   errs.append("select at least one board")
-          if not releases: errs.append("select at least one release")
-          if not tiers:    errs.append("select at least one tier")
-          if errs:
-              raise SystemExit("ERROR: " + "; ".join(errs))
+          if not boards:
+              raise SystemExit("ERROR: select at least one board")
 
           entries = []
-          for (b, r, t, p, s) in itertools.product(boards, releases, tiers, otas, securities):
+          for b, (t, r), p, s in itertools.product(boards, variants, otas, securities):
               entries.append({
                   "board": b,
-                  "release": r,
                   "tier": t,
+                  "release": r,
                   "profile": p,
                   "security": s,
               })
@@ -282,11 +220,6 @@ jobs:
           BOARD_RK3588: ${{ inputs.board_rk3588 }}
           BOARD_RK3576_MODULE: ${{ inputs.board_rk3576_module }}
           BOARD_RK3576_INDUSTRIAL: ${{ inputs.board_rk3576_industrial }}
-          REL_TRIXIE:   ${{ inputs.release_trixie }}
-          REL_RESOLUTE:  ${{ inputs.release_resolute }}
-          TIER_CLI:     ${{ inputs.tier_cli }}
-          TIER_DESKTOP: ${{ inputs.tier_desktop }}
-          DESKTOP_TIER: ${{ inputs.desktop_tier }}
           OTA_RECOVERY: ${{ inputs.ota_recovery }}
           OTA_AB:       ${{ inputs.ota_ab }}
           SEC_PLAIN:    ${{ inputs.security_plain }}
@@ -315,11 +248,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Reuse an existing release with the same tag (re-runs with an
-          # explicit release_tag_suffix) instead of failing.
+          # Same-minute re-runs (or a re-dispatch) can hit an existing
+          # release+tag: delete it and start fresh rather than reusing.
           if gh release view "${{ needs.plan.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release ${{ needs.plan.outputs.tag }} already exists, reusing it."
-            exit 0
+            echo "Release ${{ needs.plan.outputs.tag }} already exists — deleting old release + tag"
+            gh release delete "${{ needs.plan.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
           gh release create "${{ needs.plan.outputs.tag }}" \
             --repo "$GITHUB_REPOSITORY" \
@@ -345,22 +278,13 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
 
     steps:
-      # extension_ref is in fetch_from_repo's 方式:参数 format
-      # (branch:x / tag:x / commit:sha); actions/checkout wants the bare
-      # ref, so strip the prefix.
-      - name: Resolve extension ref
-        id: ext
-        run: |
-          ref='${{ inputs.extension_ref }}'
-          echo "bare=${ref#*:}" >> "$GITHUB_OUTPUT"
-
-      # The workflow file lives on seeed-build, but the code to build may
-      # be on a different ref (branch:main-pre, ...) — check that out
-      # directly instead of the dispatch ref.
-      - name: Checkout extension at extension_ref
+      # Build code comes from this repo's default branch. The extension
+      # revision actually used is pinned inside armbian-build's
+      # seeed-extension.sh (SEEED_EXTENSION_REF), so there is no ref
+      # input for it.
+      - name: Checkout extension (default branch)
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.ext.outputs.bare }}
           fetch-depth: 1
 
       - name: Free up disk space
@@ -409,23 +333,27 @@ jobs:
           echo "ota_label=$ota" >> "$GITHUB_OUTPUT"
           echo "sec_label=$sec" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve armbian-build repo
+        # input is owner/repo:branch — validate and split (last colon);
+        # done through env to keep the value out of the run: script text.
+        id: abrepo
+        env:
+          AB_REPO: ${{ inputs.armbian_build_repo }}
+        run: |
+          set -euo pipefail
+          [[ "${AB_REPO}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?:[A-Za-z0-9._/-]+$ ]] \
+            || { echo "::error::armbian_build_repo must be 'owner/repo:branch', got '${AB_REPO}'"; exit 1; }
+          echo "repo=${AB_REPO%:*}" >> "$GITHUB_OUTPUT"
+          echo "ref=${AB_REPO##*:}" >> "$GITHUB_OUTPUT"
+          echo "armbian-build: ${AB_REPO%:*} @ ${AB_REPO##*:}"
+
       - name: Checkout armbian-build
         uses: actions/checkout@v4
         with:
-          repository: Seeed-Studio/armbian-build
-          ref: ${{ inputs.armbian_build_ref }}
+          repository: ${{ steps.abrepo.outputs.repo }}
+          ref: ${{ steps.abrepo.outputs.ref }}
           path: armbian-build
           fetch-depth: 1
-
-      - name: Point extension wrapper at the selected ref
-        # Replace the pinned SEEED_EXTENSION_REF in
-        # extensions/seeed-extension.sh with the selected ref; the
-        # wrapper then fetches/symlinks/enables exactly that revision.
-        run: |
-          cd armbian-build
-          sed -i "s|^SEEED_EXTENSION_REF=.*|SEEED_EXTENSION_REF=\"${{ inputs.extension_ref }}\"|" \
-              extensions/seeed-extension.sh
-          grep -n 'SEEED_EXTENSION_REF' extensions/seeed-extension.sh
 
       - name: Add trailing blank line to vendor defconfigs
         run: |
@@ -546,17 +474,13 @@ jobs:
         working-directory: armbian-build
         run: |
           set -euo pipefail
-          MODE_ARGS=""
-          case "${{ inputs.build_mode }}" in
-            minimal) MODE_ARGS="--minimal" ;;
-            full)    MODE_ARGS="" ;;
-          esac
-
+          # cli → --minimal (Debian 13); gnome → desktop (Ubuntu 26.04)
+          # sized by the desktop_tier choice.
           TIER_ARGS=""
           if [[ "${{ matrix.tier }}" == "cli" ]]; then
               TIER_ARGS="--minimal"
           else
-              TIER_ARGS="-d ${{ inputs.desktop_env }} -t ${{ matrix.tier }}"
+              TIER_ARGS="-d gnome -t ${{ inputs.desktop_tier }}"
           fi
 
           # Passphrase is only consumed when a security profile is set
@@ -573,7 +497,6 @@ jobs:
 
           # shellcheck disable=SC2086
           ./seeed-build.sh \
-            $MODE_ARGS \
             ${{ matrix.profile }} \
             ${{ matrix.security }} \
             -b "${{ matrix.board }}" \
@@ -630,26 +553,39 @@ jobs:
             exit 1
           fi
 
-          # GitHub hard-caps a single release asset at 2 GiB
-          for f in "${files[@]}" "${ota_files[@]}"; do
-            size=$(stat -c%s "$f")
-            if [ "$size" -gt 2147483648 ]; then
-              echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — exceeds GitHub's 2 GiB per-asset limit"
-              exit 1
-            fi
-          done
+          # GitHub hard-caps a single release asset at 2 GiB — split bigger
+          # files into 1900m chunks instead of failing. Reassemble with
+          # `cat <file>.*.part > <file>`; the .sha256 sidecar (compress
+          # step for .img.xz, generated here for others) verifies the
+          # reassembled original.
+          MAX=2147483648
 
           # Hardlink staging (no data copy, same filesystem) — outside
           # output/images/ so the artifact step below doesn't pick up
           # the renamed duplicates.
           stage=".release-stage"
           rm -rf "$stage" && mkdir -p "$stage"
+          split_files=0
           for f in "${files[@]}" "${ota_files[@]}"; do
-            ln "$f" "$stage/${PREFIX}-$(basename "$f")"
+            staged="${PREFIX}-$(basename "$f")"
+            size=$(stat -c%s "$f")
+            if [ "$size" -le "$MAX" ]; then
+              ln "$f" "$stage/${staged}"
+              continue
+            fi
+            echo "  splitting $(basename "$f") ($(numfmt --to=iec "$size") > 2GiB)"
+            split -b 1900m --numeric-suffixes=1 --additional-suffix=.part \
+              "$f" "$stage/${staged}."
+            case "$(basename "$f")" in
+              *.img.xz) : ;;  # .img.xz.sha256 sidecar already in files[]
+              *) ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) \
+                   > "$stage/${staged}.sha256" ;;
+            esac
+            split_files=$((split_files + 1))
           done
 
           total=$(( ${#files[@]} + ${#ota_files[@]} ))
-          echo "=== uploading ${total} assets (${PREFIX}-*) to ${TAG} ==="
+          echo "=== uploading ${total} assets (${split_files} split >2GiB, ${PREFIX}-*) to ${TAG} ==="
           gh release upload "$TAG" "$stage"/* --repo "$GITHUB_REPOSITORY" --clobber
           rm -rf "$stage"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
@@ -685,15 +621,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout release body template
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github
-          fetch-depth: 1
-
-      # Each row pairs an .img.xz with its _OTA.tar.gz (matched by
-      # filename stem after the <board>-<ota>[-sec]- upload prefix);
-      # links are the assets' browser download URLs on this release.
+      # Per-board bullet list of every attached asset (name, size, link),
+      # grouped by the <board>-<rec|ab>-<nosec|sec>- upload prefix.
       - name: Generate release document from attached assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -701,121 +630,34 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          python3 <<'PY'
-          import datetime, json, os, re, subprocess
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | [.name, .size, .url] | @tsv' > /tmp/assets.tsv
+          [ -s /tmp/assets.tsv ] || { echo "::error::release $TAG has no assets"; exit 1; }
 
-          boards = json.loads(os.environ["BOARDS"])
-          tag = os.environ["TAG"]
-
-          DISTRO = {
-              "trixie":   ("https://armbian.com/debian.svg", "Debian 13"),
-              "resolute": ("https://armbian.com/ubuntu.png", "Ubuntu 26.04"),
-              "plucky":   ("https://armbian.com/ubuntu.png", "Ubuntu 25.04"),
-          }
-          VARIANT = {
-              "gnome_desktop": "Gnome",
-              "minimal":       "Minimal (CLI)",
-          }
-          TYPE = {
-              ("rec", "nosec"): "RECOVERY",
-              ("ab",  "nosec"): "AB",
-              ("rec", "sec"):   "RECOVERY-SEC",
-              ("ab",  "sec"):   "AB-SEC",
-          }
-          # assets were prefixed <board>-<rec|ab>-<nosec|sec>-<original>
-          # at upload time; the board segment may itself contain '-'
-          # (rk3576-module), hence the lazy first group.
-          PREFIX_RE = re.compile(r"^(.+?)-(rec|ab)-(nosec|sec)-(.+)$")
-
-          r = subprocess.run(
-              ["gh", "release", "view", tag, "--repo", os.environ["GITHUB_REPOSITORY"], "--json", "assets"],
-              capture_output=True, text=True, check=True)
-          assets = {a["name"]: a for a in json.loads(r.stdout)["assets"]}
-
-          refs = []
-
-          def ref(url):
-              refs.append(url)
-              return len(refs)
-
-          def human(n):
-              g = n / 1_000_000_000
-              if g >= 1:
-                  return f"{g:.1f}GB"
-              return f"{n / 1_000_000:.0f}MB"
-
-          def board_table(board):
-              short = board.replace("recomputer-", "").replace("-devkit", "")
-              rows = []
-              for name in sorted(assets):
-                  if not name.endswith(".img.xz"):
-                      continue
-                  m = PREFIX_RE.match(name)
-                  if not m:
-                      print(f"::warning::unparsed asset name {name}")
-                      continue
-                  asset_board, ota, sec, orig = m.groups()
-                  if asset_board != short:
-                      continue
-                  stem = orig[: -len(".img.xz")]
-                  # ..._<release>_vendor_<ver>_<variant>[_AB_PART] —
-                  # recovery images use stock names (no _RECOVERY
-                  # suffix), A/B keeps _AB_PART.
-                  mm = re.search(r"_([a-z]+)_vendor_[0-9.]+_(.*?)(?:_AB_PART)?$", stem)
-                  if not mm:
-                      print(f"::warning::unparsed filename {orig}")
-                      continue
-                  rel, var = mm.groups()
-                  icon, dist = DISTRO.get(rel, ("", rel))
-                  var_txt = VARIANT.get(var, var.replace("_desktop", "").title())
-                  img_i = ref(assets[name]["url"])
-                  cell = f"[IMAGE][{img_i}]"
-                  ota_name = f"{asset_board}-{ota}-{sec}-{stem}_OTA.tar.gz"
-                  if ota_name in assets:
-                      ota_i = ref(assets[ota_name]["url"])
-                      cell = f"[IMAGE][{img_i}] \\| [OTA][{ota_i}]"
-                  rows.append(f'|<img src="{icon}" width="20" height="20" '
-                              f'<span>{dist}</span>|{var_txt}|{TYPE[(ota, sec)]}|'
-                              f'{human(assets[name]["size"])}|{cell} |')
-              head = ["|Distribution|Variant|Type|Size|Download|",
-                      "|:-:         |:-:    |:-: |:-: |:-:     |"]
-              return head + sorted(rows)
-
-          today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-
-          tpl_path = ".github/release-body.md"
-          with open(tpl_path, encoding="utf-8") as f:
-              tpl = f.read()
-          for marker in ("{{RUN_ID}}", "{{DATE}}", "{{BOARD_TABLES}}", "{{LINK_REFS}}"):
-              if marker not in tpl:
-                  raise SystemExit(f"ERROR: {marker} missing from {tpl_path}")
-
-          sections = []
-          for b in boards:
-              short = b.replace("recomputer-", "").replace("-devkit", "")
-              header = f"{short}-devkit" if b.endswith("-devkit") else short
-              sections.append("\n".join([f"#### {header}", ""] + board_table(b)))
-
-          refs_md = "\n".join(f"[{i}]:{url}" for i, url in enumerate(refs, 1))
-
-          md = (tpl
-                .replace("{{RUN_ID}}", os.environ.get("GITHUB_RUN_ID", ""))
-                .replace("{{DATE}}", today)
-                .replace("{{BOARD_TABLES}}", "\n\n".join(sections))
-                .replace("{{LINK_REFS}}", refs_md))
-
-          leftover = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", md)))
-          if leftover:
-              raise SystemExit(f"ERROR: unresolved placeholders in release body: {leftover}")
-
-          if not md.endswith("\n"):
-              md += "\n"
-          os.makedirs("release-out", exist_ok=True)
-          with open("release-out/CHANGELOG.md", "w", encoding="utf-8") as f:
-              f.write(md)
-          print("=== Generated release-out/CHANGELOG.md ===")
-          print(md)
-          PY
+          out="release-out/CHANGELOG.md"
+          mkdir -p release-out
+          {
+            echo "## Armbian images — $(date -u +%Y-%m-%d)"
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID · tag \`$TAG\`"
+            echo
+            echo "> Files larger than the 2 GiB GitHub per-asset cap are split into \`.NN.part\` chunks:"
+            echo "> reassemble with \`cat <file>.*.part > <file>\`, then verify with the \`.sha256\` sidecar."
+            for b in $(echo "$BOARDS" | jq -r '.[]'); do
+              short="${b#recomputer-}"; short="${short%-devkit}"
+              echo
+              echo "### ${short}"
+              # asset names carry the <board>-<rec|ab>-<nosec|sec>- upload
+              # prefix; the (rec|ab) anchor keeps rk3576 from matching
+              # rk3576-module / rk3576-industrial assets.
+              grep -E "^${short}-(rec|ab)-(nosec|sec)-" /tmp/assets.tsv > "/tmp/a.tsv" || true
+              while IFS=$'\t' read -r name size url; do
+                echo "- [${name}](${url}) — $(numfmt --to=iec "${size}")"
+              done < "/tmp/a.tsv"
+            done
+          } > "$out"
+          echo "=== Generated ${out} ==="
+          cat "$out"
 
       - name: Publish release
         env:
