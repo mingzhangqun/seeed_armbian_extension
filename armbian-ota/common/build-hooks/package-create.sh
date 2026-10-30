@@ -329,22 +329,27 @@ EOF
 function ota_create_final_tarball() {
     local ota_temp_dir="$1"
     local ota_output_path="$2"
-    # Legacy gz layout keeps the compressed outer tar; parallel gzip keeps the
-    # second compression pass inside CI step time limits (see f8842fa9).
-    local tar_compress_flag="-I $(ota_gzip_prog) -cf"
 
-    # Compressed-payload layouts (xz/zstd) ship an uncompressed outer tar: the
-    # payload members are already compressed, so a second compression pass is
-    # wasted work, and the plain tar lets metadata members be read without
-    # decoding anything.
-    [[ "${OTA_PAYLOAD_COMP}" == "xz" || "${OTA_PAYLOAD_COMP}" == "zstd" ]] && tar_compress_flag="-cf"
+    # The payload members are already compressed; the outer pass is a
+    # presentation shell (a bare .tar handed to end users reads as careless),
+    # so it always compresses -- same codec as the payload at a fast level,
+    # ratio is irrelevant. Piped codecs because tar -I takes a single-word
+    # program and the speed flags need to reach xz/zstd themselves. The
+    # on-device reader (tar -xOf) auto-detects the compression.
+    local -a outer_codec=()
+    case "${OTA_PAYLOAD_COMP}" in
+        gz)   outer_codec=("$(ota_gzip_prog)" -1) ;;
+        xz)   outer_codec=(xz -T0 -1) ;;
+        zstd) outer_codec=(zstd -q -3 -T0) ;;
+        *)    exit_with_error "unsupported OTA_PAYLOAD_COMP" "${OTA_PAYLOAD_COMP}" ;;
+    esac
 
     (
         cd "${ota_temp_dir}" &&
         {
             printf '%s\0' "package.env"
             find . -mindepth 1 ! -path "./package.env" ! -type d -printf '%P\0' | LC_ALL=C sort -z
-        } | tar --null ${tar_compress_flag} "${ota_output_path}" -T -
+        } | tar --null -cf - -T - | "${outer_codec[@]}" > "${ota_output_path}"
     )
 }
 

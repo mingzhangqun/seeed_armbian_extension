@@ -91,10 +91,11 @@ function ota_image_package_base_name() {
 
 function ota_image_ota_package_name() {
     local base_image_name="$1"
+    # Outer shell always compresses with the payload codec (package-create.sh).
     local suffix="tar.gz"
-    # Compressed payload layouts ship an uncompressed outer tar (package-create.sh).
     case "${OTA_PAYLOAD_COMP:-gz}" in
-        xz|zstd) suffix="tar" ;;
+        xz)   suffix="tar.xz" ;;
+        zstd) suffix="tar.zst" ;;
     esac
     echo "${base_image_name}_OTA.${suffix}"
 }
