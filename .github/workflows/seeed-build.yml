@@ -4,20 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       # ── Boards (multi-select via checkboxes) ─────────────────────────
+      # keep the rk3576 variants grouped together, rk3588 last
       board_rk3576:
         description: "Board: reComputer rk3576 DevKit"
         type: boolean
         default: true
-      board_rk3588:
-        description: "Board: reComputer rk3588 DevKit"
-        type: boolean
-        default: false
       board_rk3576_module:
         description: "Board: reComputer rk3576 Module DevKit"
         type: boolean
         default: false
       board_rk3576_industrial:
         description: "Board: reComputer rk3576 Industrial"
+        type: boolean
+        default: false
+      board_rk3588:
+        description: "Board: reComputer rk3588 DevKit"
         type: boolean
         default: false
 
