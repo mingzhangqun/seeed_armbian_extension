@@ -63,8 +63,16 @@ extract_tar() {
     rm -f "${err_file}" "${dec_status}" 2>/dev/null || true
 
     TAR_BIN="$(ota_resolve_tool tar)"
+    DEC_FLAGS=""
     case "${archive}" in
-        *.tar.xz)  DEC_BIN="$(ota_resolve_tool xz)" ;;
+        *.tar.xz)
+            DEC_BIN="$(ota_resolve_tool xz)"
+            # Payload xz archives are compressed with -T0 (multi-block), so
+            # decode can run in parallel too; on-device timing showed this
+            # is the single biggest OTA wall-clock lever for xz packages.
+            # Harmless on single-block archives.
+            DEC_FLAGS="-T0"
+            ;;
         *.tar.zst) DEC_BIN="$(ota_resolve_tool zstd)" ;;
         *)         DEC_BIN="$(ota_resolve_tool gzip)" ;;
     esac
@@ -78,7 +86,7 @@ extract_tar() {
         tar_flags="${tar_flags} --xattrs --acls"
     fi
 
-    log "${label}: ${DEC_BIN} -dc ${archive} | ${TAR_BIN} ${tar_flags} -xf - -C ${target}"
+    log "${label}: ${DEC_BIN} ${DEC_FLAGS} -dc ${archive} | ${TAR_BIN} ${tar_flags} -xf - -C ${target}"
     # busybox ash has no pipefail; the decompressor exit status travels through
     # a side file because tar alone can exit 0 on a corrupt stream once it has
     # seen the archive end marker before the decompressor bailed.
@@ -86,7 +94,7 @@ extract_tar() {
     dec_rc=1
     {
         (
-            "${DEC_BIN}" -dc "${archive}"
+            "${DEC_BIN}" ${DEC_FLAGS} -dc "${archive}"
             echo $? >"${dec_status}"
         ) | "${TAR_BIN}" ${tar_flags} -xf - -C "${target}"
     } 2>"${err_file}" || rc=$?
