@@ -87,8 +87,13 @@ on:
         required: false
         type: boolean
         default: false
+      upload_release:
+        description: "Attach images/OTA to a draft release on this repo (GITHUB_TOKEN, no secrets)"
+        required: false
+        type: boolean
+        default: true
       publish_release:
-        description: "Publish ONE GitHub Release covering all boards (IMAGES tables link OneDrive)"
+        description: "Publish ONE GitHub Release covering all boards (assets attached by build entries)"
         required: false
         type: boolean
         default: false
@@ -97,11 +102,6 @@ on:
         required: false
         type: string
         default: ""
-      upload_onedrive:
-        description: "Upload images to OneDrive (seeed-storage:armbian-images/<board>/pre-release/)"
-        required: false
-        type: boolean
-        default: true
 
 env:
   PRIVATE_CCACHE: "yes"
@@ -113,79 +113,43 @@ env:
 
 jobs:
   preflight:
-    # Fail fast on missing/invalid credentials BEFORE the multi-hour
-    # build: previously a missing secret only surfaced at the step that
-    # consumed it (OneDrive upload / release = 2h+ wasted).
+    # Fail fast on malformed secure-boot credentials BEFORE the
+    # multi-hour build. Image hosting needs no secrets: release assets
+    # are uploaded with this workflow's GITHUB_TOKEN.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Validate required secrets for the selected options
+      - name: Validate secure-boot secrets
+        if: ${{ inputs.secure_boot }}
         env:
-          SECURE_BOOT: ${{ inputs.secure_boot }}
-          UPLOAD_ONEDRIVE: ${{ inputs.upload_onedrive }}
-          PUBLISH_RELEASE: ${{ inputs.publish_release }}
           PRIVATE_KEY_PEM: ${{ secrets.PRIVATE_KEY_PEM }}
           DEV_CRT: ${{ secrets.DEV_CRT }}
           CRYPTROOT_PASSPHRASE: ${{ secrets.CRYPTROOT_PASSPHRASE }}
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
-          ARMBIAN_BUILD_RELEASE_TOKEN: ${{ secrets.ARMBIAN_BUILD_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           fail=0
           err() { echo "::error::$1"; fail=1; }
 
-          if [ "$SECURE_BOOT" = "true" ]; then
-            [ -n "$PRIVATE_KEY_PEM" ] || err "secret PRIVATE_KEY_PEM is empty (secure_boot selected)"
-            [ -n "$DEV_CRT" ]        || err "secret DEV_CRT is empty (secure_boot selected)"
-            [ "${#CRYPTROOT_PASSPHRASE}" -eq 64 ] \
-              || err "CRYPTROOT_PASSPHRASE must be exactly 64 chars, got ${#CRYPTROOT_PASSPHRASE}"
-            if [ -n "$PRIVATE_KEY_PEM" ]; then
-              printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -check -noout >/dev/null 2>&1 \
-                || err "PRIVATE_KEY_PEM is not a parsable RSA key"
-            fi
-            if [ -n "$DEV_CRT" ]; then
-              printf '%s\n' "$DEV_CRT" | openssl x509 -noout >/dev/null 2>&1 \
-                || err "DEV_CRT is not a parsable x509 certificate"
-            fi
-            if [ -n "$PRIVATE_KEY_PEM" ] && [ -n "$DEV_CRT" ]; then
-              key_pub=$(printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -pubout 2>/dev/null | openssl md5)
-              crt_pub=$(printf '%s\n' "$DEV_CRT" | openssl x509 -pubkey -noout 2>/dev/null | openssl md5)
-              [ "$key_pub" = "$crt_pub" ] || err "PRIVATE_KEY_PEM does not match DEV_CRT"
-            fi
+          [ -n "$PRIVATE_KEY_PEM" ] || err "secret PRIVATE_KEY_PEM is empty (secure_boot selected)"
+          [ -n "$DEV_CRT" ]        || err "secret DEV_CRT is empty (secure_boot selected)"
+          [ "${#CRYPTROOT_PASSPHRASE}" -eq 64 ] \
+            || err "CRYPTROOT_PASSPHRASE must be exactly 64 chars, got ${#CRYPTROOT_PASSPHRASE}"
+          if [ -n "$PRIVATE_KEY_PEM" ]; then
+            printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -check -noout >/dev/null 2>&1 \
+              || err "PRIVATE_KEY_PEM is not a parsable RSA key"
           fi
-
-          if [ "$UPLOAD_ONEDRIVE" = "true" ]; then
-            [ -n "$RCLONE_CONFIG" ] || err "secret RCLONE_CONFIG is empty (upload_onedrive selected)"
+          if [ -n "$DEV_CRT" ]; then
+            printf '%s\n' "$DEV_CRT" | openssl x509 -noout >/dev/null 2>&1 \
+              || err "DEV_CRT is not a parsable x509 certificate"
           fi
-
-          if [ "$PUBLISH_RELEASE" = "true" ]; then
-            [ -n "$ARMBIAN_BUILD_RELEASE_TOKEN" ] \
-              || err "secret ARMBIAN_BUILD_RELEASE_TOKEN is empty (publish_release selected)"
+          if [ -n "$PRIVATE_KEY_PEM" ] && [ -n "$DEV_CRT" ]; then
+            key_pub=$(printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -pubout 2>/dev/null | openssl md5)
+            crt_pub=$(printf '%s\n' "$DEV_CRT" | openssl x509 -pubkey -noout 2>/dev/null | openssl md5)
+            [ "$key_pub" = "$crt_pub" ] || err "PRIVATE_KEY_PEM does not match DEV_CRT"
           fi
 
           [ "$fail" -eq 0 ] || exit 1
-          echo "All required secrets present and well-formed."
-
-      - name: Probe OneDrive remote (catches expired rclone token)
-        if: ${{ inputs.upload_onedrive }}
-        uses: AnimMouse/setup-rclone@v1
-        with:
-          version: v1.67.0
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          disable_base64: true
-
-      - name: Verify rclone remote is writable
-        if: ${{ inputs.upload_onedrive }}
-        run: |
-          set -euo pipefail
-          rclone mkdir seeed-storage:armbian-images
-          rclone lsd seeed-storage:armbian-images
-
-      - name: Verify release token can reach target repo
-        if: ${{ inputs.publish_release }}
-        env:
-          GH_TOKEN: ${{ secrets.ARMBIAN_BUILD_RELEASE_TOKEN }}
-        run: gh api repos/Seeed-Studio/armbian-build --jq .full_name
+          echo "Secure-boot secrets present and well-formed."
 
   plan:
     needs: preflight
@@ -194,11 +158,28 @@ jobs:
       matrix: ${{ steps.gen.outputs.matrix }}
       boards: ${{ steps.gen.outputs.boards }}
       count: ${{ steps.gen.outputs.count }}
+      tag: ${{ steps.gen.outputs.tag }}
     steps:
       - name: Generate matrix JSON from checkbox inputs
         id: gen
         run: |
           set -euo pipefail
+
+          # Resolve the release tag ONCE here so every job in this run
+          # (init-release, per-entry asset uploads, publish) agrees on it.
+          suffix="${{ inputs.release_tag_suffix }}"
+          if [ -n "$suffix" ]; then
+            tag="v${suffix}"
+          else
+            tag="v$(date -u +%Y%m%d-%H%M)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.upload_release }}" != "true" ]; then
+            echo "::error::publish_release requires upload_release (assets live on the release itself)"
+            exit 1
+          fi
+
           python3 <<'PY'
           import json, os, itertools
 
@@ -287,11 +268,46 @@ jobs:
         run: |
           echo "Total matrix entries: ${{ steps.gen.outputs.count }}"
           echo "Boards to release: ${{ steps.gen.outputs.boards }}"
+          echo "Release tag: ${{ steps.gen.outputs.tag }}"
+
+  # Creates the (single) draft release all build entries upload into.
+  # Runs unconditionally so `build` can depend on it even when
+  # upload_release is false — in that case it is a fast no-op.
+  init-release:
+    name: Init draft release
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create draft release ${{ needs.plan.outputs.tag }}
+        if: ${{ inputs.upload_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Reuse an existing release with the same tag (re-runs with an
+          # explicit release_tag_suffix) instead of failing.
+          if gh release view "${{ needs.plan.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${{ needs.plan.outputs.tag }} already exists, reusing it."
+            exit 0
+          fi
+          gh release create "${{ needs.plan.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --prerelease \
+            --title "${{ needs.plan.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --notes "Assets are attached by the build matrix; the body is generated on publish. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   build:
-    needs: plan
+    needs: [plan, init-release]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
+    permissions:
+      # gh release upload against the draft release
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -556,56 +572,59 @@ jobs:
           echo "=== output/images/ contents ==="
           ls -lh output/images/
 
-      - name: Setup Rclone
-        if: ${{ inputs.upload_onedrive }}
-        uses: AnimMouse/setup-rclone@v1
-        with:
-          version: v1.67.0
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          disable_base64: true
-
-      - name: Upload images to OneDrive (pre-release)
-        # OneDrive layout (seeed-storage:armbian-images/<board>/pre-release/):
-        #   rec/ | ab/              — images without security profile
-        #   "rec sec/" | "ab sec/"  — secure-boot images
-        #   ota/ inside each dir    — OTA packages + checksums. Locally
-        #                             they sit under output/images/<BOARD>/ota/
-        #                             (bfb8fce2 mirror layout); the board
-        #                             segment is stripped on upload because
-        #                             the OneDrive path already carries it.
-        #   fit/ inside sec dirs is NOT touched by CI — signed FIT images
-        #   are uploaded manually.
-        # No CI-side filename renaming: the extension already bakes the
-        # layout into the image name (_AB_PART for A/B; recovery images
-        # use stock names) and the directory layout carries the rest.
-        # The release/ channel is also manual: tested images are moved
-        # from pre-release by hand. Retention: the cleanup job deletes
-        # pre-release files from previous runs after the matrix
-        # finishes (only this run's uploads stay).
-        if: ${{ inputs.upload_onedrive }}
+      - name: Upload images/OTA to draft release
+        # Release assets live in ONE flat list, so every file is renamed
+        # (via a hardlink staging dir — gh release upload has no rename)
+        # to carry a <board>-<ota>[-sec]- prefix. The release-body
+        # generator parses that prefix back out; plain and secure-boot
+        # images of the same board+release+tier have IDENTICAL filenames
+        # and would clobber each other without it.
+        if: ${{ inputs.upload_release }}
         working-directory: armbian-build
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          BOARD_DIR="${{ steps.lbl.outputs.short_board }}-devkit"
+          TAG="${{ needs.plan.outputs.tag }}"
           case "${{ matrix.profile }}" in
-            ab)       OTA_DIR="ab" ;;
-            recovery) OTA_DIR="rec" ;;
-            *)        OTA_DIR="rec" ;;
+            ab) ota=ab ;;
+            *)  ota=rec ;;
           esac
-          if [ -n "${{ matrix.security }}" ]; then
-            DEST="seeed-storage:armbian-images/${BOARD_DIR}/pre-release/${OTA_DIR} sec"
-          else
-            DEST="seeed-storage:armbian-images/${BOARD_DIR}/pre-release/${OTA_DIR}"
+          if [ -n "${{ matrix.security }}" ]; then sec=sec; else sec=nosec; fi
+          PREFIX="${{ steps.lbl.outputs.short_board }}-${ota}-${sec}"
+
+          shopt -s nullglob
+          files=(output/images/*.img.xz output/images/*.sha256 output/images/*.sha)
+          ota_files=(output/images/${{ matrix.board }}/ota/*)
+          if [ ${#files[@]} -eq 0 ] && [ ${#ota_files[@]} -eq 0 ]; then
+            echo "::error::nothing found under output/images/ to upload"
+            exit 1
           fi
-          # --max-depth 1 keeps the copy to top-level files only, so the
-          # <BOARD>/ota/ subtree is not nested again under DEST (uploaded
-          # separately below).
-          echo "Uploading output/images/ (top-level images) -> ${DEST}"
-          rclone copy -P --stats 1m --max-depth 1 output/images/ "${DEST}"
-          echo "Uploading output/images/${{ matrix.board }}/ota/ -> ${DEST}/ota"
-          rclone copy -P --stats 1m "output/images/${{ matrix.board }}/ota" "${DEST}/ota"
-          echo "=== Remote listing ==="
-          rclone lsl "${DEST}"
+
+          # GitHub hard-caps a single release asset at 2 GiB
+          for f in "${files[@]}" "${ota_files[@]}"; do
+            size=$(stat -c%s "$f")
+            if [ "$size" -gt 2147483648 ]; then
+              echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — exceeds GitHub's 2 GiB per-asset limit"
+              exit 1
+            fi
+          done
+
+          # Hardlink staging (no data copy, same filesystem) — outside
+          # output/images/ so the artifact step below doesn't pick up
+          # the renamed duplicates.
+          stage=".release-stage"
+          rm -rf "$stage" && mkdir -p "$stage"
+          for f in "${files[@]}" "${ota_files[@]}"; do
+            ln "$f" "$stage/${PREFIX}-$(basename "$f")"
+          done
+
+          total=$(( ${#files[@]} + ${#ota_files[@]} ))
+          echo "=== uploading ${total} assets (${PREFIX}-*) to ${TAG} ==="
+          gh release upload "$TAG" "$stage"/* --repo "$GITHUB_REPOSITORY" --clobber
+          rm -rf "$stage"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '"release now has \(.assets | length) assets"'
 
       - name: Upload output/images/ as-is
         if: always()
@@ -624,111 +643,40 @@ jobs:
           ccache -s 2>/dev/null || true
           du -sh armbian-build/cache/ccache 2>/dev/null || true
 
-  cleanup:
-    name: OneDrive retention (${{ matrix.board }})
+  release:
     needs: [plan, build]
-    # Retention: pre-release keeps ONLY what this run uploaded — files
-    # from previous runs are deleted. This must run after the whole
-    # matrix, not inside build entries: parallel entries sharing a
-    # directory (e.g. trixie + resolute both landing in rec/) would
-    # delete each other's fresh uploads. Only on full build success, so
-    # a partially-failed run leaves the previous images in place.
-    if: ${{ inputs.upload_onedrive && !cancelled() && needs.build.result == 'success' }}
+    # ONE release covering ALL boards, hosted entirely on this repo:
+    # assets were attached to the draft release by the build entries;
+    # this job generates the download tables from the release's own
+    # asset list and publishes it (draft -> pre-release). Previous
+    # releases are kept — clean them up manually if needed.
+    if: ${{ inputs.publish_release && inputs.upload_release && !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        board: ${{ fromJSON(needs.plan.outputs.boards) }}
-
+    permissions:
+      contents: write
     steps:
-      - name: Setup Rclone
-        uses: AnimMouse/setup-rclone@v1
-        with:
-          version: v1.67.0
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          disable_base64: true
-
-      - name: Delete pre-release files older than this run
-        # Deletes direct-child files whose modtime predates this run
-        # (= previous runs' leftovers). --max-depth 1 keeps it
-        # non-recursive, so fit/ (manual signed FIT uploads) is never
-        # touched. release/, uboot/ are not scanned at all. The ota/
-        # entries cover the OTA-package subfolder (stock naming change)
-        # so old packages don't accumulate there.
-        env:
-          RUN_STARTED_AT: ${{ github.run_started_at }}
-        run: |
-          set -euo pipefail
-          AGE=$(( $(date +%s) - $(date -u -d "${RUN_STARTED_AT}" +%s) ))
-          if [ "$AGE" -le 0 ]; then
-            echo "::error::computed age ${AGE}s is not positive (clock skew?); refusing to delete anything"
-            exit 1
-          fi
-          short=$(echo "${{ matrix.board }}" | sed -E 's/recomputer-//; s/-devkit//')
-          BASE="seeed-storage:armbian-images/${short}-devkit/pre-release"
-          for d in "rec" "ab" "rec sec" "ab sec" \
-                   "rec/ota" "ab/ota" "rec sec/ota" "ab sec/ota"; do
-            echo "=== ${BASE}/${d}: before ==="
-            rclone lsl "${BASE}/${d}" 2>/dev/null || true
-            echo "=== deleting files older than $(( AGE / 60 )) min ==="
-            rclone delete "${BASE}/${d}" --min-age "${AGE}s" --max-depth 1 -v || true
-            echo "=== after ==="
-            rclone lsl "${BASE}/${d}" 2>/dev/null || true
-          done
-
-  release:
-    needs: [plan, build, cleanup]
-    # ONE release covering ALL boards. The static prose (Note / IMAGES
-    # headers) lives in .github/release-body.md — CI reads that template
-    # and only concatenates the per-board tables + OneDrive links, which
-    # are generated live after retention cleanup so they always match
-    # what is published.
-    if: ${{ inputs.publish_release && inputs.upload_onedrive && !cancelled() && needs.build.result == 'success' && needs.cleanup.result == 'success' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    # No permissions: block — release targets Seeed-Studio/armbian-build,
-    # which the default GITHUB_TOKEN cannot write to. The PAT in
-    # ARMBIAN_BUILD_RELEASE_TOKEN is the real authorization.
-    steps:
-      - name: Resolve tag
-        id: tag
-        run: |
-          suffix="${{ inputs.release_tag_suffix }}"
-          if [ -n "$suffix" ]; then
-            tag="v${suffix}"
-          else
-            tag="v$(date -u +%Y%m%d-%H%M)"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Rclone
-        uses: AnimMouse/setup-rclone@v1
-        with:
-          version: v1.67.0
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          disable_base64: true
-
       - name: Checkout release body template
-        # Sparse checkout of this repo (.github only) for
-        # .github/release-body.md; the rest of the job works off OneDrive.
         uses: actions/checkout@v4
         with:
           sparse-checkout: .github
           fetch-depth: 1
 
       # Each row pairs an .img.xz with its _OTA.tar.gz (matched by
-      # filename stem) and links both via rclone share links; the Type
-      # column comes from the OneDrive directory (rec/ab/sec).
-      - name: Generate release document from template + OneDrive listing
+      # filename stem after the <board>-<ota>[-sec]- upload prefix);
+      # links are the assets' browser download URLs on this release.
+      - name: Generate release document from attached assets
         env:
+          GH_TOKEN: ${{ github.token }}
           BOARDS: ${{ needs.plan.outputs.boards }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
           python3 <<'PY'
           import datetime, json, os, re, subprocess
 
           boards = json.loads(os.environ["BOARDS"])
+          tag = os.environ["TAG"]
 
           DISTRO = {
               "trixie":   ("https://armbian.com/debian.svg", "Debian 13"),
@@ -739,23 +687,21 @@ jobs:
               "gnome_desktop": "Gnome",
               "minimal":       "Minimal (CLI)",
           }
+          TYPE = {
+              ("rec", "nosec"): "RECOVERY",
+              ("ab",  "nosec"): "AB",
+              ("rec", "sec"):   "RECOVERY-SEC",
+              ("ab",  "sec"):   "AB-SEC",
+          }
+          # assets were prefixed <board>-<rec|ab>-<nosec|sec>-<original>
+          # at upload time; the board segment may itself contain '-'
+          # (rk3576-module), hence the lazy first group.
+          PREFIX_RE = re.compile(r"^(.+?)-(rec|ab)-(nosec|sec)-(.+)$")
 
-          def lsjson(directory):
-              r = subprocess.run(["rclone", "lsjson", directory],
-                                 capture_output=True, text=True)
-              if r.returncode != 0:
-                  print(f"::warning::lsjson failed for {directory}: {r.stderr.strip()}")
-                  return {}
-              return {e["Name"]: e.get("Size", 0) for e in json.loads(r.stdout)
-                      if not e.get("IsDir", False)}
-
-          def link(path):
-              r = subprocess.run(["rclone", "link", path],
-                                 capture_output=True, text=True)
-              if r.returncode != 0 or not r.stdout.strip():
-                  print(f"::warning::link failed for {path}: {r.stderr.strip()}")
-                  return ""
-              return r.stdout.strip()
+          r = subprocess.run(
+              ["gh", "release", "view", tag, "--repo", os.environ["GITHUB_REPOSITORY"], "--json", "assets"],
+              capture_output=True, text=True, check=True)
+          assets = {a["name"]: a for a in json.loads(r.stdout)["assets"]}
 
           refs = []
 
@@ -769,40 +715,39 @@ jobs:
                   return f"{g:.1f}GB"
               return f"{n / 1_000_000:.0f}MB"
 
-          DIRS = (("rec", "RECOVERY"), ("ab", "AB"),
-                  ("rec sec", "RECOVERY-SEC"), ("ab sec", "AB-SEC"))
-
           def board_table(board):
               short = board.replace("recomputer-", "").replace("-devkit", "")
               rows = []
-              for sub, typ in DIRS:
-                  d = f"seeed-storage:armbian-images/{short}-devkit/pre-release/{sub}"
-                  files = lsjson(d)
-                  # OTA packages live in the ota/ subfolder (stock image
-                  # naming change); they no longer sit next to the images.
-                  ota_files = lsjson(f"{d}/ota")
-                  for name in sorted(files):
-                      if not name.endswith(".img.xz"):
-                          continue
-                      stem = name[: -len(".img.xz")]
-                      # ..._<release>_vendor_<ver>_<variant>[_AB_PART] —
-                      # recovery images use stock names (no _RECOVERY
-                      # suffix), A/B keeps _AB_PART.
-                      m = re.search(r"_([a-z]+)_vendor_[0-9.]+_(.*?)(?:_AB_PART)?$", stem)
-                      if not m:
-                          print(f"::warning::unparsed filename {name}")
-                          continue
-                      rel, var = m.group(1), m.group(2)
-                      icon, dist = DISTRO.get(rel, ("", rel))
-                      var_txt = VARIANT.get(var, var.replace("_desktop", "").title())
-                      img_i = ref(link(f"{d}/{name}"))
-                      cell = f"[IMAGE][{img_i}]"
-                      ota = stem + "_OTA.tar.gz"
-                      if ota in ota_files:
-                          ota_i = ref(link(f"{d}/ota/{ota}"))
-                          cell = f"[IMAGE][{img_i}] \\| [OTA][{ota_i}]"
-                      rows.append(f'|<img src="{icon}" width="20" height="20"> '
-                                  f'<span>{dist}</span>|{var_txt}|{typ}|{human(files[name])}|{cell} |')
+              for name in sorted(assets):
+                  if not name.endswith(".img.xz"):
+                      continue
+                  m = PREFIX_RE.match(name)
+                  if not m:
+                      print(f"::warning::unparsed asset name {name}")
+                      continue
+                  asset_board, ota, sec, orig = m.groups()
+                  if asset_board != short:
+                      continue
+                  stem = orig[: -len(".img.xz")]
+                  # ..._<release>_vendor_<ver>_<variant>[_AB_PART] —
+                  # recovery images use stock names (no _RECOVERY
+                  # suffix), A/B keeps _AB_PART.
+                  mm = re.search(r"_([a-z]+)_vendor_[0-9.]+_(.*?)(?:_AB_PART)?$", stem)
+                  if not mm:
+                      print(f"::warning::unparsed filename {orig}")
+                      continue
+                  rel, var = mm.groups()
+                  icon, dist = DISTRO.get(rel, ("", rel))
+                  var_txt = VARIANT.get(var, var.replace("_desktop", "").title())
+                  img_i = ref(assets[name]["url"])
+                  cell = f"[IMAGE][{img_i}]"
+                  ota_name = f"{asset_board}-{ota}-{sec}-{stem}_OTA.tar.gz"
+                  if ota_name in assets:
+                      ota_i = ref(assets[ota_name]["url"])
+                      cell = f"[IMAGE][{img_i}] \\| [OTA][{ota_i}]"
+                  rows.append(f'|<img src="{icon}" width="20" height="20" '
+                              f'<span>{dist}</span>|{var_txt}|{TYPE[(ota, sec)]}|'
+                              f'{human(assets[name]["size"])}|{cell} |')
               head = ["|Distribution|Variant|Type|Size|Download|",
                       "|:-:         |:-:    |:-: |:-: |:-:     |"]
               return head + sorted(rows)
@@ -842,17 +787,14 @@ jobs:
           print(md)
           PY
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: Seeed-Studio/armbian-build
-          target_commitish: main
-          token: ${{ secrets.ARMBIAN_BUILD_RELEASE_TOKEN }}
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          # Body renders the same document that is attached as the sole
-          # asset (asset name is the basename: CHANGELOG.md).
-          body_path: release-out/CHANGELOG.md
-          files: release-out/CHANGELOG.md
-          fail_on_unmatched_files: true
-          generate_release_notes: false
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "${{ needs.plan.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease \
+            --latest=true \
+            --notes-file release-out/CHANGELOG.md
