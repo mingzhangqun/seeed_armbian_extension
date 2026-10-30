@@ -46,8 +46,9 @@ on:
 
 jobs:
   # ──────────────────────────────────────────────────
-  # Build a JSON matrix of boards from the input flags.
-  # On push (no inputs), both boards default to true.
+  # Build a JSON matrix of boards from the dispatch
+  # input flags (workflow_dispatch is the only trigger,
+  # so every input always carries its default).
   # ──────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-latest
@@ -58,11 +59,15 @@ jobs:
       - name: Generate matrix
         id: gen
         env:
-          INPUT_RK3576: ${{ inputs.build_rk3576 || 'true' }}
-          INPUT_RK3576_MODULE: ${{ inputs.build_rk3576_module || 'true' }}
-          INPUT_RK3576_INDUSTRIAL: ${{ inputs.build_rk3576_industrial || 'true' }}
-          INPUT_RK3588: ${{ inputs.build_rk3588 || 'true' }}
-          INPUT_BUILD_KERNEL: ${{ inputs.build_kernel || 'false' }}
+          # Boolean dispatch inputs render directly as 'true'/'false'.
+          # Do NOT write `${{ inputs.X || 'true' }}`: boolean false is falsy,
+          # so `false || 'true'` evaluates to 'true' and unchecking a board
+          # would still build it.
+          INPUT_RK3576: ${{ inputs.build_rk3576 }}
+          INPUT_RK3576_MODULE: ${{ inputs.build_rk3576_module }}
+          INPUT_RK3576_INDUSTRIAL: ${{ inputs.build_rk3576_industrial }}
+          INPUT_RK3588: ${{ inputs.build_rk3588 }}
+          INPUT_BUILD_KERNEL: ${{ inputs.build_kernel }}
           INPUT_REF: ${{ inputs.armbian_build_ref || 'main' }}
         run: |
           set -eu
