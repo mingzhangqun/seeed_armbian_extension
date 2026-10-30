@@ -32,12 +32,17 @@ on:
         default: false
 
       # ── Tiers ─────────────────────────────────────────────────────────
+      # cli = no-desktop (--minimal). tier_desktop adds ONE entry whose
+      # tier comes from the desktop_tier choice below — tiers are a choice,
+      # not checkbox matrix entries, because the desktop tier is NOT part
+      # of Armbian image filenames and two tiers in one run would clobber
+      # each other in the flat release asset list.
       tier_cli:
         description: "Tier: cli (no desktop, build.sh --minimal)"
         type: boolean
         default: false
-      tier_mid:
-        description: "Tier: mid desktop"
+      tier_desktop:
+        description: "Tier: desktop (minimal/mid/full via desktop_tier)"
         type: boolean
         default: true
 
@@ -62,8 +67,8 @@ on:
         default: false
 
       # ── Other options ─────────────────────────────────────────────────
-      desktop:
-        description: "Desktop environment (used only when tier != cli)"
+      desktop_env:
+        description: "Desktop environment (effective when tier_desktop is checked)"
         required: true
         type: choice
         options:
@@ -73,6 +78,15 @@ on:
           - mate
           - cinnamon
         default: gnome
+      desktop_tier:
+        description: "Desktop tier (effective when tier_desktop is checked)"
+        required: true
+        type: choice
+        options:
+          - minimal
+          - mid
+          - full
+        default: mid
       build_mode:
         description: "Build mode (full = kernel+uboot+rootfs+image)"
         required: true
@@ -208,10 +222,11 @@ jobs:
           if flag("REL_TRIXIE"): releases.append("trixie")
           if flag("REL_RESOLUTE"): releases.append("resolute")
 
-          # Tiers
+          # Tiers. cli = no-desktop (--minimal); the desktop checkbox adds
+          # ONE entry at the tier picked in the desktop_tier choice.
           tiers = []
           if flag("TIER_CLI"): tiers.append("cli")
-          if flag("TIER_MID"):  tiers.append("mid")
+          if flag("TIER_DESKTOP"): tiers.append(os.environ.get("DESKTOP_TIER", "mid"))
 
           # OTA modes. Each selected mode becomes its own matrix entry.
           # If none selected, fall back to recovery — plain (no OTA)
@@ -269,7 +284,8 @@ jobs:
           REL_TRIXIE:   ${{ inputs.release_trixie }}
           REL_RESOLUTE:  ${{ inputs.release_resolute }}
           TIER_CLI:     ${{ inputs.tier_cli }}
-          TIER_MID:     ${{ inputs.tier_mid }}
+          TIER_DESKTOP: ${{ inputs.tier_desktop }}
+          DESKTOP_TIER: ${{ inputs.desktop_tier }}
           OTA_RECOVERY: ${{ inputs.ota_recovery }}
           OTA_AB:       ${{ inputs.ota_ab }}
           SEC_PLAIN:    ${{ inputs.security_plain }}
@@ -539,7 +555,7 @@ jobs:
           if [[ "${{ matrix.tier }}" == "cli" ]]; then
               TIER_ARGS="--minimal"
           else
-              TIER_ARGS="-d ${{ inputs.desktop }} -t ${{ matrix.tier }}"
+              TIER_ARGS="-d ${{ inputs.desktop_env }} -t ${{ matrix.tier }}"
           fi
 
           # Passphrase is only consumed when a security profile is set
