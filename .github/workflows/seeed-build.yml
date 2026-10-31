@@ -680,8 +680,8 @@ jobs:
     # attached to the draft release by the build entries (plus the
     # build-info.json attached by init-release); this job only flips
     # draft -> pre-release. No generated body — the download page
-    # lives on the build-source repo's Pages (scripts/gen-images-page.py
-    # consumes the release assets + build-info.json). Promotion to an
+    # lives on the build-source repo's Pages (scripts/images-page.template.html,
+    # rendered by release-onedrive.yml; the asset list is fetched client-side). Promotion to an
     # official release is manual (uncheck "Set as pre-release").
     # Previous releases are kept — clean them up manually if needed.
     if: ${{ !cancelled() && needs.build.result == 'success' }}
