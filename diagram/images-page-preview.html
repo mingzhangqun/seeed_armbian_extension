@@ -8,6 +8,12 @@
       newest prerelease = pre-release (hidden when older than latest)
     * latest stays the always-expanded main table; previous and
       pre-release render as collapsed <details> slots below it
+    * board name ABOVE the photo, large
+    * downloads: Recovery box always, A/B box to its right when present
+    * EVERY download button is a OneDrive link derived client-side from
+      the folder share link (shares/u!<b64>/root:/<slot path>/file:/content)
+      into armbian-images/<board>/<slot>/ — GitHub is only the data
+      source for names/sizes
   Demo harness: window.MOCK_RELEASES replaces the fetch; open the page
   with #open to expand the pre-release slot for preview purposes.
 -->
@@ -37,14 +43,13 @@
   .photo img { width: 100%; border-radius: 10px; background: #fff; mix-blend-mode: multiply; }
   .photo.noimg { flex-basis: auto; max-width: 300px; }
   .photo.noimg img { display: none; }
-  .caption { text-align: center; font-size: 14px; font-weight: 600; margin-top: 10px; }
+  .caption { text-align: center; font-size: 18px; font-weight: 700; margin-bottom: 10px; }
   .caption span { color: #8dc215; }
   .info { flex: 1; min-width: 0; }
-  /* OTA-mode sub-boxes: Recovery vs A/B. Boxes (and their titles) only
-     render when A/B assets exist — a recovery-only board keeps the plain
-     row list. Crypt stays a row badge (orthogonal dimension). */
-  .modebox { border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 16px 6px; margin-bottom: 14px; }
-  .modebox:last-child { margin-bottom: 0; }
+  /* OTA-mode boxes: Recovery always; A/B box beside it (right) when it
+     exists. Side by side on wide cards, stacked when narrow. */
+  .modeboxes { display: flex; gap: 14px; align-items: stretch; }
+  .modebox { flex: 1 1 0; min-width: 0; border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 14px 6px; }
   .modebox h3 { font-size: 13px; font-weight: 600; color: #51707c; margin: 10px 0 0; letter-spacing: .3px; }
   .row { display: flex; align-items: baseline; gap: 14px; padding: 9px 0;
          border-top: 1px solid #eef2f6; flex-wrap: wrap; }
@@ -58,8 +63,6 @@
          text-decoration: none; color: #03353f; border: 1px solid #d7dee5; background: #fff; }
   .btn.primary { background: #8dc215; border-color: #8dc215; color: #fff; font-weight: 600; }
   .btn:hover { filter: brightness(.96); }
-  .onedrive { display: inline-block; margin-top: 14px; text-decoration: none; font-size: 14px;
-              color: #03353f; border: 1px dashed #8dc215; border-radius: 8px; padding: 5px 14px; }
   .loading { color: #7b8fa0; padding: 30px 0; }
   .fallback { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
               background: #fff; border: 1px solid #ffd9a0; border-radius: 14px;
@@ -90,7 +93,7 @@
 
   footer { margin: 40px 0 60px; color: #7b8fa0; font-size: 13px; line-height: 2; }
   footer code { background: #e8edf2; padding: 1px 7px; border-radius: 4px; font-size: 12px; }
-  @media (max-width: 720px) { .board { flex-direction: column; } .photo { flex: none; } }
+  @media (max-width: 720px) { .board { flex-direction: column; } .photo { flex: none; } .modeboxes { flex-direction: column; } }
 </style>
 </head>
 <body>
@@ -181,6 +184,20 @@
 const CFG = Object.freeze({ repo: "Seeed-Studio/seeed_armbian_extension",
                             onedrive: "https://1drv.ms/f/c/demo" });
 
+// Every download button is a OneDrive link, derived client-side from the
+// folder share link: the share id is u!<base64url(share URL)> and a file
+// is addressed as shares/<id>/root:/<path>/<file>:/content — no server
+// or per-file link manifest needed.
+function shareRoot(url) {
+  const b64 = btoa(unescape(encodeURIComponent(url)))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return "https://api.onedrive.com/v1.0/shares/u!" + b64 + "/root:";
+}
+const OD_ROOT = shareRoot(CFG.onedrive);
+function odUrl(board, slot, name) {
+  return OD_ROOT + "/armbian-images/" + board + "/" + slot + "/" + name + ":/content";
+}
+
 const BOARD_PAT = /Recomputer-([A-Za-z0-9][A-Za-z0-9-]*?)_/;
 const VARIANT_TITLE = { cli: "CLI", desktop: "桌面" };
 const ROW_LABEL = { img: "镜像", ota: "OTA 包",
@@ -247,7 +264,7 @@ function el(tag, cls, text) {
   return e;
 }
 
-function buildRow(entry, suppressAb) {
+function buildRow(entry, suppressAb, slot) {
   const title = el("div", "row-title", VARIANT_TITLE[entry.variant]);
   // inside an A/B modebox the box title already says it — badge off
   if (entry.mode === "ab" && !suppressAb) title.appendChild(el("span", "badge ab", "A/B"));
@@ -260,7 +277,7 @@ function buildRow(entry, suppressAb) {
     const primary = kind === "img" || kind === "ota";
     const a = el("a", primary ? "btn primary" : "btn",
                  ROW_LABEL[kind] + (primary ? " · " + human(v.size) : ""));
-    a.href = v.url;
+    a.href = odUrl(entry.board, slot, v.name);
     links.appendChild(a);
   }
 
@@ -269,45 +286,38 @@ function buildRow(entry, suppressAb) {
   return row;
 }
 
-function buildModeBox(title, entries, suppressAb) {
+function buildModeBox(title, entries, suppressAb, slot) {
   const box = el("div", "modebox");
   box.appendChild(el("h3", null, title));
-  for (const entry of entries) box.appendChild(buildRow(entry, suppressAb));
+  for (const entry of entries) box.appendChild(buildRow(entry, suppressAb, slot));
   return box;
 }
 
-function buildSection(board, entries) {
+function buildSection(board, entries, slot) {
   const sec = el("section", "board");
 
-  // photo column: image with the board name as caption below it
+  // photo column: board name ABOVE the photo, large
   const photo = el("div", "photo");
+  const cap = el("div", "caption", "reComputer ");
+  cap.appendChild(el("span", null, board));
+  photo.appendChild(cap);
   const img = document.createElement("img");
   img.src = boardImage(board);
   img.alt = "reComputer " + board;
   img.loading = "lazy";
   img.onerror = () => photo.classList.add("noimg");
   photo.appendChild(img);
-  const cap = el("div", "caption", "reComputer ");
-  cap.appendChild(el("span", null, board));
-  photo.appendChild(cap);
 
-  // downloads: recovery/A-B split into labeled boxes, but ONLY when A/B
-  // assets exist — a recovery-only board renders the plain row list
-  const dl = el("div", "downloads");
+  // downloads: Recovery box always; A/B box beside it when assets exist.
+  // Every button links straight into the board's OneDrive slot dir.
   const rec = entries.filter(e => e.mode !== "ab");
   const ab = entries.filter(e => e.mode === "ab");
-  if (ab.length) {
-    dl.appendChild(buildModeBox("恢复升级 · Recovery", rec, false));
-    dl.appendChild(buildModeBox("A/B 双分区", ab, true));
-  } else {
-    for (const entry of rec) dl.appendChild(buildRow(entry, false));
-  }
-
-  const od = el("a", "onedrive", "☁ OneDrive 下载全部");
-  od.href = CFG.onedrive;
+  const boxes = el("div", "modeboxes");
+  boxes.appendChild(buildModeBox("Recovery 恢复升级", rec, false, slot));
+  if (ab.length) boxes.appendChild(buildModeBox("A/B 双分区", ab, true, slot));
 
   const info = el("div", "info");
-  info.append(dl, od);
+  info.append(boxes);
 
   sec.append(photo, info);
   return sec;
@@ -355,7 +365,8 @@ function buildSlot(rel, kind) {  // kind: "pre" | "prev"
   if (kind === "pre")
     body.appendChild(el("div", "slot-note",
       "本轮构建已完整落地（全部板卡通过），待上机验证后转正为正式版。"));
-  for (const [b, es] of splitBoards(rel)) body.appendChild(buildSection(b, es));
+  for (const [b, es] of splitBoards(rel))
+    body.appendChild(buildSection(b, es, kind === "pre" ? "pre-release" : "previous"));
 
   det.append(sum, body);
   return det;
@@ -387,7 +398,7 @@ async function boot() {
   document.getElementById("tag").textContent = s.latest.tag_name;
   document.getElementById("date").textContent = fmtDate(s.latest.published_at);
   boards.className = "";
-  boards.replaceChildren(...[...splitBoards(s.latest)].map(([b, es]) => buildSection(b, es)));
+  boards.replaceChildren(...[...splitBoards(s.latest)].map(([b, es]) => buildSection(b, es, "latest")));
 
   const slots = document.getElementById("slots");
   slots.replaceChildren();
