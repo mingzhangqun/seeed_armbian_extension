@@ -32,8 +32,6 @@
   main { max-width: 920px; margin: 0 auto; padding: 0 20px; }
   h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
   h1 em { color: #8dc215; font-style: normal; }
-  .sub { color: #b9cdd4; font-size: 14px; }
-  .sub .prenote { color: #ffbc44; }
   .tag { display: inline-block; background: rgba(141,194,21,.18); color: #8dc215;
          border: 1px solid rgba(141,194,21,.55); border-radius: 6px; padding: 0 8px;
          font: 12px/1.7 ui-monospace, "SF Mono", monospace; }
@@ -103,7 +101,6 @@
 <header><main>
   <div class="bar"></div>
   <h1>Seeed <em>reComputer</em> — Armbian 镜像</h1>
-  <div class="sub" id="sub">当前正式版 <span class="tag" id="tag">…</span> &nbsp;·&nbsp; <span id="date"></span><span id="prenote" hidden> &nbsp;·&nbsp; <span class="prenote">🧪 新预览版可用（见下方）</span></span></div>
 </main></header>
 <main>
   <div id="boards" class="loading">正在从 GitHub 获取最新版本…</div>
@@ -384,7 +381,6 @@ function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
 
 async function boot() {
   const boards = document.getElementById("boards");
-  const sub = document.getElementById("sub");
   const fallback = document.getElementById("fallback");
   let list;
   try {
@@ -397,24 +393,19 @@ async function boot() {
       list = await r.json();
     }
   } catch (e) {
-    boards.hidden = true; sub.hidden = true; fallback.hidden = false;
+    boards.hidden = true; fallback.hidden = false;
     return;
   }
   const s = slotsFrom(list);
   if (!s.latest) {
-    boards.hidden = true; sub.hidden = true; fallback.hidden = false;
+    boards.hidden = true; fallback.hidden = false;
     return;
   }
-  document.getElementById("tag").textContent = s.latest.tag_name;
-  document.getElementById("date").textContent = fmtDate(s.latest.published_at);
   boards.hidden = true;  // all three slots render as collapsible bars below
 
   const slots = document.getElementById("slots");
   slots.replaceChildren(buildSlot(s.latest, "latest"));
-  if (s.pre) {
-    slots.appendChild(buildSlot(s.pre, "pre"));
-    document.getElementById("prenote").hidden = false;
-  }
+  if (s.pre) slots.appendChild(buildSlot(s.pre, "pre"));
   if (s.previous) slots.appendChild(buildSlot(s.previous, "prev"));
 
   // demo hook: #open expands the pre-release slot for previewing
