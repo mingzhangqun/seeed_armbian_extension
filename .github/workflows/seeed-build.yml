@@ -267,13 +267,30 @@ jobs:
           # this workflow's GITHUB_TOKEN when the secret is unset.
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           TARGET_REPO: ${{ inputs.release_repo || github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          AB_REPO: ${{ inputs.armbian_build_repo }}
+          BOARDS: ${{ needs.plan.outputs.boards }}
+          TIER: ${{ inputs.desktop_tier }}
         run: |
           set -euo pipefail
+          # Machine-readable run metadata — the OneDrive/pages sync
+          # reads it back from the release assets to learn e.g. which
+          # armbian-build repo the images page belongs to.
+          python3 - > build-info.json <<'PY'
+          import json, os
+          print(json.dumps({
+              "tag": os.environ["TAG"],
+              "armbian_build_repo": os.environ["AB_REPO"],
+              "boards": json.loads(os.environ["BOARDS"]),
+              "desktop_tier": os.environ["TIER"],
+          }, indent=2))
+          PY
+          cat build-info.json
           # Same-minute re-runs (or a re-dispatch) can hit an existing
           # release+tag: delete it and start fresh rather than reusing.
-          if gh release view "${{ needs.plan.outputs.tag }}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            echo "Release ${{ needs.plan.outputs.tag }} already exists — deleting old release + tag"
-            gh release delete "${{ needs.plan.outputs.tag }}" --repo "$TARGET_REPO" --yes --cleanup-tag
+          if gh release view "${TAG}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — deleting old release + tag"
+            gh release delete "${TAG}" --repo "$TARGET_REPO" --yes --cleanup-tag
           fi
           # --target must name a ref of the RELEASE repo — the workflow
           # SHA only exists there when the target is the running repo.
@@ -281,13 +298,14 @@ jobs:
           if [ "$TARGET_REPO" = "$GITHUB_REPOSITORY" ]; then
             target_args=(--target "$GITHUB_SHA")
           fi
-          gh release create "${{ needs.plan.outputs.tag }}" \
+          gh release create "${TAG}" \
             --repo "$TARGET_REPO" \
             --draft \
             --prerelease \
-            --title "${{ needs.plan.outputs.tag }}" \
+            --title "${TAG}" \
             "${target_args[@]}" \
-            --notes "Assets are attached by the build matrix; the body is generated on publish. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --notes "Assets are attached by the build matrix; download tables live on the build-source repo's Pages. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            build-info.json
 
   build:
     needs: [plan, init-release]
@@ -604,148 +622,19 @@ jobs:
     needs: [plan, build]
     # ONE release covering ALL boards, hosted on the release target
     # (release_repo input, default = this repository): assets were
-    # attached to the draft release by the build entries; this job
-    # generates the download tables from the release's own asset list
-    # and publishes it (draft -> pre-release). Promotion to an official
-    # release is manual (uncheck "Set as pre-release"). Previous
-    # releases are kept — clean them up manually if needed.
+    # attached to the draft release by the build entries (plus the
+    # build-info.json attached by init-release); this job only flips
+    # draft -> pre-release. No generated body — the download page
+    # lives on the build-source repo's Pages (scripts/gen-images-page.py
+    # consumes the release assets + build-info.json). Promotion to an
+    # official release is manual (uncheck "Set as pre-release").
+    # Previous releases are kept — clean them up manually if needed.
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
-      # One compact table row per board x security: short link labels
-      # (img / sha256 / OTA / checksums) instead of raw asset URLs.
-      # Assets keep their original filenames, which self-describe every
-      # matrix dimension: "Recomputer-<board>_", trixie/resolute
-      # (cli=trixie, gnome=resolute — bound in the plan step), "-crypt"
-      # (CRYPTROOT_ENABLE, added by armbian's fs-cryptroot-support
-      # extension) and "_AB_PART" (A/B OTA).
-      - name: Generate release document from attached assets
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
-          TARGET_REPO: ${{ inputs.release_repo || github.repository }}
-          BOARDS: ${{ needs.plan.outputs.boards }}
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release view "$TAG" --repo "$TARGET_REPO" --json assets \
-            --jq '.assets[] | [.name, .size, .url] | @tsv' > /tmp/assets.tsv
-          [ -s /tmp/assets.tsv ] || { echo "::error::release $TAG has no assets"; exit 1; }
-
-          mkdir -p release-out
-          python3 <<'PY'
-          import datetime, json, os, re
-          boards = json.loads(os.environ["BOARDS"])
-          tag = os.environ["TAG"]
-          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-
-          board_pat = re.compile(r"Recomputer-([A-Za-z0-9-]+?)_")
-          slots = {}  # (short, sec, ota) -> {variant: {img/sha/parts/ota_pkg/ota_chk}}
-          for line in open("/tmp/assets.tsv"):
-              name, size, url = line.rstrip("\n").split("\t")
-              m = board_pat.search(name)
-              if not m:
-                  continue  # not one of ours
-              short = m.group(1).replace("-devkit", "", 1)
-              sec = "sec" if "-crypt" in name else "nosec"
-              ota = "ab" if "_AB_PART" in name else "rec"
-              if "trixie" in name:
-                  var = "cli"
-              elif "resolute" in name:
-                  var = "gnome"
-              else:
-                  continue
-              d = slots.setdefault((short, sec, ota), {}).setdefault(var, {})
-              if name.endswith(".img.xz"):
-                  d["img"] = (size, url)
-              elif name.endswith(".img.xz.sha256"):
-                  d["sha"] = (size, url)
-              elif re.search(r"\.\d+\.part$", name):
-                  d.setdefault("parts", []).append((int(size), url))
-              elif name.endswith("_OTA.tar.gz"):
-                  d["ota_pkg"] = (size, url)
-              elif name.endswith("_OTA.checksums"):
-                  d["ota_chk"] = (size, url)
-
-          def short_of(board):
-              s = board.replace("recomputer-", "", 1)
-              return s.replace("-devkit", "", 1)
-
-          def human(n):
-              n = float(n)
-              for unit in ("B", "K", "M", "G"):
-                  if n < 1024 or unit == "G":
-                      return f"{int(n)}{unit}" if unit in ("B", "K") else f"{n:.1f}{unit}"
-                  n /= 1024
-
-          def pair(d, key, label, with_size=False):
-              if d.get(key):
-                  size, url = d[key]
-                  return f"[{label} · {human(size)}]({url})" if with_size else f"[{label}]({url})"
-              return None
-
-          def variant_links(d):
-              out = []
-              img = pair(d, "img", "img", True)
-              if img:
-                  out.append(img)
-              elif d.get("parts"):
-                  total = sum(s for s, _ in d["parts"])
-                  first = d["parts"][0][1]
-                  out.append(f"[img ×{len(d['parts'])} parts · {human(total)}]({first})")
-              if d.get("sha"):
-                  out.append(pair(d, "sha", "sha256"))
-              return " ".join(out)
-
-          lines = [
-              f"## Armbian images — {datetime.datetime.now(datetime.UTC):%Y-%m-%d}",
-              "",
-              f"Run: {run_url} · tag `{tag}`",
-              "",
-              "> \\.part files: assets over GitHub's 2 GiB cap are split — reassemble with",
-              "> `cat <file>.*.part > <file>`, then verify with the sha256 sidecar.",
-              "",
-              "| Board | Images | OTA |",
-              "|---|---|---|",
-          ]
-          for b in boards:
-              short = short_of(b)
-              for sec in ("nosec", "sec"):
-                  if not any((short, sec, o) in slots for o in ("rec", "ab")):
-                      continue
-                  label = short + (" 🔒 secure" if sec == "sec" else "")
-                  img_cell, ota_cell = [], []
-                  for ota, mode in (("rec", "recovery"), ("ab", "A/B")):
-                      s = slots.get((short, sec, ota))
-                      if not s:
-                          continue
-                      img_parts = [f"{v}({r}): {variant_links(s[v])}"
-                                   for v, r in (("cli", "trixie"), ("gnome", "resolute"))
-                                   if s.get(v) and variant_links(s[v])]
-                      if img_parts:
-                          img_cell.append(f"{mode}: {' · '.join(img_parts)}")
-                      ota_parts = []
-                      for v in ("cli", "gnome"):
-                          if not s.get(v):
-                              continue
-                          links = [x for x in (pair(s[v], "ota_pkg", "OTA", True),
-                                               pair(s[v], "ota_chk", "checksums")) if x]
-                          if links:
-                              ota_parts.append(f"{v}: {' '.join(links)}")
-                      if ota_parts:
-                          ota_cell.append(f"{mode}: {' · '.join(ota_parts)}")
-                  lines.append(f"| {label} | {'<br>'.join(img_cell) or '—'} | {'<br>'.join(ota_cell) or '—'} |")
-
-          out = "release-out/CHANGELOG.md"
-          os.makedirs("release-out", exist_ok=True)
-          with open(out, "w") as f:
-              f.write("\n".join(lines) + "\n")
-          print(f"=== Generated {out} ===")
-          print("\n".join(lines))
-          PY
-
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -755,5 +644,4 @@ jobs:
           gh release edit "${{ needs.plan.outputs.tag }}" \
             --repo "$TARGET_REPO" \
             --draft=false \
-            --prerelease \
-            --notes-file release-out/CHANGELOG.md
+            --prerelease
