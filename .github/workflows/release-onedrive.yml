@@ -1,0 +1,91 @@
+name: "Release → OneDrive"
+
+# Mirror release assets to OneDrive when a pre-release is promoted to a
+# full release (uncheck "Set as pre-release" in the UI). The promotion
+# fires the `released` event. workflow_dispatch re-runs the sync for a
+# tag by hand (e.g. after an expired rclone token).
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync (e.g. 261031-1200)"
+        required: true
+        type: string
+
+concurrency:
+  group: onedrive-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    # `released` only fires for full (non-prerelease) releases; the guard
+    # keeps a manual re-run from ever mirroring a still-prerelease tag.
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve release and guard
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_TAG: ${{ inputs.tag || '' }}
+          EVENT_TAG: ${{ github.event.release.tag_name || '' }}
+        run: |
+          set -euo pipefail
+          tag="${MANUAL_TAG:-$EVENT_TAG}"
+          [ -n "$tag" ] || { echo "::error::no tag (release event or manual input)"; exit 1; }
+          pre="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json prerelease --jq .prerelease)"
+          [ "$pre" = "false" ] || { echo "::error::$tag is still a pre-release — promote it first"; exit 1; }
+          n="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
+          [ "$n" -gt 0 ] || { echo "::error::$tag has no assets"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "assets=$n" >> "$GITHUB_OUTPUT"
+          echo "Will mirror $n assets of $tag"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets --clobber
+          du -sh assets; ls assets | head
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        uses: AnimMouse/setup-rclone@v1
+        with:
+          version: v1.67.0
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          disable_base64: true
+
+      - name: Verify remote is writable
+        run: |
+          set -euo pipefail
+          rclone mkdir seeed-storage:armbian-images
+          rclone lsd seeed-storage:armbian-images
+
+      - name: Upload to OneDrive
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Archive by tag …
+          rclone copy assets "seeed-storage:armbian-images/${TAG}" \
+            --transfers 4 --stats-one-line --stats 30s
+          # … and refresh the rolling latest/ mirror.
+          rclone copy assets "seeed-storage:armbian-images/latest" \
+            --transfers 4 --stats-one-line --stats 30s
+          echo "=== ${TAG}/ ===";  rclone lsl "seeed-storage:armbian-images/${TAG}" | head -20
+          echo "=== latest/ ===";  rclone lsl "seeed-storage:armbian-images/latest" | head -5
+
+      - name: Note the mirror on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          gh release comment "$TAG" --repo "$GITHUB_REPOSITORY" --body \
+            "Assets mirrored to OneDrive: \`armbian-images/${TAG}/\` and \`armbian-images/latest/\`"
