@@ -78,6 +78,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Check OneDrive mirror availability (advisory)
+        # The build itself does not touch OneDrive (assets go to the
+        # GitHub release; release-onedrive.yml mirrors on promote), so
+        # this can only ADVISE: a dead rclone token or a full drive must
+        # surface at dispatch time, not when promoting hours later. Flip
+        # the warnings to exit 1 if uploads ever move to OneDrive
+        # directly.
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [ -z "$RCLONE_CONFIG" ]; then
+            echo "::warning::RCLONE_CONFIG is not set — the OneDrive mirror (release-onedrive.yml) cannot run. Build and release assets are unaffected."
+            exit 0
+          fi
+          mkdir -p ~/.config/rclone
+          # setup-rclone keeps the conf base64-encoded; accept either form
+          if printf '%s' "$RCLONE_CONFIG" | base64 -d 2>/dev/null | grep -q '^\['; then
+            printf '%s' "$RCLONE_CONFIG" | base64 -d > ~/.config/rclone/rclone.conf
+          else
+            printf '%s' "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+          fi
+          if ! rclone lsd seeed-storage:armbian-images --max-depth 1 --contimeout 15s >/dev/null 2>&1; then
+            echo "::warning::rclone cannot reach seeed-storage: — refresh the token BEFORE promoting, or the OneDrive sync will fail. Build continues."
+            exit 0
+          fi
+          echo "OneDrive remote OK. Quota:"
+          rclone about seeed-storage: 2>/dev/null | grep -E 'Total:|Free:|Trashed:' || true
+
       - name: Validate secure-boot secrets
         if: ${{ inputs.secure_boot }}
         env:
