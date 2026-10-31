@@ -47,6 +47,7 @@
   .modeboxes { display: flex; flex-direction: column; gap: 14px; }
   .modebox { border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 14px 6px; }
   .modebox h3 { font-size: 13px; font-weight: 600; color: #51707c; margin: 10px 0 0; letter-spacing: .3px; }
+  .boxsub { color: #9db0ba; font-weight: 400; font-size: 12px; }
   .row { display: flex; flex-direction: column; gap: 7px; padding: 9px 0;
          border-top: 1px solid #eef2f6; }
   .row-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
@@ -56,10 +57,14 @@
   .badge { font-size: 11px; border-radius: 4px; padding: 0 6px; margin-left: 6px;
            vertical-align: 2px; }
   .badge.ab { background: rgba(255,188,68,.18); color: #b96e00; border: 1px solid rgba(255,188,68,.6); }
-  .badge.crypt { background: rgba(3,53,63,.08); color: #03353f; border: 1px solid rgba(3,53,63,.25); }
+  .badge.secure { background: rgba(217,58,58,.1); color: #c0392b;
+                  border: 1px solid rgba(217,58,58,.5); font-size: 12px;
+                  border-radius: 6px; padding: 1px 9px; vertical-align: 0; margin-left: 5px; }
   .btn { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 13px;
          text-decoration: none; color: #03353f; border: 1px solid #d7dee5; background: #fff; }
   .btn.primary { background: #8dc215; border-color: #8dc215; color: #fff; font-weight: 600; }
+  /* secure-profile artifacts: yellow instead of green */
+  .btn.secure { background: #ffbc44; border-color: #ffbc44; color: #03353f; font-weight: 600; }
   .btn:hover { filter: brightness(.96); }
   .loading { color: #7b8fa0; padding: 30px 0; }
   .fallback { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
@@ -167,7 +172,9 @@
         ];
         if (board === "rk3576-industrial") {
           var cr = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_resolute_vendor_" + kernel + "_gnome_desktop-crypt";
-          out.push(A(cr + ".img.xz", 1946994688), A(cr + ".img.xz.sha256", 151));
+          var abc = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_trixie_vendor_" + kernel + "_minimal-crypt_AB_PART";
+          out.push(A(cr + ".img.xz", 1946994688), A(cr + ".img.xz.sha256", 151),
+                   A(abc + ".img.xz", 701200000), A(abc + ".img.xz.sha256", 151));
         }
         return out;
       }) },
@@ -275,24 +282,27 @@ function el(tag, cls, text) {
   return e;
 }
 
-function buildRow(entry, suppressAb, slot) {
+// opts: {suppressAb, suppressCrypt, secure} — badge/box-title redundancy
+// control and the yellow secure button style
+function buildRow(entry, opts, slot) {
   // head: bold variant + gray " - codename - armbian version - kernel" meta
   const head = el("div", "row-head");
   const title = el("span", "row-title", VARIANT_TITLE[entry.variant]);
-  // inside an A/B modebox the box title already says it — badge off
-  if (entry.mode === "ab" && !suppressAb) title.appendChild(el("span", "badge ab", "A/B"));
-  if (entry.crypt) title.appendChild(el("span", "badge crypt", "加密"));
+  if (entry.mode === "ab" && !opts.suppressAb)
+    title.appendChild(el("span", "badge ab", "A/B"));
   const meta = [entry.release, entry.ver, entry.kernel].filter(Boolean).join(" - ");
   if (meta) head.appendChild(el("span", "row-meta", "- " + meta));
   head.prepend(title);
 
-  // links: 镜像|sha256  OTA|sha256  构建信息 — no sizes
+  // links: 镜像|sha256  OTA|sha256  构建信息 — no sizes;
+  // primary buttons go yellow inside a Secure box
   const links = el("div", "row-links");
   for (const kind of KIND_ORDER) {
     const v = entry.d[kind];
     if (!v) continue;
     const primary = kind === "img" || kind === "ota";
-    const a = el("a", primary ? "btn primary" : "btn", ROW_LABEL[kind]);
+    const cls = primary ? (opts.secure ? "btn secure" : "btn primary") : "btn";
+    const a = el("a", cls, ROW_LABEL[kind]);
     a.href = odUrl(entry.board, slot, v.name);
     links.appendChild(a);
   }
@@ -302,10 +312,14 @@ function buildRow(entry, suppressAb, slot) {
   return row;
 }
 
-function buildModeBox(title, entries, suppressAb, slot) {
+function buildModeBox(title, subtitle, entries, opts, slot) {
   const box = el("div", "modebox");
-  box.appendChild(el("h3", null, title));
-  for (const entry of entries) box.appendChild(buildRow(entry, suppressAb, slot));
+  const h3 = el("h3");
+  h3.appendChild(document.createTextNode(title));
+  if (opts.secure) h3.appendChild(el("span", "badge secure", "Secure"));
+  h3.appendChild(el("span", "boxsub", " - " + subtitle));
+  box.appendChild(h3);
+  for (const entry of entries) box.appendChild(buildRow(entry, opts, slot));
   return box;
 }
 
@@ -324,13 +338,24 @@ function buildSection(board, entries, slot) {
   img.onerror = () => photo.classList.add("noimg");
   photo.appendChild(img);
 
-  // downloads: Recovery box always; A/B box beside it when assets exist.
-  // Every button links straight into the board's OneDrive slot dir.
-  const rec = entries.filter(e => e.mode !== "ab");
-  const ab = entries.filter(e => e.mode === "ab");
+  // downloads: mode × secure → up to four boxes, stacked:
+  // Recovery / A/B / Recovery Secure / A/B Secure (each only if non-empty)
+  const rec  = entries.filter(e => e.mode !== "ab" && !e.crypt);
+  const ab   = entries.filter(e => e.mode === "ab" && !e.crypt);
+  const recS = entries.filter(e => e.mode !== "ab" && e.crypt);
+  const abS  = entries.filter(e => e.mode === "ab" && e.crypt);
   const boxes = el("div", "modeboxes");
-  boxes.appendChild(buildModeBox("Recovery 单分区", rec, false, slot));
-  if (ab.length) boxes.appendChild(buildModeBox("A/B 双分区", ab, true, slot));
+  boxes.appendChild(buildModeBox("Recovery", "Single partition", rec,
+                                 { suppressAb: false }, slot));
+  if (ab.length)
+    boxes.appendChild(buildModeBox("A/B", "Dual partition", ab,
+                                   { suppressAb: true }, slot));
+  if (recS.length)
+    boxes.appendChild(buildModeBox("Recovery", "Single partition", recS,
+                                   { secure: true }, slot));
+  if (abS.length)
+    boxes.appendChild(buildModeBox("A/B", "Dual partition", abS,
+                                   { suppressAb: true, secure: true }, slot));
 
   const info = el("div", "info");
   info.append(boxes);
