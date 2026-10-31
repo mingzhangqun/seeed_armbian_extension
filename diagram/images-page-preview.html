@@ -78,6 +78,9 @@
   details.slot > summary::-webkit-details-marker { display: none; }
   details.slot > summary:hover { background: #fafbfd; }
   details.slot[open] > summary { border-bottom: 1px solid #eef2f6; }
+  .badge.slotlatest { background: rgba(141,194,21,.15); color: #5a7d0a;
+                      border: 1px solid rgba(141,194,21,.55); font-size: 12px;
+                      border-radius: 6px; padding: 1px 9px; vertical-align: 0; }
   .badge.slotpre { background: rgba(255,188,68,.18); color: #b96e00;
                    border: 1px solid rgba(255,188,68,.6); font-size: 12px;
                    border-radius: 6px; padding: 1px 9px; vertical-align: 0; }
@@ -349,14 +352,19 @@ function splitBoards(rel) {
   return sections;
 }
 
-function buildSlot(rel, kind) {  // kind: "pre" | "prev"
+function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
   const det = document.createElement("details");
   det.className = "slot";
-  det.id = kind === "pre" ? "slot-pre" : "slot-prev";
+  det.id = "slot-" + kind;
+  det.open = kind === "latest";  // latest starts expanded; others collapsed
 
+  const look = {
+    latest: ["badge slotlatest", "✅ 正式版"],
+    pre:    ["badge slotpre",    "🧪 预览版（未转正）"],
+    prev:   ["badge slotprev",   "⏱ 上一版本"]
+  }[kind];
   const sum = el("summary");
-  sum.appendChild(el("span", kind === "pre" ? "badge slotpre" : "badge slotprev",
-                     kind === "pre" ? "🧪 预览版（未转正）" : "⏱ 上一版本"));
+  sum.appendChild(el("span", look[0], look[1]));
   sum.appendChild(el("span", "tag", rel.tag_name));
   sum.appendChild(el("span", "slotdate", fmtDate(rel.published_at)));
   sum.appendChild(el("span", "chev", "▸"));
@@ -365,8 +373,10 @@ function buildSlot(rel, kind) {  // kind: "pre" | "prev"
   if (kind === "pre")
     body.appendChild(el("div", "slot-note",
       "本轮构建已完整落地（全部板卡通过），待上机验证后转正为正式版。"));
+  const slotDir = kind === "latest" ? "latest"
+                : kind === "pre" ? "pre-release" : "previous";
   for (const [b, es] of splitBoards(rel))
-    body.appendChild(buildSection(b, es, kind === "pre" ? "pre-release" : "previous"));
+    body.appendChild(buildSection(b, es, slotDir));
 
   det.append(sum, body);
   return det;
@@ -397,11 +407,10 @@ async function boot() {
   }
   document.getElementById("tag").textContent = s.latest.tag_name;
   document.getElementById("date").textContent = fmtDate(s.latest.published_at);
-  boards.className = "";
-  boards.replaceChildren(...[...splitBoards(s.latest)].map(([b, es]) => buildSection(b, es, "latest")));
+  boards.hidden = true;  // all three slots render as collapsible bars below
 
   const slots = document.getElementById("slots");
-  slots.replaceChildren();
+  slots.replaceChildren(buildSlot(s.latest, "latest"));
   if (s.pre) {
     slots.appendChild(buildSlot(s.pre, "pre"));
     document.getElementById("prenote").hidden = false;
