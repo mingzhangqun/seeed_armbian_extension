@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<!--
+  PROTOTYPE — three-slot images page (latest / pre-release / previous).
+
+  Same skeleton as scripts/images-page.template.html, plus:
+    * boot() reads the /releases LIST (not /releases/latest) and derives
+      three slots: newest full release = latest, second full = previous,
+      newest prerelease = pre-release (hidden when older than latest)
+    * latest stays the always-expanded main table; previous and
+      pre-release render as collapsed <details> slots below it
+  Demo harness: window.MOCK_RELEASES replaces the fetch; open the page
+  with #open to expand the pre-release slot for preview purposes.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seeed reComputer — Armbian 镜像下载</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.65 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+         background: #f3f5f8; color: #03353f; }
+  header { background: #03353f; color: #fff; padding: 34px 0 30px; }
+  header .bar { width: 56px; height: 5px; background: #8dc215; border-radius: 3px;
+                margin-bottom: 16px; }
+  main { max-width: 920px; margin: 0 auto; padding: 0 20px; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
+  h1 em { color: #8dc215; font-style: normal; }
+  .sub { color: #b9cdd4; font-size: 14px; }
+  .sub .prenote { color: #ffbc44; }
+  .tag { display: inline-block; background: rgba(141,194,21,.18); color: #8dc215;
+         border: 1px solid rgba(141,194,21,.55); border-radius: 6px; padding: 0 8px;
+         font: 12px/1.7 ui-monospace, "SF Mono", monospace; }
+  .board { display: flex; gap: 26px; background: #fff; border-radius: 14px;
+           padding: 24px; margin: 22px 0; box-shadow: 0 1px 4px rgba(3,53,63,.08); }
+  .photo { flex: 0 0 300px; }
+  .photo img { width: 100%; border-radius: 10px; background: #fff; mix-blend-mode: multiply; }
+  .photo.noimg { display: none; }
+  .info { flex: 1; min-width: 0; }
+  h2 { font-size: 20px; margin: 2px 0 14px; }
+  h2 span { color: #8dc215; }
+  .row { display: flex; align-items: baseline; gap: 14px; padding: 9px 0;
+         border-top: 1px solid #eef2f6; flex-wrap: wrap; }
+  .row-title { flex: 0 0 64px; font-weight: 600; font-size: 14px; }
+  .row-links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .badge { font-size: 11px; border-radius: 4px; padding: 0 6px; margin-left: 6px;
+           vertical-align: 2px; }
+  .badge.ab { background: rgba(255,188,68,.18); color: #b96e00; border: 1px solid rgba(255,188,68,.6); }
+  .badge.crypt { background: rgba(3,53,63,.08); color: #03353f; border: 1px solid rgba(3,53,63,.25); }
+  .btn { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 13px;
+         text-decoration: none; color: #03353f; border: 1px solid #d7dee5; background: #fff; }
+  .btn.primary { background: #8dc215; border-color: #8dc215; color: #fff; font-weight: 600; }
+  .btn:hover { filter: brightness(.96); }
+  .onedrive { display: inline-block; margin-top: 14px; text-decoration: none; font-size: 14px;
+              color: #03353f; border: 1px dashed #8dc215; border-radius: 8px; padding: 5px 14px; }
+  .loading { color: #7b8fa0; padding: 30px 0; }
+  .fallback { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+              background: #fff; border: 1px solid #ffd9a0; border-radius: 14px;
+              padding: 18px 24px; margin: 22px 0; font-size: 14px; }
+  .fallback[hidden] { display: none; }
+
+  /* ── slot (<details>) blocks: previous / pre-release ── */
+  details.slot { background: #fff; border-radius: 14px; margin: 22px 0;
+                 box-shadow: 0 1px 4px rgba(3,53,63,.08); overflow: hidden; }
+  details.slot > summary { display: flex; align-items: center; gap: 12px;
+                           padding: 15px 24px; cursor: pointer; list-style: none;
+                           user-select: none; font-size: 14px; }
+  details.slot > summary::-webkit-details-marker { display: none; }
+  details.slot > summary:hover { background: #fafbfd; }
+  details.slot[open] > summary { border-bottom: 1px solid #eef2f6; }
+  .badge.slotpre { background: rgba(255,188,68,.18); color: #b96e00;
+                   border: 1px solid rgba(255,188,68,.6); font-size: 12px;
+                   border-radius: 6px; padding: 1px 9px; vertical-align: 0; }
+  .badge.slotprev { background: rgba(3,53,63,.06); color: #51707c;
+                    border: 1px solid rgba(3,53,63,.22); font-size: 12px;
+                    border-radius: 6px; padding: 1px 9px; vertical-align: 0; }
+  .slotdate { color: #7b8fa0; font-size: 13px; }
+  .chev { margin-left: auto; color: #7b8fa0; transition: transform .15s; }
+  details.slot[open] .chev { transform: rotate(90deg); }
+  .slot-body { padding: 2px 24px 10px; }
+  .slot-body .board { margin: 16px 0 8px; }
+  .slot-note { color: #7b8fa0; font-size: 13px; padding: 12px 2px 0; }
+
+  footer { margin: 40px 0 60px; color: #7b8fa0; font-size: 13px; line-height: 2; }
+  footer code { background: #e8edf2; padding: 1px 7px; border-radius: 4px; font-size: 12px; }
+  @media (max-width: 720px) { .board { flex-direction: column; } .photo { flex: none; } }
+</style>
+</head>
+<body>
+<header><main>
+  <div class="bar"></div>
+  <h1>Seeed <em>reComputer</em> — Armbian 镜像</h1>
+  <div class="sub" id="sub">当前正式版 <span class="tag" id="tag">…</span> &nbsp;·&nbsp; <span id="date"></span><span id="prenote" hidden> &nbsp;·&nbsp; <span class="prenote">🧪 新预览版可用（见下方）</span></span></div>
+</main></header>
+<main>
+  <div id="boards" class="loading">正在从 GitHub 获取最新版本…</div>
+  <div id="slots"></div>
+
+  <div id="fallback" class="fallback" hidden>
+    <span>⚠ 实时获取最新版信息失败或暂无正式版。可以从这里直接下载：</span>
+    <a class="btn primary" href="https://github.com/Seeed-Studio/seeed_armbian_extension/releases/latest">GitHub Releases</a>
+    <a class="btn primary" href="https://1drv.ms/f/c/demo">☁ OneDrive 下载全部</a>
+  </div>
+  <noscript>
+    <div class="fallback">
+      <span>本页需要 JavaScript 从 GitHub 实时获取最新版本，也可直接下载：</span>
+      <a class="btn primary" href="https://github.com/Seeed-Studio/seeed_armbian_extension/releases/latest">GitHub Releases</a>
+      <a class="btn primary" href="https://1drv.ms/f/c/demo">☁ OneDrive 下载全部</a>
+    </div>
+  </noscript>
+
+  <footer>
+    写入 eMMC/SD：<code>xz -d -T0 xxx.img.xz</code> 后用 <code>dd</code> 或 balenaEtcher 烧写。
+  </footer>
+</main>
+
+<script>
+"use strict";
+/* ── demo data (shipping version fetches /releases instead) ──────────── */
+(function () {
+  function A(name, size) {
+    return { name: name, size: size,
+             browser_download_url: "https://github.com/Seeed-Studio/seeed_armbian_extension/releases/download/TAG/" + name };
+  }
+  // one board's asset set: cli (trixie minimal) + desktop (resolute gnome)
+  function set(board, trunk, kernel, extra) {
+    var cli = "Armbian_" + trunk + "_Recomputer-" + board + "_Debian_trixie_vendor_" + kernel + "_minimal";
+    var dt  = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop";
+    var a = [
+      A(cli + ".img.xz", 673185792), A(cli + ".img.xz.sha256", 151),
+      A(cli + "_OTA.tar.gz", 92301312), A(cli + "_OTA.checksums", 312),
+      A(cli + ".img.txt", 3412),
+      A(dt + ".img.xz", 1932735283), A(dt + ".img.xz.sha256", 151),
+      A(dt + "_OTA.tar.gz", 126484480), A(dt + "_OTA.checksums", 312),
+      A(dt + ".img.txt", 3388)
+    ];
+    if (extra) a = a.concat(extra(board, trunk, kernel));
+    return a;
+  }
+  var boards = ["rk3576-devkit", "rk3576-module-devkit", "rk3576-industrial", "rk3588-devkit"];
+  function many(trunk, kernel, extra) {
+    var all = [];
+    boards.forEach(function (b) { all = all.concat(set(b, trunk, kernel, extra)); });
+    return all;
+  }
+  window.MOCK_RELEASES = [
+    { tag_name: "261031-0800", prerelease: true,
+      published_at: "2026-10-31T08:41:55Z", created_at: "2026-10-31T08:41:55Z",
+      assets: many("25.8.2-trunk.427", "6.1.100", function (board, trunk, kernel) {
+        if (board !== "rk3576-industrial") return [];
+        var ab = "Armbian_" + trunk + "_Recomputer-" + board + "_Debian_trixie_vendor_" + kernel + "_minimal_AB_PART";
+        var cr = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop-crypt";
+        return [ A(ab + ".img.xz", 688914432), A(ab + ".img.xz.sha256", 151),
+                 A(cr + ".img.xz", 1946994688), A(cr + ".img.xz.sha256", 151) ];
+      }) },
+    { tag_name: "261028-0900", prerelease: false,
+      published_at: "2026-10-28T09:14:41Z", created_at: "2026-10-28T09:14:41Z",
+      assets: many("25.8.2-trunk.412", "6.1.99") },
+    { tag_name: "261014-1300", prerelease: false,
+      published_at: "2026-10-14T13:22:08Z", created_at: "2026-10-14T13:22:08Z",
+      assets: many("25.8.1-trunk.398", "6.1.84") }
+  ];
+})();
+
+/* ── below: the shipping page logic (filename grammar unchanged) ────── */
+const CFG = Object.freeze({ repo: "Seeed-Studio/seeed_armbian_extension",
+                            onedrive: "https://1drv.ms/f/c/demo" });
+
+const BOARD_PAT = /Recomputer-([A-Za-z0-9][A-Za-z0-9-]*?)_/;
+const VARIANT_TITLE = { cli: "CLI", desktop: "桌面" };
+const ROW_LABEL = { img: "镜像", ota: "OTA 包",
+                    sha256: "sha256", sha: "sha", chk: "校验", txt: "构建信息" };
+const KIND_ORDER = ["img", "ota", "sha256", "sha", "chk", "txt"];
+
+function parse(name, size, url) {
+  const m = name.match(BOARD_PAT);
+  if (!m) return null;
+  const board = m[1];
+  const variant = name.indexOf("_gnome_desktop") >= 0 ? "desktop"
+                : name.indexOf("_minimal") >= 0 ? "cli" : null;
+  if (!variant) return null;
+  const mode = name.indexOf("_AB_PART") >= 0 ? "ab" : "recovery";
+  const crypt = name.indexOf("-crypt") >= 0;
+  let kind = null;
+  if (name.endsWith(".img.xz.sha256")) kind = "sha256";
+  else if (name.endsWith(".img.xz")) kind = "img";
+  else if (name.endsWith(".img.sha")) kind = "sha";
+  else if (name.endsWith(".img.txt")) kind = "txt";
+  else if (name.endsWith("_OTA.tar.gz")) kind = "ota";
+  else if (name.endsWith("_OTA.checksums")) kind = "chk";
+  else if (name.endsWith(".sha256")) kind = "sha256";
+  if (!kind) return null;
+  return { board: board, variant: variant, mode: mode, crypt: crypt,
+           kind: kind, name: name, size: size, url: url };
+}
+
+function human(n) {
+  n = Number(n);
+  for (const unit of ["B", "K", "M", "G"]) {
+    if (n < 1024 || unit === "G")
+      return (unit === "B" || unit === "K") ? Math.trunc(n) + unit : n.toFixed(1) + unit;
+    n /= 1024;
+  }
+}
+
+function boardImage(board) {
+  return "https://armbian.com/api/v1/images/boards/480/recomputer-"
+       + board.replace("-dev-kit", "-devkit") + ".png";
+}
+
+function group(assets) {
+  const map = new Map();
+  for (const a of assets || []) {
+    const r = parse(a.name, a.size, a.browser_download_url);
+    if (!r) continue;
+    const key = [r.board, r.variant, r.mode, r.crypt].join("\t");
+    if (!map.has(key))
+      map.set(key, { board: r.board, variant: r.variant, mode: r.mode,
+                     crypt: r.crypt, d: {} });
+    map.get(key).d[r.kind] = { name: r.name, size: a.size, url: a.browser_download_url };
+  }
+  const rank = e => (e.variant === "cli" ? 0 : 4)
+                  + (e.mode === "recovery" ? 0 : 2) + (e.crypt ? 1 : 0);
+  return [...map.values()].sort((x, y) =>
+    x.board < y.board ? -1 : x.board > y.board ? 1 : rank(x) - rank(y));
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function buildRow(entry) {
+  const title = el("div", "row-title", VARIANT_TITLE[entry.variant]);
+  if (entry.mode === "ab") title.appendChild(el("span", "badge ab", "A/B"));
+  if (entry.crypt) title.appendChild(el("span", "badge crypt", "加密"));
+
+  const links = el("div", "row-links");
+  for (const kind of KIND_ORDER) {
+    const v = entry.d[kind];
+    if (!v) continue;
+    const primary = kind === "img" || kind === "ota";
+    const a = el("a", primary ? "btn primary" : "btn",
+                 ROW_LABEL[kind] + (primary ? " · " + human(v.size) : ""));
+    a.href = v.url;
+    links.appendChild(a);
+  }
+
+  const row = el("div", "row");
+  row.append(title, links);
+  return row;
+}
+
+function buildSection(board, entries) {
+  const sec = el("section", "board");
+
+  const photo = el("div", "photo");
+  const img = document.createElement("img");
+  img.src = boardImage(board);
+  img.alt = "reComputer " + board;
+  img.loading = "lazy";
+  img.onerror = () => photo.classList.add("noimg");
+  photo.appendChild(img);
+
+  const dl = el("div", "downloads");
+  for (const entry of entries) dl.appendChild(buildRow(entry));
+
+  const od = el("a", "onedrive", "☁ OneDrive 下载全部");
+  od.href = CFG.onedrive;
+
+  const info = el("div", "info");
+  const h2 = el("h2", null, "reComputer ");
+  h2.appendChild(el("span", null, board));
+  info.append(h2, dl, od);
+
+  sec.append(photo, info);
+  return sec;
+}
+
+function fmtDate(iso) {
+  return iso ? iso.slice(0, 10) + " " + iso.slice(11, 16) + " UTC" : "";
+}
+
+/* ── slot derivation: /releases list → latest / previous / pre ──────── */
+function slotsFrom(list) {
+  const fulls = [], pres = [];
+  for (const r of list || []) (r.prerelease ? pres : fulls).push(r);
+  const latest = fulls[0] || null;      // list is newest-first
+  const previous = fulls[1] || null;
+  let pre = pres[0] || null;
+  // tags are YYMMDD-HHMM → lexicographic compare = chronological.
+  // A prerelease older than latest means "already promoted" → hide it.
+  if (pre && latest && String(pre.tag_name) <= String(latest.tag_name)) pre = null;
+  return { latest: latest, previous: previous, pre: pre };
+}
+
+function splitBoards(rel) {
+  const sections = new Map();
+  for (const e of group(rel.assets)) {
+    if (!sections.has(e.board)) sections.set(e.board, []);
+    sections.get(e.board).push(e);
+  }
+  return sections;
+}
+
+function buildSlot(rel, kind) {  // kind: "pre" | "prev"
+  const det = document.createElement("details");
+  det.className = "slot";
+  det.id = kind === "pre" ? "slot-pre" : "slot-prev";
+
+  const sum = el("summary");
+  sum.appendChild(el("span", kind === "pre" ? "badge slotpre" : "badge slotprev",
+                     kind === "pre" ? "🧪 预览版（未转正）" : "⏱ 上一版本"));
+  sum.appendChild(el("span", "tag", rel.tag_name));
+  sum.appendChild(el("span", "slotdate", fmtDate(rel.published_at)));
+  sum.appendChild(el("span", "chev", "▸"));
+
+  const body = el("div", "slot-body");
+  if (kind === "pre")
+    body.appendChild(el("div", "slot-note",
+      "本轮构建已完整落地（全部板卡通过），待上机验证后转正为正式版。"));
+  for (const [b, es] of splitBoards(rel)) body.appendChild(buildSection(b, es));
+
+  det.append(sum, body);
+  return det;
+}
+
+async function boot() {
+  const boards = document.getElementById("boards");
+  const sub = document.getElementById("sub");
+  const fallback = document.getElementById("fallback");
+  let list;
+  try {
+    if (window.MOCK_RELEASES) {
+      list = window.MOCK_RELEASES;
+    } else {
+      const r = await fetch("https://api.github.com/repos/" + CFG.repo + "/releases?per_page=30",
+                            { headers: { Accept: "application/vnd.github+json" } });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      list = await r.json();
+    }
+  } catch (e) {
+    boards.hidden = true; sub.hidden = true; fallback.hidden = false;
+    return;
+  }
+  const s = slotsFrom(list);
+  if (!s.latest) {
+    boards.hidden = true; sub.hidden = true; fallback.hidden = false;
+    return;
+  }
+  document.getElementById("tag").textContent = s.latest.tag_name;
+  document.getElementById("date").textContent = fmtDate(s.latest.published_at);
+  boards.className = "";
+  boards.replaceChildren(...[...splitBoards(s.latest)].map(([b, es]) => buildSection(b, es)));
+
+  const slots = document.getElementById("slots");
+  slots.replaceChildren();
+  if (s.pre) {
+    slots.appendChild(buildSlot(s.pre, "pre"));
+    document.getElementById("prenote").hidden = false;
+  }
+  if (s.previous) slots.appendChild(buildSlot(s.previous, "prev"));
+
+  // demo hook: #open expands the pre-release slot for previewing
+  if (location.hash === "#open") {
+    const d = document.getElementById("slot-pre");
+    if (d) d.open = true;
+  }
+}
+
+if (typeof document !== "undefined") boot();
+</script>
+</body>
+</html>
