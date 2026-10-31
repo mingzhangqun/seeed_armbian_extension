@@ -43,10 +43,9 @@
   .caption { text-align: center; font-size: 18px; font-weight: 700; margin-bottom: 10px; }
   .caption span { color: #8dc215; }
   .info { flex: 1; min-width: 0; }
-  /* OTA-mode boxes: Recovery always; A/B box beside it (right) when it
-     exists. Side by side on wide cards, stacked when narrow. */
-  .modeboxes { display: flex; gap: 14px; align-items: stretch; }
-  .modebox { flex: 1 1 0; min-width: 0; border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 14px 6px; }
+  /* OTA-mode boxes: Recovery (单分区) with the A/B box (双分区) below it. */
+  .modeboxes { display: flex; flex-direction: column; gap: 14px; }
+  .modebox { border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 14px 6px; }
   .modebox h3 { font-size: 13px; font-weight: 600; color: #51707c; margin: 10px 0 0; letter-spacing: .3px; }
   .row { display: flex; flex-direction: column; gap: 7px; padding: 9px 0;
          border-top: 1px solid #eef2f6; }
@@ -95,7 +94,7 @@
 
   footer { margin: 40px 0 60px; color: #7b8fa0; font-size: 13px; line-height: 2; }
   footer code { background: #e8edf2; padding: 1px 7px; border-radius: 4px; font-size: 12px; }
-  @media (max-width: 720px) { .board { flex-direction: column; } .photo { flex: none; } .modeboxes { flex-direction: column; } }
+  @media (max-width: 720px) { .board { flex-direction: column; } .photo { flex: none; } }
 </style>
 </head>
 <body>
@@ -321,7 +320,7 @@ function buildSection(board, entries, slot) {
   const rec = entries.filter(e => e.mode !== "ab");
   const ab = entries.filter(e => e.mode === "ab");
   const boxes = el("div", "modeboxes");
-  boxes.appendChild(buildModeBox("Recovery 恢复升级", rec, false, slot));
+  boxes.appendChild(buildModeBox("Recovery 单分区", rec, false, slot));
   if (ab.length) boxes.appendChild(buildModeBox("A/B 双分区", ab, true, slot));
 
   const info = el("div", "info");
