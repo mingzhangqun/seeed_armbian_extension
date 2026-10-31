@@ -56,11 +56,6 @@ on:
         required: true
         type: string
         default: "Seeed-Studio/armbian-build:main"
-      clear_kernel_cache:
-        description: "Clear kernel deb/worktree cache before build"
-        required: false
-        type: boolean
-        default: false
 
 env:
   PRIVATE_CCACHE: "yes"
@@ -455,7 +450,6 @@ jobs:
           ls -lh /tmp/armbian-docker-image.tar.zst
 
       - name: Restore armbian deb packages cache
-        if: ${{ !inputs.clear_kernel_cache }}
         uses: actions/cache@v4
         with:
           path: |
@@ -510,8 +504,7 @@ jobs:
             ${{ matrix.security }} \
             -b "${{ matrix.board }}" \
             -R "${{ matrix.release }}" \
-            $TIER_ARGS \
-            ${{ inputs.clear_kernel_cache && '-c' || '' }}
+            $TIER_ARGS
 
       - name: Compress .img to .img.xz + sha256
         if: always()
