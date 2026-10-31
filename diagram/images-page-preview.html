@@ -27,14 +27,13 @@
   body { margin: 0; font: 15px/1.65 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
          background: #f3f5f8; color: #03353f; }
   header { background: #03353f; color: #fff; padding: 34px 0 30px; }
-  header .bar { width: 56px; height: 5px; background: #8dc215; border-radius: 3px;
-                margin-bottom: 16px; }
   main { max-width: 920px; margin: 0 auto; padding: 0 20px; }
   h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
   h1 em { color: #8dc215; font-style: normal; }
   .tag { display: inline-block; background: rgba(141,194,21,.18); color: #8dc215;
          border: 1px solid rgba(141,194,21,.55); border-radius: 6px; padding: 0 8px;
-         font: 12px/1.7 ui-monospace, "SF Mono", monospace; }
+         font: 12px/1.7 ui-monospace, "SF Mono", monospace; text-decoration: none; }
+  a.tag:hover { color: #03353f; border-color: #03353f; }
   .board { display: flex; gap: 26px; background: #fff; border-radius: 14px;
            padding: 24px; margin: 22px 0; box-shadow: 0 1px 4px rgba(3,53,63,.08); }
   .photo { flex: 0 0 300px; }
@@ -49,9 +48,11 @@
   .modeboxes { display: flex; gap: 14px; align-items: stretch; }
   .modebox { flex: 1 1 0; min-width: 0; border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 14px 6px; }
   .modebox h3 { font-size: 13px; font-weight: 600; color: #51707c; margin: 10px 0 0; letter-spacing: .3px; }
-  .row { display: flex; align-items: baseline; gap: 14px; padding: 9px 0;
-         border-top: 1px solid #eef2f6; flex-wrap: wrap; }
-  .row-title { flex: 0 0 64px; font-weight: 600; font-size: 14px; }
+  .row { display: flex; flex-direction: column; gap: 7px; padding: 9px 0;
+         border-top: 1px solid #eef2f6; }
+  .row-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+  .row-title { font-weight: 700; font-size: 14px; }
+  .row-meta { color: #7b8fa0; font-size: 12.5px; }
   .row-links { display: flex; flex-wrap: wrap; gap: 8px; }
   .badge { font-size: 11px; border-radius: 4px; padding: 0 6px; margin-left: 6px;
            vertical-align: 2px; }
@@ -99,7 +100,6 @@
 </head>
 <body>
 <header><main>
-  <div class="bar"></div>
   <h1>Seeed <em>reComputer</em> — Armbian 镜像</h1>
 </main></header>
 <main>
@@ -199,10 +199,13 @@ function odUrl(board, slot, name) {
 }
 
 const BOARD_PAT = /Recomputer-([A-Za-z0-9][A-Za-z0-9-]*?)_/;
-const VARIANT_TITLE = { cli: "CLI", desktop: "桌面" };
-const ROW_LABEL = { img: "镜像", ota: "OTA 包",
-                    sha256: "sha256", sha: "sha", chk: "校验", txt: "构建信息" };
-const KIND_ORDER = ["img", "ota", "sha256", "sha", "chk", "txt"];
+const VER_PAT = /^Armbian_([^_]+)/;                              // 25.8.2-trunk.412
+const DIST_PAT = /_(Debian|Ubuntu)_([a-z]+)_vendor_([0-9][\w.-]*?)_/;  // Debian_trixie_vendor_6.1.99
+const VARIANT_TITLE = { cli: "CLI", desktop: "Desktop" };
+const ROW_LABEL = { img: "镜像", ota: "OTA",
+                    sha256: "sha256", sha: "sha256", chk: "sha256", txt: "构建信息" };
+// pair each artifact with its checksum: 镜像|sha256  OTA|sha256  构建信息
+const KIND_ORDER = ["img", "sha256", "sha", "ota", "chk", "txt"];
 
 function parse(name, size, url) {
   const m = name.match(BOARD_PAT);
@@ -222,17 +225,14 @@ function parse(name, size, url) {
   else if (name.endsWith("_OTA.checksums")) kind = "chk";
   else if (name.endsWith(".sha256")) kind = "sha256";
   if (!kind) return null;
+  // version metadata, extracted from the self-describing filename
+  const vm = name.match(VER_PAT);
+  const dm = name.match(DIST_PAT);
   return { board: board, variant: variant, mode: mode, crypt: crypt,
-           kind: kind, name: name, size: size, url: url };
-}
-
-function human(n) {
-  n = Number(n);
-  for (const unit of ["B", "K", "M", "G"]) {
-    if (n < 1024 || unit === "G")
-      return (unit === "B" || unit === "K") ? Math.trunc(n) + unit : n.toFixed(1) + unit;
-    n /= 1024;
-  }
+           kind: kind, name: name, size: size, url: url,
+           ver: vm ? vm[1] : "",
+           distro: dm ? dm[1] : "",
+           kernel: dm ? dm[3] : "" };
 }
 
 function boardImage(board) {
@@ -248,7 +248,8 @@ function group(assets) {
     const key = [r.board, r.variant, r.mode, r.crypt].join("\t");
     if (!map.has(key))
       map.set(key, { board: r.board, variant: r.variant, mode: r.mode,
-                     crypt: r.crypt, d: {} });
+                     crypt: r.crypt, ver: r.ver, distro: r.distro,
+                     kernel: r.kernel, d: {} });
     map.get(key).d[r.kind] = { name: r.name, size: a.size, url: a.browser_download_url };
   }
   const rank = e => (e.variant === "cli" ? 0 : 4)
@@ -265,24 +266,29 @@ function el(tag, cls, text) {
 }
 
 function buildRow(entry, suppressAb, slot) {
-  const title = el("div", "row-title", VARIANT_TITLE[entry.variant]);
+  // head: bold variant + gray " - distro - armbian ver - kernel" meta
+  const head = el("div", "row-head");
+  const title = el("span", "row-title", VARIANT_TITLE[entry.variant]);
   // inside an A/B modebox the box title already says it — badge off
   if (entry.mode === "ab" && !suppressAb) title.appendChild(el("span", "badge ab", "A/B"));
   if (entry.crypt) title.appendChild(el("span", "badge crypt", "加密"));
+  const meta = [entry.distro, entry.ver, entry.kernel].filter(Boolean).join(" - ");
+  if (meta) head.appendChild(el("span", "row-meta", "- " + meta));
+  head.prepend(title);
 
+  // links: 镜像|sha256  OTA|sha256  构建信息 — no sizes
   const links = el("div", "row-links");
   for (const kind of KIND_ORDER) {
     const v = entry.d[kind];
     if (!v) continue;
     const primary = kind === "img" || kind === "ota";
-    const a = el("a", primary ? "btn primary" : "btn",
-                 ROW_LABEL[kind] + (primary ? " · " + human(v.size) : ""));
+    const a = el("a", primary ? "btn primary" : "btn", ROW_LABEL[kind]);
     a.href = odUrl(entry.board, slot, v.name);
     links.appendChild(a);
   }
 
   const row = el("div", "row");
-  row.append(title, links);
+  row.append(head, links);
   return row;
 }
 
@@ -362,7 +368,12 @@ function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
   }[kind];
   const sum = el("summary");
   sum.appendChild(el("span", look[0], look[1]));
-  sum.appendChild(el("span", "tag", rel.tag_name));
+  // tag links to the release page on GitHub; interactive elements inside
+  // <summary> follow their activation without toggling the details
+  const tag = el("a", "tag", rel.tag_name);
+  tag.href = "https://github.com/" + CFG.repo + "/releases/tag/" + rel.tag_name;
+  tag.title = "GitHub release";
+  sum.appendChild(tag);
   sum.appendChild(el("span", "slotdate", fmtDate(rel.published_at)));
   sum.appendChild(el("span", "chev", "▸"));
 
