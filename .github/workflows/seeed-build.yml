@@ -610,8 +610,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Per-board bullet list of every attached asset (name, size, link),
-      # grouped by the <board>-<rec|ab>-<nosec|sec>- upload prefix.
+      # One compact table row per board x security: short link labels
+      # (img / sha256 / OTA / checksums) instead of raw asset URLs.
+      # Assets carry the <board>-<rec|ab>-<nosec|sec>- upload prefix;
+      # the variant comes from the trixie/resolute token in the name
+      # (cli=trixie, gnome=resolute — bound in the plan step).
       - name: Generate release document from attached assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -623,30 +626,115 @@ jobs:
             --jq '.assets[] | [.name, .size, .url] | @tsv' > /tmp/assets.tsv
           [ -s /tmp/assets.tsv ] || { echo "::error::release $TAG has no assets"; exit 1; }
 
-          out="release-out/CHANGELOG.md"
           mkdir -p release-out
-          {
-            echo "## Armbian images — $(date -u +%Y-%m-%d)"
-            echo
-            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID · tag \`$TAG\`"
-            echo
-            echo "> Files larger than the 2 GiB GitHub per-asset cap are split into \`.NN.part\` chunks:"
-            echo "> reassemble with \`cat <file>.*.part > <file>\`, then verify with the \`.sha256\` sidecar."
-            for b in $(echo "$BOARDS" | jq -r '.[]'); do
-              short="${b#recomputer-}"; short="${short%-devkit}"
-              echo
-              echo "### ${short}"
-              # asset names carry the <board>-<rec|ab>-<nosec|sec>- upload
-              # prefix; the (rec|ab) anchor keeps rk3576 from matching
-              # rk3576-module / rk3576-industrial assets.
-              grep -E "^${short}-(rec|ab)-(nosec|sec)-" /tmp/assets.tsv > "/tmp/a.tsv" || true
-              while IFS=$'\t' read -r name size url; do
-                echo "- [${name}](${url}) — $(numfmt --to=iec "${size}")"
-              done < "/tmp/a.tsv"
-            done
-          } > "$out"
-          echo "=== Generated ${out} ==="
-          cat "$out"
+          python3 <<'PY'
+          import datetime, json, os, re
+          boards = json.loads(os.environ["BOARDS"])
+          tag = os.environ["TAG"]
+          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+
+          pat = re.compile(r"^(.+)-(rec|ab)-(nosec|sec)-(.+)$")
+          slots = {}  # (short, sec, ota) -> {variant: {img/sha/parts/ota_pkg/ota_chk}}
+          for line in open("/tmp/assets.tsv"):
+              name, size, url = line.rstrip("\n").split("\t")
+              m = pat.match(name)
+              if not m:
+                  continue  # unprefixed asset — not ours
+              short, ota, sec, rest = m.groups()
+              if "trixie" in rest:
+                  var = "cli"
+              elif "resolute" in rest:
+                  var = "gnome"
+              else:
+                  continue
+              d = slots.setdefault((short, sec, ota), {}).setdefault(var, {})
+              if rest.endswith(".img.xz"):
+                  d["img"] = (size, url)
+              elif rest.endswith(".img.xz.sha256"):
+                  d["sha"] = (size, url)
+              elif re.search(r"\.\d+\.part$", rest):
+                  d.setdefault("parts", []).append((int(size), url))
+              elif rest.endswith("_OTA.tar.gz"):
+                  d["ota_pkg"] = (size, url)
+              elif rest.endswith("_OTA.checksums"):
+                  d["ota_chk"] = (size, url)
+
+          def short_of(board):
+              s = board.replace("recomputer-", "", 1)
+              return s.replace("-devkit", "", 1)
+
+          def human(n):
+              n = float(n)
+              for unit in ("B", "K", "M", "G"):
+                  if n < 1024 or unit == "G":
+                      return f"{int(n)}{unit}" if unit in ("B", "K") else f"{n:.1f}{unit}"
+                  n /= 1024
+
+          def pair(d, key, label, with_size=False):
+              if d.get(key):
+                  size, url = d[key]
+                  return f"[{label} · {human(size)}]({url})" if with_size else f"[{label}]({url})"
+              return None
+
+          def variant_links(d):
+              out = []
+              img = pair(d, "img", "img", True)
+              if img:
+                  out.append(img)
+              elif d.get("parts"):
+                  total = sum(s for s, _ in d["parts"])
+                  first = d["parts"][0][1]
+                  out.append(f"[img ×{len(d['parts'])} parts · {human(total)}]({first})")
+              if d.get("sha"):
+                  out.append(pair(d, "sha", "sha256"))
+              return " ".join(out)
+
+          lines = [
+              f"## Armbian images — {datetime.datetime.now(datetime.UTC):%Y-%m-%d}",
+              "",
+              f"Run: {run_url} · tag `{tag}`",
+              "",
+              "> \\.part files: assets over GitHub's 2 GiB cap are split — reassemble with",
+              "> `cat <file>.*.part > <file>`, then verify with the sha256 sidecar.",
+              "",
+              "| Board | Images | OTA |",
+              "|---|---|---|",
+          ]
+          for b in boards:
+              short = short_of(b)
+              for sec in ("nosec", "sec"):
+                  if not any((short, sec, o) in slots for o in ("rec", "ab")):
+                      continue
+                  label = short + (" 🔒 secure" if sec == "sec" else "")
+                  img_cell, ota_cell = [], []
+                  for ota, mode in (("rec", "recovery"), ("ab", "A/B")):
+                      s = slots.get((short, sec, ota))
+                      if not s:
+                          continue
+                      img_parts = [f"{v}({r}): {variant_links(s[v])}"
+                                   for v, r in (("cli", "trixie"), ("gnome", "resolute"))
+                                   if s.get(v) and variant_links(s[v])]
+                      if img_parts:
+                          img_cell.append(f"{mode}: {' · '.join(img_parts)}")
+                      ota_parts = []
+                      for v in ("cli", "gnome"):
+                          if not s.get(v):
+                              continue
+                          links = [x for x in (pair(s[v], "ota_pkg", "OTA", True),
+                                               pair(s[v], "ota_chk", "checksums")) if x]
+                          if links:
+                              ota_parts.append(f"{v}: {' '.join(links)}")
+                      if ota_parts:
+                          ota_cell.append(f"{mode}: {' · '.join(ota_parts)}")
+                  lines.append(f"| {label} | {'<br>'.join(img_cell) or '—'} | {'<br>'.join(ota_cell) or '—'} |")
+
+          out = "release-out/CHANGELOG.md"
+          os.makedirs("release-out", exist_ok=True)
+          with open(out, "w") as f:
+              f.write("\n".join(lines) + "\n")
+          print(f"=== Generated {out} ===")
+          print("\n".join(lines))
+          PY
 
       - name: Publish release
         env:
