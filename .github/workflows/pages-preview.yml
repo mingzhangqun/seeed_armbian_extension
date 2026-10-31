@@ -1,0 +1,43 @@
+name: "Pages preview (fork only)"
+
+# Deploys diagram/ to THIS fork's GitHub Pages so interactive prototypes
+# (diagram/*.html) can be reviewed in a browser.
+#
+# FORK ONLY — must never land on Seeed-Studio/seeed_armbian_extension:
+# that repo's Pages is workflow-type and serves the APT repository index
+# (see build-and-publish.yml deploy-pages); every deployment replaces the
+# whole site, so this workflow there would clobber it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["diagram/**", ".github/workflows/pages-preview.yml"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: fork-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload diagram/ as Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: diagram
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
