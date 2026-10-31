@@ -17,11 +17,11 @@
   Demo harness: window.MOCK_RELEASES replaces the fetch; open the page
   with #open to expand the pre-release slot for preview purposes.
 -->
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Seeed reComputer — Armbian 镜像下载</title>
+<title>Seeed reComputer — Armbian Image Downloads</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.65 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
@@ -43,7 +43,8 @@
   .caption { text-align: center; font-size: 18px; font-weight: 700; margin-bottom: 10px; }
   .caption span { color: #8dc215; }
   .info { flex: 1; min-width: 0; }
-  /* OTA-mode boxes: Recovery (单分区) with the A/B box (双分区) below it. */
+  /* OTA-mode boxes: Recovery (single partition) with the A/B box (dual
+     partition) below it, then their Secure counterparts. */
   .modeboxes { display: flex; flex-direction: column; gap: 14px; }
   .modebox { border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 14px 6px; }
   .modebox h3 { font-size: 13px; font-weight: 600; color: #51707c; margin: 10px 0 0; letter-spacing: .3px; }
@@ -53,7 +54,11 @@
   .row-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
   .row-title { font-weight: 700; font-size: 14px; }
   .row-meta { color: #7b8fa0; font-size: 12.5px; }
-  .row-links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .row-links { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  /* button groups separated by a vertical rule:
+     [Image sha256] | [OTA checksum] | [Build info] */
+  .grp { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+  .grp + .grp { margin-left: 10px; padding-left: 12px; border-left: 1px solid #d7dee5; }
   .badge { font-size: 11px; border-radius: 4px; padding: 0 6px; margin-left: 6px;
            vertical-align: 2px; }
   .badge.ab { background: rgba(255,188,68,.18); color: #b96e00; border: 1px solid rgba(255,188,68,.6); }
@@ -104,27 +109,27 @@
 </head>
 <body>
 <header><main>
-  <h1>Seeed <em>reComputer</em> — Armbian 镜像</h1>
+  <h1>Seeed <em>reComputer</em> — Armbian Images</h1>
 </main></header>
 <main>
-  <div id="boards" class="loading">正在从 GitHub 获取最新版本…</div>
+  <div id="boards" class="loading">Fetching releases from GitHub…</div>
   <div id="slots"></div>
 
   <div id="fallback" class="fallback" hidden>
-    <span>⚠ 实时获取最新版信息失败或暂无正式版。可以从这里直接下载：</span>
+    <span>⚠ Could not fetch release info from GitHub (or there is no stable release yet). Direct downloads:</span>
     <a class="btn primary" href="https://github.com/Seeed-Studio/seeed_armbian_extension/releases/latest">GitHub Releases</a>
-    <a class="btn primary" href="https://1drv.ms/f/c/demo">☁ OneDrive 下载全部</a>
+    <a class="btn primary" href="https://1drv.ms/f/c/demo">☁ OneDrive</a>
   </div>
   <noscript>
     <div class="fallback">
-      <span>本页需要 JavaScript 从 GitHub 实时获取最新版本，也可直接下载：</span>
+      <span>This page needs JavaScript to fetch the latest releases from GitHub. Direct downloads:</span>
       <a class="btn primary" href="https://github.com/Seeed-Studio/seeed_armbian_extension/releases/latest">GitHub Releases</a>
-      <a class="btn primary" href="https://1drv.ms/f/c/demo">☁ OneDrive 下载全部</a>
+      <a class="btn primary" href="https://1drv.ms/f/c/demo">☁ OneDrive</a>
     </div>
   </noscript>
 
   <footer>
-    写入 eMMC/SD：<code>xz -d -T0 xxx.img.xz</code> 后用 <code>dd</code> 或 balenaEtcher 烧写。
+    Write to eMMC/SD: <code>xz -d -T0 xxx.img.xz</code>, then flash with <code>dd</code> or balenaEtcher.
   </footer>
 </main>
 
@@ -209,10 +214,10 @@ const BOARD_PAT = /Recomputer-([A-Za-z0-9][A-Za-z0-9-]*?)_/;
 const VER_PAT = /^Armbian[^_]*_([^_]+)/;               // Armbian[-unofficial]_26.11.0-trunk_…
 const REL_PAT = /_([a-z]+)_vendor_([0-9][\w.-]*?)_/;   // …_resolute_vendor_6.1.172_…
 const VARIANT_TITLE = { cli: "CLI", desktop: "Desktop" };
-const ROW_LABEL = { img: "镜像", ota: "OTA",
-                    sha256: "sha256", sha: "sha256", chk: "sha256", txt: "构建信息" };
-// pair each artifact with its checksum: 镜像|sha256  OTA|sha256  构建信息
-const KIND_ORDER = ["img", "sha256", "sha", "ota", "chk", "txt"];
+const ROW_LABEL = { img: "Image", ota: "OTA",
+                    sha256: "sha256", sha: "sha256", chk: "checksum", txt: "Build info" };
+// button groups, rendered with a separator between each pair
+const GROUPS = [["img", "sha256", "sha"], ["ota", "chk"], ["txt"]];
 
 function parse(name, size, url) {
   const m = name.match(BOARD_PAT);
@@ -294,17 +299,22 @@ function buildRow(entry, opts, slot) {
   if (meta) head.appendChild(el("span", "row-meta", "- " + meta));
   head.prepend(title);
 
-  // links: 镜像|sha256  OTA|sha256  构建信息 — no sizes;
-  // primary buttons go yellow inside a Secure box
+  // links: [Image sha256] | [OTA checksum] | [Build info] — groups split
+  // by a vertical rule; no sizes; primary buttons go yellow in Secure boxes
   const links = el("div", "row-links");
-  for (const kind of KIND_ORDER) {
-    const v = entry.d[kind];
-    if (!v) continue;
-    const primary = kind === "img" || kind === "ota";
-    const cls = primary ? (opts.secure ? "btn secure" : "btn primary") : "btn";
-    const a = el("a", cls, ROW_LABEL[kind]);
-    a.href = odUrl(entry.board, slot, v.name);
-    links.appendChild(a);
+  for (const group of GROUPS) {
+    const present = group.filter(k => entry.d[k]);
+    if (!present.length) continue;
+    const grp = el("span", "grp");
+    for (const kind of present) {
+      const v = entry.d[kind];
+      const primary = kind === "img" || kind === "ota";
+      const cls = primary ? (opts.secure ? "btn secure" : "btn primary") : "btn";
+      const a = el("a", cls, ROW_LABEL[kind]);
+      a.href = odUrl(entry.board, slot, v.name);
+      grp.appendChild(a);
+    }
+    links.appendChild(grp);
   }
 
   const row = el("div", "row");
@@ -397,9 +407,9 @@ function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
   det.open = kind === "latest";  // latest starts expanded; others collapsed
 
   const look = {
-    latest: ["badge slotlatest", "✅ 正式版"],
-    pre:    ["badge slotpre",    "🧪 预览版（未转正）"],
-    prev:   ["badge slotprev",   "⏱ 上一版本"]
+    latest: ["badge slotlatest", "✅ Stable"],
+    pre:    ["badge slotpre",    "🧪 Pre-release"],
+    prev:   ["badge slotprev",   "⏱ Previous"]
   }[kind];
   const sum = el("summary");
   sum.appendChild(el("span", look[0], look[1]));
@@ -415,7 +425,7 @@ function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
   const body = el("div", "slot-body");
   if (kind === "pre")
     body.appendChild(el("div", "slot-note",
-      "本轮构建已完整落地（全部板卡通过），待上机验证后转正为正式版。"));
+      "Build completed on all boards — pending on-device verification before promotion to stable."));
   const slotDir = kind === "latest" ? "latest"
                 : kind === "pre" ? "pre-release" : "previous";
   for (const [b, es] of splitBoards(rel))
