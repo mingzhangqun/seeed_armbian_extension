@@ -241,6 +241,12 @@ function boardImage(board) {
        + board.replace("-dev-kit", "-devkit") + ".png";
 }
 
+// canonical board display order — mirrors the seeed-build.yml input
+// order (rk3576 variants grouped, rk3588 last); unknown boards append
+const BOARD_ORDER = ["rk3576-devkit", "rk3576-module-devkit",
+                     "rk3576-industrial", "rk3588-devkit"];
+const boardRank = b => { const i = BOARD_ORDER.indexOf(b); return i < 0 ? BOARD_ORDER.length : i; };
+
 function group(assets) {
   const map = new Map();
   for (const a of assets || []) {
@@ -255,8 +261,11 @@ function group(assets) {
   }
   const rank = e => (e.variant === "cli" ? 0 : 4)
                   + (e.mode === "recovery" ? 0 : 2) + (e.crypt ? 1 : 0);
-  return [...map.values()].sort((x, y) =>
-    x.board < y.board ? -1 : x.board > y.board ? 1 : rank(x) - rank(y));
+  return [...map.values()].sort((x, y) => {
+    const bx = boardRank(x.board), by = boardRank(y.board);
+    if (bx !== by) return bx - by;
+    return x.board < y.board ? -1 : x.board > y.board ? 1 : rank(x) - rank(y);
+  });
 }
 
 function el(tag, cls, text) {
