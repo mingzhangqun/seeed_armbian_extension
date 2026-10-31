@@ -132,10 +132,11 @@
     return { name: name, size: size,
              browser_download_url: "https://github.com/Seeed-Studio/seeed_armbian_extension/releases/download/TAG/" + name };
   }
-  // one board's asset set: cli (trixie minimal) + desktop (resolute gnome)
-  function set(board, trunk, kernel, extra) {
-    var cli = "Armbian_" + trunk + "_Recomputer-" + board + "_Debian_trixie_vendor_" + kernel + "_minimal";
-    var dt  = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop";
+  // one board's asset set: cli (trixie minimal) + desktop (resolute gnome);
+  // names follow the REAL grammar: Armbian-unofficial_<ver>_Recomputer-<board>_<codename>_vendor_<kernel>_<variant>
+  function set(board, ver, kernel, extra) {
+    var cli = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_trixie_vendor_" + kernel + "_minimal";
+    var dt  = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_resolute_vendor_" + kernel + "_gnome_desktop";
     var a = [
       A(cli + ".img.xz", 673185792), A(cli + ".img.xz.sha256", 151),
       A(cli + "_OTA.tar.gz", 92301312), A(cli + "_OTA.checksums", 312),
@@ -144,7 +145,7 @@
       A(dt + "_OTA.tar.gz", 126484480), A(dt + "_OTA.checksums", 312),
       A(dt + ".img.txt", 3388)
     ];
-    if (extra) a = a.concat(extra(board, trunk, kernel));
+    if (extra) a = a.concat(extra(board, ver, kernel));
     return a;
   }
   var boards = ["rk3576-devkit", "rk3576-module-devkit", "rk3576-industrial", "rk3588-devkit"];
@@ -156,27 +157,27 @@
   window.MOCK_RELEASES = [
     { tag_name: "261031-0800", prerelease: true,
       published_at: "2026-10-31T08:41:55Z", created_at: "2026-10-31T08:41:55Z",
-      assets: many("25.8.2-trunk.427", "6.1.100", function (board, trunk, kernel) {
+      assets: many("26.11.0-trunk", "6.1.172", function (board, ver, kernel) {
         // ota_ab dispatched ON for this build → every board gets A/B rows
-        var ab = "Armbian_" + trunk + "_Recomputer-" + board + "_Debian_trixie_vendor_" + kernel + "_minimal_AB_PART";
-        var abd = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop_AB_PART";
+        var ab = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_trixie_vendor_" + kernel + "_minimal_AB_PART";
+        var abd = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_resolute_vendor_" + kernel + "_gnome_desktop_AB_PART";
         var out = [
           A(ab + ".img.xz", 688914432), A(ab + ".img.xz.sha256", 151),
           A(ab + "_OTA.tar.gz", 95312000), A(ab + "_OTA.checksums", 312),
           A(abd + ".img.xz", 1997159424), A(abd + ".img.xz.sha256", 151)
         ];
         if (board === "rk3576-industrial") {
-          var cr = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop-crypt";
+          var cr = "Armbian-unofficial_" + ver + "_Recomputer-" + board + "_resolute_vendor_" + kernel + "_gnome_desktop-crypt";
           out.push(A(cr + ".img.xz", 1946994688), A(cr + ".img.xz.sha256", 151));
         }
         return out;
       }) },
     { tag_name: "261028-0900", prerelease: false,
       published_at: "2026-10-28T09:14:41Z", created_at: "2026-10-28T09:14:41Z",
-      assets: many("25.8.2-trunk.412", "6.1.99") },
+      assets: many("26.10.0-trunk", "6.1.157") },
     { tag_name: "261014-1300", prerelease: false,
       published_at: "2026-10-14T13:22:08Z", created_at: "2026-10-14T13:22:08Z",
-      assets: many("25.8.1-trunk.398", "6.1.84") }
+      assets: many("26.9.0-trunk", "6.1.143") }
   ];
 })();
 
@@ -199,8 +200,8 @@ function odUrl(board, slot, name) {
 }
 
 const BOARD_PAT = /Recomputer-([A-Za-z0-9][A-Za-z0-9-]*?)_/;
-const VER_PAT = /^Armbian_([^_]+)/;                              // 25.8.2-trunk.412
-const DIST_PAT = /_(Debian|Ubuntu)_([a-z]+)_vendor_([0-9][\w.-]*?)_/;  // Debian_trixie_vendor_6.1.99
+const VER_PAT = /^Armbian[^_]*_([^_]+)/;               // Armbian[-unofficial]_26.11.0-trunk_…
+const REL_PAT = /_([a-z]+)_vendor_([0-9][\w.-]*?)_/;   // …_resolute_vendor_6.1.172_…
 const VARIANT_TITLE = { cli: "CLI", desktop: "Desktop" };
 const ROW_LABEL = { img: "镜像", ota: "OTA",
                     sha256: "sha256", sha: "sha256", chk: "sha256", txt: "构建信息" };
@@ -225,14 +226,15 @@ function parse(name, size, url) {
   else if (name.endsWith("_OTA.checksums")) kind = "chk";
   else if (name.endsWith(".sha256")) kind = "sha256";
   if (!kind) return null;
-  // version metadata, extracted from the self-describing filename
+  // version metadata, extracted from the self-describing filename:
+  // version "26.11.0-trunk" → "26.11.0"; release codename + kernel
   const vm = name.match(VER_PAT);
-  const dm = name.match(DIST_PAT);
+  const rm = name.match(REL_PAT);
   return { board: board, variant: variant, mode: mode, crypt: crypt,
            kind: kind, name: name, size: size, url: url,
-           ver: vm ? vm[1] : "",
-           distro: dm ? dm[1] : "",
-           kernel: dm ? dm[3] : "" };
+           ver: vm ? vm[1].replace(/-.*$/, "") : "",
+           release: rm ? rm[1] : "",
+           kernel: rm ? rm[2] : "" };
 }
 
 function boardImage(board) {
@@ -248,7 +250,7 @@ function group(assets) {
     const key = [r.board, r.variant, r.mode, r.crypt].join("\t");
     if (!map.has(key))
       map.set(key, { board: r.board, variant: r.variant, mode: r.mode,
-                     crypt: r.crypt, ver: r.ver, distro: r.distro,
+                     crypt: r.crypt, ver: r.ver, release: r.release,
                      kernel: r.kernel, d: {} });
     map.get(key).d[r.kind] = { name: r.name, size: a.size, url: a.browser_download_url };
   }
@@ -266,13 +268,13 @@ function el(tag, cls, text) {
 }
 
 function buildRow(entry, suppressAb, slot) {
-  // head: bold variant + gray " - distro - armbian ver - kernel" meta
+  // head: bold variant + gray " - codename - armbian version - kernel" meta
   const head = el("div", "row-head");
   const title = el("span", "row-title", VARIANT_TITLE[entry.variant]);
   // inside an A/B modebox the box title already says it — badge off
   if (entry.mode === "ab" && !suppressAb) title.appendChild(el("span", "badge ab", "A/B"));
   if (entry.crypt) title.appendChild(el("span", "badge crypt", "加密"));
-  const meta = [entry.distro, entry.ver, entry.kernel].filter(Boolean).join(" - ");
+  const meta = [entry.release, entry.ver, entry.kernel].filter(Boolean).join(" - ");
   if (meta) head.appendChild(el("span", "row-meta", "- " + meta));
   head.prepend(title);
 
