@@ -30,11 +30,19 @@
   main { max-width: 920px; margin: 0 auto; padding: 0 20px; }
   h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
   h1 em { color: #8dc215; font-style: normal; }
-  /* anchor nav under the title: jumps to (and expands) a slot */
-  .slotnav { display: flex; gap: 20px; margin-top: 10px; font-size: 14px; }
+  /* anchor nav under the title: pill links color-matched to their slot
+     badges (green Stable / amber Pre-release / gray Previous) */
+  .slotnav { display: flex; gap: 12px; margin-top: 12px; font-size: 13px; }
   .slotnav[hidden] { display: none; }
-  .slotnav a { color: #b9cdd4; text-decoration: none; }
-  .slotnav a:hover { color: #8dc215; }
+  .slotnav a { display: inline-block; padding: 2px 14px; border-radius: 999px;
+               text-decoration: none; border: 1px solid; }
+  .slotnav a.latest { color: #8dc215; border-color: rgba(141,194,21,.55);
+                      background: rgba(141,194,21,.12); }
+  .slotnav a.pre { color: #ffbc44; border-color: rgba(255,188,68,.55);
+                   background: rgba(255,188,68,.12); }
+  .slotnav a.prev { color: #b9cdd4; border-color: rgba(185,205,212,.45);
+                    background: rgba(185,205,212,.08); }
+  .slotnav a:hover { filter: brightness(1.18); }
   details.slot { scroll-margin-top: 12px; }
   .tag { display: inline-block; background: rgba(141,194,21,.18); color: #8dc215;
          border: 1px solid rgba(141,194,21,.55); border-radius: 6px; padding: 0 8px;
@@ -481,7 +489,7 @@ async function boot() {
                                ["prev", "Previous"]]) {
     const rel = kind === "prev" ? s.previous : s[kind];  // field is "previous"
     if (!rel) continue;
-    const a = el("a", null, label);
+    const a = el("a", kind, label);   // class latest|pre|prev → pill color
     a.href = "#slot-" + kind;
     a.onclick = () => { const d = document.getElementById("slot-" + kind);
                         if (d) d.open = true; };
