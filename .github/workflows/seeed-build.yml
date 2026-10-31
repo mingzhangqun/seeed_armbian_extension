@@ -61,11 +61,6 @@ on:
         required: false
         type: boolean
         default: false
-      upload_release:
-        description: "Attach all generated images and OTA packages to a draft release (GITHUB_TOKEN)"
-        required: false
-        type: boolean
-        default: true
       publish_release:
         description: "Publish ONE GitHub Release covering all boards (assets attached by build entries)"
         required: false
@@ -141,11 +136,6 @@ jobs:
           tag="$(date -u +%y%m%d-%H%M)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ inputs.publish_release }}" = "true" ] && [ "${{ inputs.upload_release }}" != "true" ]; then
-            echo "::error::publish_release requires upload_release (assets live on the release itself)"
-            exit 1
-          fi
-
           python3 <<'PY'
           import json, os, itertools
 
@@ -217,9 +207,8 @@ jobs:
           echo "Boards to release: ${{ steps.gen.outputs.boards }}"
           echo "Release tag: ${{ steps.gen.outputs.tag }}"
 
-  # Creates the (single) draft release all build entries upload into.
-  # Runs unconditionally so `build` can depend on it even when
-  # upload_release is false — in that case it is a fast no-op.
+  # Creates the (single) draft release all build entries upload into
+  # (always on — image/OTA assets always go to a draft release).
   init-release:
     name: Init draft release
     needs: plan
@@ -229,7 +218,6 @@ jobs:
       contents: write
     steps:
       - name: Create draft release ${{ needs.plan.outputs.tag }}
-        if: ${{ inputs.upload_release }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -517,7 +505,6 @@ jobs:
         # generator parses that prefix back out; plain and secure-boot
         # images of the same board+release+tier have IDENTICAL filenames
         # and would clobber each other without it.
-        if: ${{ inputs.upload_release }}
         working-directory: armbian-build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -601,7 +588,7 @@ jobs:
     # this job generates the download tables from the release's own
     # asset list and publishes it (draft -> pre-release). Previous
     # releases are kept — clean them up manually if needed.
-    if: ${{ inputs.publish_release && inputs.upload_release && !cancelled() && needs.build.result == 'success' }}
+    if: ${{ inputs.publish_release && !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
