@@ -425,6 +425,8 @@ function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
   const tag = el("a", "tag", rel.tag_name);
   tag.href = "https://github.com/" + CFG.repo + "/releases/tag/" + rel.tag_name;
   tag.title = "GitHub release";
+  tag.target = "_blank";   // open in a new tab, don't navigate away
+  tag.rel = "noopener";
   sum.appendChild(tag);
   sum.appendChild(el("span", "slotdate", fmtDate(rel.published_at)));
   sum.appendChild(el("span", "chev", "▸"));
