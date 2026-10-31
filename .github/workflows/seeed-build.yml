@@ -28,10 +28,7 @@ on:
       #   gnome → Ubuntu 26.04 (resolute)  — desktop, sized by desktop_tier
 
       # ── OTA modes (each selected mode becomes a separate matrix entry) ──
-      ota_recovery:
-        description: "OTA: recovery"
-        type: boolean
-        default: true
+      # Recovery is mandatory — no checkbox; A/B is opt-in.
       ota_ab:
         description: "OTA: A/B dual-partition"
         type: boolean
@@ -171,15 +168,12 @@ jobs:
           # (tier, release)
           variants = [("cli", "trixie"), ("gnome", "resolute")]
 
-          # OTA modes. Each selected mode becomes its own matrix entry.
-          # If none selected, fall back to recovery — plain (no OTA)
-          # images are no longer produced; seeed-build.sh also defaults
-          # to recovery.
-          otas = []
-          if flag("OTA_RECOVERY"): otas.append("recovery")
-          if flag("OTA_AB"):       otas.append("ab")
-          if not otas:
-              otas = ["recovery"]
+          # OTA modes. Recovery is always built — mandatory, no checkbox
+          # (plain images are no longer produced; seeed-build.sh also
+          # defaults to recovery). A/B is opt-in and adds its own matrix
+          # entries alongside recovery.
+          otas = ["recovery"]
+          if flag("OTA_AB"): otas.append("ab")
 
           # Security profiles. Each checked option becomes its own matrix
           # dimension — plain and secure-boot can be built in one run.
@@ -220,7 +214,6 @@ jobs:
           BOARD_RK3588: ${{ inputs.board_rk3588 }}
           BOARD_RK3576_MODULE: ${{ inputs.board_rk3576_module }}
           BOARD_RK3576_INDUSTRIAL: ${{ inputs.board_rk3576_industrial }}
-          OTA_RECOVERY: ${{ inputs.ota_recovery }}
           OTA_AB:       ${{ inputs.ota_ab }}
           SEC_PLAIN:    ${{ inputs.security_plain }}
           SECURE_BOOT:  ${{ inputs.secure_boot }}
