@@ -35,10 +35,17 @@
            padding: 24px; margin: 22px 0; box-shadow: 0 1px 4px rgba(3,53,63,.08); }
   .photo { flex: 0 0 300px; }
   .photo img { width: 100%; border-radius: 10px; background: #fff; mix-blend-mode: multiply; }
-  .photo.noimg { display: none; }
+  .photo.noimg { flex-basis: auto; max-width: 300px; }
+  .photo.noimg img { display: none; }
+  .caption { text-align: center; font-size: 14px; font-weight: 600; margin-top: 10px; }
+  .caption span { color: #8dc215; }
   .info { flex: 1; min-width: 0; }
-  h2 { font-size: 20px; margin: 2px 0 14px; }
-  h2 span { color: #8dc215; }
+  /* OTA-mode sub-boxes: Recovery vs A/B. Boxes (and their titles) only
+     render when A/B assets exist — a recovery-only board keeps the plain
+     row list. Crypt stays a row badge (orthogonal dimension). */
+  .modebox { border: 1px solid #e3eaf0; border-radius: 10px; padding: 0 16px 6px; margin-bottom: 14px; }
+  .modebox:last-child { margin-bottom: 0; }
+  .modebox h3 { font-size: 13px; font-weight: 600; color: #51707c; margin: 10px 0 0; letter-spacing: .3px; }
   .row { display: flex; align-items: baseline; gap: 14px; padding: 9px 0;
          border-top: 1px solid #eef2f6; flex-wrap: wrap; }
   .row-title { flex: 0 0 64px; font-weight: 600; font-size: 14px; }
@@ -147,11 +154,19 @@
     { tag_name: "261031-0800", prerelease: true,
       published_at: "2026-10-31T08:41:55Z", created_at: "2026-10-31T08:41:55Z",
       assets: many("25.8.2-trunk.427", "6.1.100", function (board, trunk, kernel) {
-        if (board !== "rk3576-industrial") return [];
+        // ota_ab dispatched ON for this build → every board gets A/B rows
         var ab = "Armbian_" + trunk + "_Recomputer-" + board + "_Debian_trixie_vendor_" + kernel + "_minimal_AB_PART";
-        var cr = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop-crypt";
-        return [ A(ab + ".img.xz", 688914432), A(ab + ".img.xz.sha256", 151),
-                 A(cr + ".img.xz", 1946994688), A(cr + ".img.xz.sha256", 151) ];
+        var abd = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop_AB_PART";
+        var out = [
+          A(ab + ".img.xz", 688914432), A(ab + ".img.xz.sha256", 151),
+          A(ab + "_OTA.tar.gz", 95312000), A(ab + "_OTA.checksums", 312),
+          A(abd + ".img.xz", 1997159424), A(abd + ".img.xz.sha256", 151)
+        ];
+        if (board === "rk3576-industrial") {
+          var cr = "Armbian_" + trunk + "_Recomputer-" + board + "_Ubuntu_resolute_vendor_" + kernel + "_gnome_desktop-crypt";
+          out.push(A(cr + ".img.xz", 1946994688), A(cr + ".img.xz.sha256", 151));
+        }
+        return out;
       }) },
     { tag_name: "261028-0900", prerelease: false,
       published_at: "2026-10-28T09:14:41Z", created_at: "2026-10-28T09:14:41Z",
@@ -232,9 +247,10 @@ function el(tag, cls, text) {
   return e;
 }
 
-function buildRow(entry) {
+function buildRow(entry, suppressAb) {
   const title = el("div", "row-title", VARIANT_TITLE[entry.variant]);
-  if (entry.mode === "ab") title.appendChild(el("span", "badge ab", "A/B"));
+  // inside an A/B modebox the box title already says it — badge off
+  if (entry.mode === "ab" && !suppressAb) title.appendChild(el("span", "badge ab", "A/B"));
   if (entry.crypt) title.appendChild(el("span", "badge crypt", "加密"));
 
   const links = el("div", "row-links");
@@ -253,9 +269,17 @@ function buildRow(entry) {
   return row;
 }
 
+function buildModeBox(title, entries, suppressAb) {
+  const box = el("div", "modebox");
+  box.appendChild(el("h3", null, title));
+  for (const entry of entries) box.appendChild(buildRow(entry, suppressAb));
+  return box;
+}
+
 function buildSection(board, entries) {
   const sec = el("section", "board");
 
+  // photo column: image with the board name as caption below it
   const photo = el("div", "photo");
   const img = document.createElement("img");
   img.src = boardImage(board);
@@ -263,17 +287,27 @@ function buildSection(board, entries) {
   img.loading = "lazy";
   img.onerror = () => photo.classList.add("noimg");
   photo.appendChild(img);
+  const cap = el("div", "caption", "reComputer ");
+  cap.appendChild(el("span", null, board));
+  photo.appendChild(cap);
 
+  // downloads: recovery/A-B split into labeled boxes, but ONLY when A/B
+  // assets exist — a recovery-only board renders the plain row list
   const dl = el("div", "downloads");
-  for (const entry of entries) dl.appendChild(buildRow(entry));
+  const rec = entries.filter(e => e.mode !== "ab");
+  const ab = entries.filter(e => e.mode === "ab");
+  if (ab.length) {
+    dl.appendChild(buildModeBox("恢复升级 · Recovery", rec, false));
+    dl.appendChild(buildModeBox("A/B 双分区", ab, true));
+  } else {
+    for (const entry of rec) dl.appendChild(buildRow(entry, false));
+  }
 
   const od = el("a", "onedrive", "☁ OneDrive 下载全部");
   od.href = CFG.onedrive;
 
   const info = el("div", "info");
-  const h2 = el("h2", null, "reComputer ");
-  h2.appendChild(el("span", null, board));
-  info.append(h2, dl, od);
+  info.append(dl, od);
 
   sec.append(photo, info);
   return sec;
