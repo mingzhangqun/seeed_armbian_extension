@@ -552,8 +552,9 @@ jobs:
         # every matrix dimension in them: "Recomputer-<board>_",
         # trixie/resolute (cli/gnome), "-crypt" (CRYPTROOT_ENABLE, from
         # armbian's fs-cryptroot-support extension) and "_AB_PART" (A/B).
-        # No rename, no staging — except files over GitHub's 2 GiB asset
-        # cap, which are split into .part chunks under .release-stage.
+        # No rename, no staging, no >2 GiB splitting: a file over GitHub's
+        # 2 GiB asset cap fails loudly here — it belongs on the OneDrive
+        # channel (release-onedrive.yml), not in .part chunks.
         working-directory: armbian-build
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -570,31 +571,19 @@ jobs:
             exit 1
           fi
 
-          # GitHub hard-caps a single release asset at 2 GiB — split bigger
-          # files into 1900m chunks instead of failing. Reassemble with
-          # `cat <file>.*.part > <file>`; the .sha256 sidecar verifies the
-          # reassembled original.
-          MAX=2147483648
-          args=()
-          for f in "${files[@]}" "${ota_files[@]}"; do
+          args=("${files[@]}" "${ota_files[@]}")
+
+          # GitHub hard-caps a single release asset at 2 GiB. No splitting:
+          # fail loudly so the oversized file is shipped via OneDrive
+          # (release-onedrive.yml) instead of .part chunks users must
+          # reassemble.
+          for f in "${args[@]}"; do
             size=$(stat -c%s "$f")
-            if [ "$size" -le "$MAX" ]; then
-              args+=("$f")
-              continue
+            if [ "$size" -gt 2147483648 ]; then
+              echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — over GitHub's 2 GiB release-asset cap; ship it via the OneDrive channel (release-onedrive.yml) instead"
+              exit 1
             fi
-            echo "  splitting $(basename "$f") ($(numfmt --to=iec "$size") > 2GiB)"
-            mkdir -p .release-stage
-            split -b 1900m --numeric-suffixes=1 --additional-suffix=.part \
-              "$f" ".release-stage/$(basename "$f")."
-            case "$(basename "$f")" in
-              *.img.xz) : ;;  # .img.xz.sha256 sidecar already in files[]
-              *) ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) \
-                   > ".release-stage/$(basename "$f").sha256" ;;
-            esac
           done
-          if compgen -G '.release-stage/*' > /dev/null; then
-            args+=(.release-stage/*)
-          fi
 
           echo "=== uploading ${#args[@]} assets to ${TAG} @ ${TARGET_REPO} ==="
           gh release upload "$TAG" "${args[@]}" --repo "$TARGET_REPO" --clobber
