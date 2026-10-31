@@ -3,21 +3,23 @@ name: "Seeed Build"
 on:
   workflow_dispatch:
     inputs:
-      # ── Boards (all on by default; missing boards are skipped in plan) ──
-      # keep the rk3576 variants grouped together, rk3588 last
-      board_rk3576:
+      # ── Boards (all on by default; missing boards are skipped in plan).
+      # Input names ARE the board ids — the plan step derives the board
+      # list from toJSON(inputs), so adding a board is one input here and
+      # nothing else. rk3576 variants grouped together, rk3588 last.
+      recomputer-rk3576-devkit:
         description: "Board: reComputer rk3576 DevKit"
         type: boolean
         default: true
-      board_rk3576_module:
+      recomputer-rk3576-module-devkit:
         description: "Board: reComputer rk3576 Module DevKit"
         type: boolean
         default: true
-      board_rk3576_industrial:
+      recomputer-rk3576-industrial:
         description: "Board: reComputer rk3576 Industrial"
         type: boolean
         default: true
-      board_rk3588:
+      recomputer-rk3588-devkit:
         description: "Board: reComputer rk3588 DevKit"
         type: boolean
         default: true
@@ -166,12 +168,15 @@ jobs:
               v = os.environ.get(name, "false").strip().lower()
               return v in ("true", "1", "yes", "on")
 
-          # Boards
-          boards = []
-          if flag("BOARD_RK3576"): boards.append("recomputer-rk3576-devkit")
-          if flag("BOARD_RK3588"): boards.append("recomputer-rk3588-devkit")
-          if flag("BOARD_RK3576_MODULE"): boards.append("recomputer-rk3576-module-devkit")
-          if flag("BOARD_RK3576_INDUSTRIAL"): boards.append("recomputer-rk3576-industrial")
+          # Boards come straight from the dispatch inputs — each input is
+          # named after its full board id (see the workflow inputs), so
+          # the form is the single source of truth. Adding a board is one
+          # input there and zero changes here.
+          inputs = json.loads(os.environ["INPUTS_JSON"])
+          boards = sorted(
+              k for k, v in inputs.items()
+              if k.startswith("recomputer-") and str(v).lower() in ("true", "1", "yes", "on")
+          )
 
           if not boards:
               raise SystemExit("ERROR: select at least one board")
@@ -262,10 +267,7 @@ jobs:
               f.write(f"count={len(entries)}\n")
           PY
         env:
-          BOARD_RK3576: ${{ inputs.board_rk3576 }}
-          BOARD_RK3588: ${{ inputs.board_rk3588 }}
-          BOARD_RK3576_MODULE: ${{ inputs.board_rk3576_module }}
-          BOARD_RK3576_INDUSTRIAL: ${{ inputs.board_rk3576_industrial }}
+          INPUTS_JSON: ${{ toJSON(inputs) }}
           OTA_AB:       ${{ inputs.ota_ab }}
           SECURE_BOOT:  ${{ inputs.secure_boot }}
           AB_REPO:      ${{ inputs.armbian_build_repo }}
