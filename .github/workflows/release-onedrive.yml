@@ -1,4 +1,4 @@
-name: "Release → OneDrive"
+name: "Release → OneDrive + Pages"
 
 # Mirror release assets to OneDrive when a pre-release is promoted to a
 # full release (uncheck "Set as pre-release" in the UI). The promotion
@@ -89,3 +89,91 @@ jobs:
         run: |
           gh release comment "$TAG" --repo "$GITHUB_REPOSITORY" --body \
             "Assets mirrored to OneDrive: \`armbian-images/${TAG}/\` and \`armbian-images/latest/\`"
+
+  # Static download page generated from THIS release's asset list, pushed
+  # to the gh-pages branch of the armbian-build repo the release was built
+  # from (read back from the build-info.json asset). Exact asset URLs are
+  # baked in at generation time — no fixed names or wildcards needed.
+  pages:
+    name: Publish the images page (build-source repo's Pages)
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (page generator)
+        uses: actions/checkout@v4
+
+      - name: Resolve tag, target repo and OneDrive link
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_TAG: ${{ inputs.tag || '' }}
+          EVENT_TAG: ${{ github.event.release.tag_name || '' }}
+          # Override per-repo via the ONEDRIVE_IMAGES_URL variable.
+          ONEDRIVE_URL: ${{ vars.ONEDRIVE_IMAGES_URL || 'https://1drv.ms/f/c/8010e556360efa2b/IgDtH1ct5SRzSb9FXRqg9l7nAewGGj-3L5zeg0nlphgAr4I' }}
+        run: |
+          set -euo pipefail
+          tag="${MANUAL_TAG:-$EVENT_TAG}"
+          [ -n "$tag" ] || { echo "::error::no tag (release event or manual input)"; exit 1; }
+          pre="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json prerelease --jq .prerelease)"
+          [ "$pre" = "false" ] || { echo "::error::$tag is still a pre-release — promote it first"; exit 1; }
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern build-info.json --dir . --clobber
+          repo="$(jq -r .armbian_build_repo build-info.json | cut -d: -f1)"
+          [ -n "$repo" ] && [ "$repo" != "null" ] || { echo "::error::build-info.json has no armbian_build_repo"; exit 1; }
+          echo "tag=$tag"   >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "od=$ONEDRIVE_URL" >> "$GITHUB_OUTPUT"
+          echo "images page target: $repo (built from $(jq -r .armbian_build_repo build-info.json))"
+
+      - name: Generate the page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          OD: ${{ steps.rel.outputs.od }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | [.name, .size, .url] | @tsv' > assets.tsv
+          python3 - <<'PY' > meta.json
+          import datetime, json, os
+          print(json.dumps({
+              "tag": os.environ["TAG"],
+              "generated_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC"),
+              "onedrive_url": os.environ["OD"],
+          }))
+          PY
+          python3 scripts/gen-images-page.py assets.tsv meta.json > images.html
+          echo "=== page $(wc -c < images.html) bytes ==="
+
+      - name: Push to the target repo's gh-pages
+        env:
+          GH_TOKEN: ${{ secrets.PAGES_TARGET_TOKEN }}
+          REPO: ${{ steps.rel.outputs.repo }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Blob → page-only tree → commit chained on gh-pages history.
+          BLOB=$(gh api --method POST "repos/$REPO/git/blobs" \
+            -f content="$(base64 -w0 images.html)" -f encoding=base64 --jq .sha)
+          TREE=$(gh api --method POST "repos/$REPO/git/trees" \
+            -f 'tree[][path]=images/index.html' -f 'tree[][mode]=100644' \
+            -f 'tree[][type]=blob' -f "tree[][sha]=$BLOB" --jq .sha)
+          PARENT=$(gh api "repos/$REPO/branches/gh-pages" --jq .commit.sha 2>/dev/null || true)
+          if [ -n "$PARENT" ]; then
+            COMMIT=$(gh api --method POST "repos/$REPO/git/commits" \
+              -f message="pages: images $TAG" -f tree="$TREE" -f "parents[]=$PARENT" --jq .sha)
+            gh api --method PATCH "repos/$REPO/git/refs/heads/gh-pages" -f sha="$COMMIT" --jq .object.sha
+          else
+            COMMIT=$(gh api --method POST "repos/$REPO/git/commits" \
+              -f message="pages: images $TAG" -f tree="$TREE" --jq .sha)
+            gh api --method POST "repos/$REPO/git/refs" -f ref=refs/heads/gh-pages -f sha="$COMMIT" --jq .ref
+          fi
+          # Pages on the gh-pages branch (legacy mode), then build.
+          gh api --method POST "repos/$REPO/pages" \
+            -f 'source[branch]=gh-pages' -f 'source[path]=/' >/dev/null 2>&1 || true
+          gh api --method PATCH "repos/$REPO/pages" \
+            -f 'source[branch]=gh-pages' -f 'source[path]=/' >/dev/null 2>&1 || true
+          gh api --method POST "repos/$REPO/pages/builds" >/dev/null 2>&1 || true
+          echo "page: https://${REPO%%/*}.github.io/${REPO#*/}/images/"
