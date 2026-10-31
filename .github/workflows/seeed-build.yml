@@ -3,7 +3,7 @@ name: "Seeed Build"
 on:
   workflow_dispatch:
     inputs:
-      # ── Boards (multi-select via checkboxes) ─────────────────────────
+      # ── Boards (all on by default; missing boards are skipped in plan) ──
       # keep the rk3576 variants grouped together, rk3588 last
       board_rk3576:
         description: "Board: reComputer rk3576 DevKit"
@@ -12,15 +12,15 @@ on:
       board_rk3576_module:
         description: "Board: reComputer rk3576 Module DevKit"
         type: boolean
-        default: false
+        default: true
       board_rk3576_industrial:
         description: "Board: reComputer rk3576 Industrial"
         type: boolean
-        default: false
+        default: true
       board_rk3588:
         description: "Board: reComputer rk3588 DevKit"
         type: boolean
-        default: false
+        default: true
 
       # ── Variants (always built, release bound to variant) ────────────
       # Every run builds BOTH variants:
@@ -150,6 +150,48 @@ jobs:
           if flag("BOARD_RK3576_MODULE"): boards.append("recomputer-rk3576-module-devkit")
           if flag("BOARD_RK3576_INDUSTRIAL"): boards.append("recomputer-rk3576-industrial")
 
+          if not boards:
+              raise SystemExit("ERROR: select at least one board")
+
+          # Boards missing from the selected armbian-build source are
+          # dropped here (e.g. industrial until it merges to main), so an
+          # all-boards default dispatch stays green. On API hiccups the
+          # board is kept — the build then fails loudly instead of being
+          # silently skipped.
+          import urllib.request, urllib.error
+          ab_repo = os.environ.get("AB_REPO", "Seeed-Studio/armbian-build:main")
+          repo, _, branch = ab_repo.partition(":")
+          branch = branch or "main"
+
+          def board_exists(board):
+              for ext in (".conf", ".csc"):
+                  url = f"https://api.github.com/repos/{repo}/contents/config/boards/{board}{ext}?ref={branch}"
+                  req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+                  try:
+                      with urllib.request.urlopen(req, timeout=15) as r:
+                          if r.status == 200:
+                              return True
+                  except urllib.error.HTTPError as e:
+                      if e.code == 404:
+                          continue
+                      raise
+              return False
+
+          present = []
+          for b in boards:
+              try:
+                  ok = board_exists(b)
+              except Exception as e:
+                  print(f"::warning::board check failed for {b} ({e}); keeping it")
+                  ok = True
+              if ok:
+                  present.append(b)
+              else:
+                  print(f"::notice::{b} is not in {repo}:{branch}; skipping it")
+          boards = present
+          if not boards:
+              raise SystemExit(f"ERROR: none of the selected boards exist in {repo}:{branch}")
+
           # Variants are fixed: cli on Debian 13, gnome desktop on
           # Ubuntu 26.04 — the release is bound to the variant.
           # (tier, release)
@@ -167,9 +209,6 @@ jobs:
           # own matrix entries alongside.
           securities = [""]
           if flag("SECURE_BOOT"): securities.append("secure-boot")
-
-          if not boards:
-              raise SystemExit("ERROR: select at least one board")
 
           entries = []
           for b, (t, r), p, s in itertools.product(boards, variants, otas, securities):
@@ -200,6 +239,7 @@ jobs:
           BOARD_RK3576_INDUSTRIAL: ${{ inputs.board_rk3576_industrial }}
           OTA_AB:       ${{ inputs.ota_ab }}
           SECURE_BOOT:  ${{ inputs.secure_boot }}
+          AB_REPO:      ${{ inputs.armbian_build_repo }}
 
       - name: Print summary
         run: |
