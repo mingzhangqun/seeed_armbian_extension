@@ -429,32 +429,12 @@ jobs:
           ln -sf "$GITHUB_WORKSPACE/scripts/build.sh" armbian-build/seeed-build.sh
           ls -la armbian-build/seeed-build.sh
 
-      - name: Restore docker image cache
-        uses: actions/cache@v4
-        id: docker_cache
-        with:
-          path: /tmp/armbian-docker-image.tar.zst
-          key: docker-armbian-ubuntu-noble-latest-v1
-        continue-on-error: true
-
-      - name: Load cached docker image
-        if: steps.docker_cache.outputs.cache-hit == 'true'
-        run: |
-          if [ -f /tmp/armbian-docker-image.tar.zst ]; then
-            echo "Loading cached docker image..."
-            zstd -d -T0 /tmp/armbian-docker-image.tar.zst -o /tmp/armbian-docker-image.tar
-            docker load -i /tmp/armbian-docker-image.tar
-            rm -f /tmp/armbian-docker-image.tar
-            docker images | grep armbian
-          fi
-
-      - name: Pull docker image (if not cached)
-        if: steps.docker_cache.outputs.cache-hit != 'true'
-        run: |
-          docker pull ${{ env.DOCKER_IMAGE }}
-          # Save for next run. zstd is faster and smaller than gzip for this workload.
-          docker save ${{ env.DOCKER_IMAGE }} | zstd -19 -T0 -o /tmp/armbian-docker-image.tar.zst
-          ls -lh /tmp/armbian-docker-image.tar.zst
+      - name: Pull docker image
+        # ghcr pulls are fast on GH runners (same network, parallel
+        # layers) — a cached tar.zst blob + zstd -d + docker load chain
+        # is no faster and served stale images through the moving
+        # "latest" tag (fixed cache key vs moving tag).
+        run: docker pull ${{ env.DOCKER_IMAGE }}
 
       - name: Restore armbian deb packages cache
         uses: actions/cache@v4
