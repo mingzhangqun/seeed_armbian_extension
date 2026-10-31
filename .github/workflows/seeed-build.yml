@@ -34,19 +34,16 @@ on:
         type: boolean
         default: false
 
-      # ── Security profiles (each becomes a separate matrix dimension) ──
-      security_plain:
-        description: "Security: none (unencrypted images)"
-        type: boolean
-        default: true
+      # ── Security profiles ──
+      # Unencrypted is mandatory — no checkbox; secure-boot is opt-in.
       secure_boot:
-        description: "Security: secure-boot (Secure U-Boot + secure-rootfs; requires DEV_CRT + PRIVATE_KEY_PEM secrets)"
+        description: "Security: secure-boot"
         type: boolean
         default: false
 
       # ── Other options ─────────────────────────────────────────────────
       desktop_tier:
-        description: "Desktop tier size for the gnome variant"
+        description: "Desktop tier size"
         required: true
         type: choice
         options:
@@ -55,7 +52,7 @@ on:
           - full
         default: mid
       armbian_build_repo:
-        description: "armbian-build source as owner/repo:branch (industrial board lives on rk3576-industrial until merged to main)"
+        description: "armbian-build source (owner/repo:branch)"
         required: true
         type: string
         default: "Seeed-Studio/armbian-build:main"
@@ -65,7 +62,7 @@ on:
         type: boolean
         default: false
       upload_release:
-        description: "Attach images/OTA to a draft release on this repo (GITHUB_TOKEN, no secrets)"
+        description: "Attach all generated images and OTA packages to a draft release (GITHUB_TOKEN)"
         required: false
         type: boolean
         default: true
@@ -175,14 +172,11 @@ jobs:
           otas = ["recovery"]
           if flag("OTA_AB"): otas.append("ab")
 
-          # Security profiles. Each checked option becomes its own matrix
-          # dimension — plain and secure-boot can be built in one run.
-          # If none checked, default to plain only.
-          securities = []
-          if flag("SEC_PLAIN"):    securities.append("")
-          if flag("SECURE_BOOT"):  securities.append("secure-boot")
-          if not securities:
-              securities = [""]  # unencrypted only
+          # Security profiles. Unencrypted ("") is always built —
+          # mandatory, no checkbox. Secure-boot is opt-in and adds its
+          # own matrix entries alongside.
+          securities = [""]
+          if flag("SECURE_BOOT"): securities.append("secure-boot")
 
           if not boards:
               raise SystemExit("ERROR: select at least one board")
@@ -215,7 +209,6 @@ jobs:
           BOARD_RK3576_MODULE: ${{ inputs.board_rk3576_module }}
           BOARD_RK3576_INDUSTRIAL: ${{ inputs.board_rk3576_industrial }}
           OTA_AB:       ${{ inputs.ota_ab }}
-          SEC_PLAIN:    ${{ inputs.security_plain }}
           SECURE_BOOT:  ${{ inputs.secure_boot }}
 
       - name: Print summary
