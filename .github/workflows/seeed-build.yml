@@ -56,6 +56,11 @@ on:
         required: true
         type: string
         default: "Seeed-Studio/armbian-build:main"
+      release_repo:
+        description: "Release target (owner/repo); empty = this repository"
+        required: false
+        type: string
+        default: ""
 
 env:
   PRIVATE_CCACHE: "yes"
@@ -243,6 +248,7 @@ jobs:
           echo "Total matrix entries: ${{ steps.gen.outputs.count }}"
           echo "Boards to release: ${{ steps.gen.outputs.boards }}"
           echo "Release tag: ${{ steps.gen.outputs.tag }}"
+          echo "Release target: ${{ inputs.release_repo || github.repository }}"
 
   # Creates the (single) draft release all build entries upload into
   # (always on — image/OTA assets always go to a draft release).
@@ -256,21 +262,31 @@ jobs:
     steps:
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Cross-repo targets need RELEASE_GH_TOKEN (PAT with
+          # contents:write on the target); same-repo falls back to
+          # this workflow's GITHUB_TOKEN when the secret is unset.
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ inputs.release_repo || github.repository }}
         run: |
           set -euo pipefail
           # Same-minute re-runs (or a re-dispatch) can hit an existing
           # release+tag: delete it and start fresh rather than reusing.
-          if gh release view "${{ needs.plan.outputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "${{ needs.plan.outputs.tag }}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
             echo "Release ${{ needs.plan.outputs.tag }} already exists — deleting old release + tag"
-            gh release delete "${{ needs.plan.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            gh release delete "${{ needs.plan.outputs.tag }}" --repo "$TARGET_REPO" --yes --cleanup-tag
+          fi
+          # --target must name a ref of the RELEASE repo — the workflow
+          # SHA only exists there when the target is the running repo.
+          target_args=()
+          if [ "$TARGET_REPO" = "$GITHUB_REPOSITORY" ]; then
+            target_args=(--target "$GITHUB_SHA")
           fi
           gh release create "${{ needs.plan.outputs.tag }}" \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "$TARGET_REPO" \
             --draft \
             --prerelease \
             --title "${{ needs.plan.outputs.tag }}" \
-            --target "$GITHUB_SHA" \
+            "${target_args[@]}" \
             --notes "Assets are attached by the build matrix; the body is generated on publish. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   build:
@@ -522,7 +538,8 @@ jobs:
         # cap, which are split into .part chunks under .release-stage.
         working-directory: armbian-build
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ inputs.release_repo || github.repository }}
         run: |
           set -euo pipefail
           TAG="${{ needs.plan.outputs.tag }}"
@@ -561,9 +578,9 @@ jobs:
             args+=(.release-stage/*)
           fi
 
-          echo "=== uploading ${#args[@]} assets to ${TAG} ==="
-          gh release upload "$TAG" "${args[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+          echo "=== uploading ${#args[@]} assets to ${TAG} @ ${TARGET_REPO} ==="
+          gh release upload "$TAG" "${args[@]}" --repo "$TARGET_REPO" --clobber
+          gh release view "$TAG" --repo "$TARGET_REPO" \
             --json assets --jq '"release now has \(.assets | length) assets"'
 
       - name: Upload output/images/ as-is
@@ -585,12 +602,13 @@ jobs:
 
   release:
     needs: [plan, build]
-    # ONE release covering ALL boards, hosted entirely on this repo:
-    # assets were attached to the draft release by the build entries;
-    # this job generates the download tables from the release's own
-    # asset list and publishes it (draft -> pre-release). Promotion to
-    # an official release is manual (uncheck "Set as pre-release").
-    # Previous releases are kept — clean them up manually if needed.
+    # ONE release covering ALL boards, hosted on the release target
+    # (release_repo input, default = this repository): assets were
+    # attached to the draft release by the build entries; this job
+    # generates the download tables from the release's own asset list
+    # and publishes it (draft -> pre-release). Promotion to an official
+    # release is manual (uncheck "Set as pre-release"). Previous
+    # releases are kept — clean them up manually if needed.
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -606,12 +624,13 @@ jobs:
       # extension) and "_AB_PART" (A/B OTA).
       - name: Generate release document from attached assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ inputs.release_repo || github.repository }}
           BOARDS: ${{ needs.plan.outputs.boards }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+          gh release view "$TAG" --repo "$TARGET_REPO" --json assets \
             --jq '.assets[] | [.name, .size, .url] | @tsv' > /tmp/assets.tsv
           [ -s /tmp/assets.tsv ] || { echo "::error::release $TAG has no assets"; exit 1; }
 
@@ -729,11 +748,12 @@ jobs:
 
       - name: Publish release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ inputs.release_repo || github.repository }}
         run: |
           set -euo pipefail
           gh release edit "${{ needs.plan.outputs.tag }}" \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "$TARGET_REPO" \
             --draft=false \
             --prerelease \
             --notes-file release-out/CHANGELOG.md
