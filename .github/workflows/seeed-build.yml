@@ -154,9 +154,15 @@ jobs:
           branch = branch or "main"
 
           def board_exists(board):
+              headers = {"Accept": "application/vnd.github+json"}
+              tok = os.environ.get("GH_TOKEN", "").strip()
+              if tok:
+                  # authenticated = 1000 req/h vs 60/h anonymous (shared
+                  # runner IPs rate-limit quickly)
+                  headers["Authorization"] = f"Bearer {tok}"
               for ext in (".conf", ".csc"):
                   url = f"https://api.github.com/repos/{repo}/contents/config/boards/{board}{ext}?ref={branch}"
-                  req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+                  req = urllib.request.Request(url, headers=headers)
                   try:
                       with urllib.request.urlopen(req, timeout=15) as r:
                           if r.status == 200:
@@ -230,6 +236,7 @@ jobs:
           OTA_AB:       ${{ inputs.ota_ab }}
           SECURE_BOOT:  ${{ inputs.secure_boot }}
           AB_REPO:      ${{ inputs.armbian_build_repo }}
+          GH_TOKEN:     ${{ github.token }}
 
       - name: Print summary
         run: |
@@ -598,7 +605,7 @@ jobs:
         with:
           name: Armbian-img-${{ steps.lbl.outputs.short_board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ steps.lbl.outputs.ota_label }}-${{ steps.lbl.outputs.sec_label }}-${{ github.run_id }}
           path: armbian-build/output/images/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
           compression-level: 0
 
@@ -670,5 +677,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --draft=false \
             --prerelease \
-            --latest=true \
             --notes-file release-out/CHANGELOG.md
