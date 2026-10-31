@@ -61,11 +61,6 @@ on:
         required: false
         type: boolean
         default: false
-      publish_release:
-        description: "Publish ONE GitHub Release covering all boards (assets attached by build entries)"
-        required: false
-        type: boolean
-        default: false
 
 env:
   PRIVATE_CCACHE: "yes"
@@ -626,9 +621,10 @@ jobs:
     # ONE release covering ALL boards, hosted entirely on this repo:
     # assets were attached to the draft release by the build entries;
     # this job generates the download tables from the release's own
-    # asset list and publishes it (draft -> pre-release). Previous
-    # releases are kept — clean them up manually if needed.
-    if: ${{ inputs.publish_release && !cancelled() && needs.build.result == 'success' }}
+    # asset list and publishes it (draft -> pre-release). Promotion to
+    # an official release is manual (uncheck "Set as pre-release").
+    # Previous releases are kept — clean them up manually if needed.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
