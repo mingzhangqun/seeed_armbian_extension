@@ -514,27 +514,21 @@ jobs:
           ls -lh output/images/
 
       - name: Upload images/OTA to draft release
-        # Release assets live in ONE flat list, so every file is renamed
-        # (via a hardlink staging dir — gh release upload has no rename)
-        # to carry a <board>-<ota>[-sec]- prefix. The release-body
-        # generator parses that prefix back out; plain and secure-boot
-        # images of the same board+release+tier have IDENTICAL filenames
-        # and would clobber each other without it.
+        # Assets keep their ORIGINAL filenames — the build already encodes
+        # every matrix dimension in them: "Recomputer-<board>_",
+        # trixie/resolute (cli/gnome), "-crypt" (CRYPTROOT_ENABLE, from
+        # armbian's fs-cryptroot-support extension) and "_AB_PART" (A/B).
+        # No rename, no staging — except files over GitHub's 2 GiB asset
+        # cap, which are split into .part chunks under .release-stage.
         working-directory: armbian-build
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="${{ needs.plan.outputs.tag }}"
-          case "${{ matrix.profile }}" in
-            ab) ota=ab ;;
-            *)  ota=rec ;;
-          esac
-          if [ -n "${{ matrix.security }}" ]; then sec=sec; else sec=nosec; fi
-          PREFIX="${{ steps.lbl.outputs.short_board }}-${ota}-${sec}"
 
           shopt -s nullglob
-          files=(output/images/*.img.xz output/images/*.sha256 output/images/*.sha)
+          files=(output/images/*.img.xz output/images/*.sha256 output/images/*.sha output/images/*.img.txt)
           ota_files=(output/images/${{ matrix.board }}/ota/*)
           if [ ${#files[@]} -eq 0 ] && [ ${#ota_files[@]} -eq 0 ]; then
             echo "::error::nothing found under output/images/ to upload"
@@ -543,39 +537,32 @@ jobs:
 
           # GitHub hard-caps a single release asset at 2 GiB — split bigger
           # files into 1900m chunks instead of failing. Reassemble with
-          # `cat <file>.*.part > <file>`; the .sha256 sidecar (compress
-          # step for .img.xz, generated here for others) verifies the
+          # `cat <file>.*.part > <file>`; the .sha256 sidecar verifies the
           # reassembled original.
           MAX=2147483648
-
-          # Hardlink staging (no data copy, same filesystem) — outside
-          # output/images/ so the artifact step below doesn't pick up
-          # the renamed duplicates.
-          stage=".release-stage"
-          rm -rf "$stage" && mkdir -p "$stage"
-          split_files=0
+          args=()
           for f in "${files[@]}" "${ota_files[@]}"; do
-            staged="${PREFIX}-$(basename "$f")"
             size=$(stat -c%s "$f")
             if [ "$size" -le "$MAX" ]; then
-              ln "$f" "$stage/${staged}"
+              args+=("$f")
               continue
             fi
             echo "  splitting $(basename "$f") ($(numfmt --to=iec "$size") > 2GiB)"
+            mkdir -p .release-stage
             split -b 1900m --numeric-suffixes=1 --additional-suffix=.part \
-              "$f" "$stage/${staged}."
+              "$f" ".release-stage/$(basename "$f")."
             case "$(basename "$f")" in
               *.img.xz) : ;;  # .img.xz.sha256 sidecar already in files[]
               *) ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) \
-                   > "$stage/${staged}.sha256" ;;
+                   > ".release-stage/$(basename "$f").sha256" ;;
             esac
-            split_files=$((split_files + 1))
           done
+          if compgen -G '.release-stage/*' > /dev/null; then
+            args+=(.release-stage/*)
+          fi
 
-          total=$(( ${#files[@]} + ${#ota_files[@]} ))
-          echo "=== uploading ${total} assets (${split_files} split >2GiB, ${PREFIX}-*) to ${TAG} ==="
-          gh release upload "$TAG" "$stage"/* --repo "$GITHUB_REPOSITORY" --clobber
-          rm -rf "$stage"
+          echo "=== uploading ${#args[@]} assets to ${TAG} ==="
+          gh release upload "$TAG" "${args[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '"release now has \(.assets | length) assets"'
 
@@ -612,9 +599,11 @@ jobs:
     steps:
       # One compact table row per board x security: short link labels
       # (img / sha256 / OTA / checksums) instead of raw asset URLs.
-      # Assets carry the <board>-<rec|ab>-<nosec|sec>- upload prefix;
-      # the variant comes from the trixie/resolute token in the name
-      # (cli=trixie, gnome=resolute — bound in the plan step).
+      # Assets keep their original filenames, which self-describe every
+      # matrix dimension: "Recomputer-<board>_", trixie/resolute
+      # (cli=trixie, gnome=resolute — bound in the plan step), "-crypt"
+      # (CRYPTROOT_ENABLE, added by armbian's fs-cryptroot-support
+      # extension) and "_AB_PART" (A/B OTA).
       - name: Generate release document from attached assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -633,30 +622,32 @@ jobs:
           tag = os.environ["TAG"]
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
 
-          pat = re.compile(r"^(.+)-(rec|ab)-(nosec|sec)-(.+)$")
+          board_pat = re.compile(r"Recomputer-([A-Za-z0-9-]+?)_")
           slots = {}  # (short, sec, ota) -> {variant: {img/sha/parts/ota_pkg/ota_chk}}
           for line in open("/tmp/assets.tsv"):
               name, size, url = line.rstrip("\n").split("\t")
-              m = pat.match(name)
+              m = board_pat.search(name)
               if not m:
-                  continue  # unprefixed asset — not ours
-              short, ota, sec, rest = m.groups()
-              if "trixie" in rest:
+                  continue  # not one of ours
+              short = m.group(1).replace("-devkit", "", 1)
+              sec = "sec" if "-crypt" in name else "nosec"
+              ota = "ab" if "_AB_PART" in name else "rec"
+              if "trixie" in name:
                   var = "cli"
-              elif "resolute" in rest:
+              elif "resolute" in name:
                   var = "gnome"
               else:
                   continue
               d = slots.setdefault((short, sec, ota), {}).setdefault(var, {})
-              if rest.endswith(".img.xz"):
+              if name.endswith(".img.xz"):
                   d["img"] = (size, url)
-              elif rest.endswith(".img.xz.sha256"):
+              elif name.endswith(".img.xz.sha256"):
                   d["sha"] = (size, url)
-              elif re.search(r"\.\d+\.part$", rest):
+              elif re.search(r"\.\d+\.part$", name):
                   d.setdefault("parts", []).append((int(size), url))
-              elif rest.endswith("_OTA.tar.gz"):
+              elif name.endswith("_OTA.tar.gz"):
                   d["ota_pkg"] = (size, url)
-              elif rest.endswith("_OTA.checksums"):
+              elif name.endswith("_OTA.checksums"):
                   d["ota_chk"] = (size, url)
 
           def short_of(board):
