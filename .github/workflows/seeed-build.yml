@@ -72,6 +72,13 @@ env:
   VENDOR: "Armbian"
   DOCKER_IMAGE: "ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest"
 
+# Runs must not overlap: init-release purges the OneDrive pre-release
+# staging dir and the build matrix fills it — a concurrent run would
+# purge mid-upload. Queue (don't cancel): a 2h build should finish.
+concurrency:
+  group: seeed-build
+  cancel-in-progress: false
+
 jobs:
   preflight:
     # Fail fast on malformed secure-boot credentials BEFORE the
@@ -281,7 +288,8 @@ jobs:
           echo "Release target: ${{ inputs.release_repo || github.repository }}"
 
   # Creates the (single) draft release all build entries upload into
-  # (always on — image/OTA assets always go to a draft release).
+  # (always on — image/OTA assets always go to a draft release), and
+  # resets the OneDrive pre-release staging directory.
   init-release:
     name: Init draft release
     needs: plan
@@ -290,6 +298,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Reset OneDrive pre-release staging
+        # Purge ONCE per run, here — never inside the build matrix
+        # (parallel entries would purge each other's uploads). build
+        # NEEDS this job, so the reset is guaranteed to complete before
+        # any entry starts uploading. Filenames change almost every
+        # build (trunk version, kernel bump, -crypt/_AB_PART), so the
+        # stale files must go; promote mirrors from the release assets
+        # and does not depend on this directory.
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RCLONE_CONFIG" ]; then
+            echo "::notice::RCLONE_CONFIG is not set — skipping OneDrive staging reset"
+            exit 0
+          fi
+          mkdir -p ~/.config/rclone
+          # setup-rclone keeps the conf base64-encoded; accept either form
+          if printf '%s' "$RCLONE_CONFIG" | base64 -d 2>/dev/null | grep -q '^\['; then
+            printf '%s' "$RCLONE_CONFIG" | base64 -d > ~/.config/rclone/rclone.conf
+          else
+            printf '%s' "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+          fi
+          # purge removes the directory itself; the next copy recreates
+          # it. Missing dir on the first run is fine, not an error.
+          rclone purge seeed-storage:armbian-images/pre-release --contimeout 15s 2>/dev/null \
+            || echo "pre-release/ did not exist (first run) — nothing to purge"
+
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
           # Cross-repo targets need RELEASE_GH_TOKEN (PAT with
