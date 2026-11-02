@@ -156,7 +156,7 @@ const ROW_LABEL = { img: "Image", ota: "OTA",
 // Build info (txt) is not a button — it lives on the meta line
 const GROUPS = [["img", "sha256"], ["ota", "chk"]];
 
-function parse(name, size, url) {
+function parse(name, size, url, secure, lk) {
   const m = name.match(BOARD_PAT);
   if (!m) return null;
   const board = m[1];
@@ -183,7 +183,10 @@ function parse(name, size, url) {
   // version "26.11.0-trunk" → "26.11.0"; release codename + kernel
   const vm = name.match(VER_PAT);
   const rm = name.match(REL_PAT);
+  // secure comes from the mirror's "<profile>-secure-boot/" dir, not the
+  // filename — plain and secure builds share identical filenames by design.
   return { board: board, variant: variant, mode: mode, crypt: crypt,
+           secure: !!secure, lk: lk,
            kind: kind, name: name, size: size, url: url,
            ver: vm ? vm[1].replace(/-.*$/, "") : "",
            release: rm ? rm[1] : "",
@@ -204,14 +207,16 @@ const boardRank = b => { const i = BOARD_ORDER.indexOf(b); return i < 0 ? BOARD_
 function group(assets) {
   const map = new Map();
   for (const a of assets || []) {
-    const r = parse(a.name, a.size, a.browser_download_url);
+    const r = parse(a.name, a.size, a.browser_download_url, a.secure, a.lk);
     if (!r) continue;
-    const key = [r.board, r.variant, r.mode, r.crypt].join("\t");
+    // secure joins the key: plain and secure twins share the filename, so
+    // without it one silently overwrites the other's links.
+    const key = [r.board, r.variant, r.mode, r.crypt, r.secure].join("\t");
     if (!map.has(key))
       map.set(key, { board: r.board, variant: r.variant, mode: r.mode,
-                     crypt: r.crypt, ver: r.ver, release: r.release,
+                     crypt: r.crypt, secure: r.secure, ver: r.ver, release: r.release,
                      kernel: r.kernel, odboard: (a && a.board) || "", d: {} });
-    map.get(key).d[r.kind] = { name: r.name, size: a.size, url: a.browser_download_url };
+    map.get(key).d[r.kind] = { name: r.name, size: a.size, url: a.browser_download_url, lk: a.lk };
   }
   const rank = e => (e.variant === "cli" ? 0 : 4)
                   + (e.mode === "recovery" ? 0 : 2) + (e.crypt ? 1 : 0);
@@ -243,8 +248,7 @@ function buildRow(entry, opts, slot) {
   if (entry.d && entry.d.txt) {
     const v = entry.d.txt;
     const a = el("a", "row-info", "Build info");
-    const linkKey = Object.keys(LINKS).find(k => k.endsWith("/" + v.name));
-    a.href = (linkKey && LINKS[linkKey]) || v.url || "#";
+    a.href = (v.lk && LINKS[v.lk]) || v.url || "#";
     a.target = "_blank";
     a.rel = "noopener";
     head.appendChild(a);
@@ -263,11 +267,10 @@ function buildRow(entry, opts, slot) {
       const primary = kind === "img" || kind === "ota";
       const cls = primary ? (opts.secure ? "btn secure" : "btn primary") : "btn";
       const a = el("a", cls, ROW_LABEL[kind]);
-      // Use embedded share link from build-time rclone link.
-      // LINKS key is the full path under pre-release/ ("ab/Armbian_....img.xz"),
-      // so look it up by name (which parse() extracted from the filename).
-      const linkKey = Object.keys(LINKS).find(k => k.endsWith("/" + v.name));
-      a.href = (linkKey && LINKS[linkKey]) || v.url || "#";
+      // Use the embedded share link from the build-time rclone walk via
+      // the exact LINKS key carried on the asset — filenames repeat across
+      // profile dirs, so a lookup by name can grab the twin's link.
+      a.href = (v.lk && LINKS[v.lk]) || v.url || "#";
       grp.appendChild(a);
     }
     links.appendChild(grp);
@@ -305,11 +308,13 @@ function buildSection(board, entries, slot) {
   photo.appendChild(img);
 
   // downloads: mode × secure → up to four boxes, stacked:
-  // Recovery / A/B / Recovery Secure / A/B Secure (each only if non-empty)
-  const rec  = entries.filter(e => e.mode !== "ab" && !e.crypt);
-  const ab   = entries.filter(e => e.mode === "ab" && !e.crypt);
-  const recS = entries.filter(e => e.mode !== "ab" && e.crypt);
-  const abS  = entries.filter(e => e.mode === "ab" && e.crypt);
+  // Recovery / A/B / Recovery Secure / A/B Secure (each only if non-empty).
+  // secure = the mirror's -secure-boot profile dir (see slotAssets) — NOT
+  // the -crypt filename marker, which is encryption and self-describes.
+  const rec  = entries.filter(e => e.mode !== "ab" && !e.secure);
+  const ab   = entries.filter(e => e.mode === "ab" && !e.secure);
+  const recS = entries.filter(e => e.mode !== "ab" && e.secure);
+  const abS  = entries.filter(e => e.mode === "ab" && e.secure);
   const boxes = el("div", "modeboxes");
   boxes.appendChild(buildModeBox("Recovery", "Single partition", rec,
                                  { suppressAb: false }, slot));
@@ -347,23 +352,30 @@ function slotsFrom(list) {
   return { latest: latest, previous: previous, pre: pre };
 }
 
-// OneDrive-mode: build job generates links__<board>__<entry>.json with
-// rclone share links for each file. The page embeds these as LINKS — no
-// runtime fetch needed (CORS blocks github.io → github.com asset fetches).
-const MANIFEST_PAT = /^manifest__.*\.json$/;
-function slotAssets(rel) {
-  // LINKS keys are "<profile>[-secure-boot]/<file>" — strip the profile
-  // prefix so parse() sees the bare filename; the slot grouping already
-  // tells us the mode. Size is 0 (rclone link doesn't report it).
-  return Object.keys(LINKS).map(path => {
-    const name = path.split("/").pop();
-    return { name, size: 0, browser_download_url: LINKS[path] };
-  });
+// OneDrive-mode: the build-time rclone walk embeds every file under every
+// slot as LINKS — no runtime fetch needed (CORS blocks github.io →
+// github.com asset fetches).
+function slotAssets(slotDir) {
+  // Keys are "<slot>/<profile>[-secure-boot]/[ota/]<file>". Scope to this
+  // slot's subtree so the three slot sections don't all render the whole
+  // mirror; the -secure-boot profile dir is the ONLY secure marker
+  // (filenames are identical across profiles) — carry it into `secure`
+  // and keep the key on the asset for exact link lookups. Size is 0
+  // (rclone link doesn't report it).
+  return Object.keys(LINKS)
+    .filter(path => path.startsWith(slotDir + "/"))
+    .map(path => ({
+      name: path.split("/").pop(),
+      size: 0,
+      browser_download_url: LINKS[path],
+      secure: (path.split("/")[1] || "").endsWith("-secure-boot"),
+      lk: path,
+    }));
 }
 
-async function splitBoards(rel) {
+async function splitBoards(rel, slotDir) {
   const sections = new Map();
-  for (const e of group(slotAssets(rel))) {
+  for (const e of group(slotAssets(slotDir))) {
     if (!sections.has(e.board)) sections.set(e.board, []);
     sections.get(e.board).push(e);
   }
@@ -403,7 +415,7 @@ async function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
       "Build completed on all boards — pending on-device verification before promotion to stable."));
   const slotDir = kind === "latest" ? (rel.prerelease ? "pre-release" : "latest")
                 : kind === "pre" ? "pre-release" : "previous";
-  const sections = await splitBoards(rel);
+  const sections = await splitBoards(rel, slotDir);
   // Empty slot (no assets parse into boards) → hide entirely. This happens
   // for stale/foreign releases whose assets don't match our naming scheme.
   if (sections.size === 0) return null;
