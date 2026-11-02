@@ -46,34 +46,25 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
-      - name: Discover boards on the mirror
-        id: boards
+      - name: Check the mirror is reachable
+        id: mirror
         run: |
           set -euo pipefail
-          # The mirror is the source of truth for what the page can show.
           # The release repo follows the owner/armbian-build convention
           # (same resolution as plan in build-images.yml).
           release_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
           echo "release_repo=$release_repo" >> "$GITHUB_OUTPUT"
+          echo "release repo: $release_repo"
           # "lsd failed" and "lsd came back empty" are different situations:
           # the first means OneDrive is unreachable and a refresh would
           # strip every link off the page for no reason (hard fail); the
           # second is a legitimately emptied mirror and still deploys an
-          # empty page.
-          if ! rclone lsd seeed-storage:armbian/images --contimeout 15s > lsd.txt 2> lsd.err; then
+          # empty page. Boards need no discovery — the slot-first walk
+          # lists the whole images/ tree in one go.
+          if ! rclone lsd seeed-storage:armbian/images --contimeout 15s > /dev/null 2> lsd.err; then
             echo "::error::rclone lsd failed — OneDrive unreachable? $(tr '\n' ' ' < lsd.err)"
             exit 1
           fi
-          awk '{print $NF}' lsd.txt > boards.txt
-          if [ -s boards.txt ]; then
-            boards="$(python3 -c 'import json; print(json.dumps([l.strip() for l in open("boards.txt") if l.strip()]))')"
-          else
-            echo "::warning::armbian/images/ is empty — deploying an empty page"
-            boards="[]"
-          fi
-          echo "boards=$boards" >> "$GITHUB_OUTPUT"
-          echo "boards: $boards"
-          echo "release repo: $release_repo"
 
       - name: Deploy images page
         uses: ./.github/actions/deploy-pages
@@ -81,9 +72,8 @@ jobs:
           tag: refresh
           # Upstream: page on the build-source repo (cross-repo API push).
           # Forks: deploy to THIS repo's Pages via the actions deployment.
-          repo: ${{ github.repository_owner == 'Seeed-Studio' && steps.boards.outputs.release_repo || github.repository }}
-          release_repo: ${{ steps.boards.outputs.release_repo }}
-          boards: ${{ steps.boards.outputs.boards }}
+          repo: ${{ github.repository_owner == 'Seeed-Studio' && steps.mirror.outputs.release_repo || github.repository }}
+          release_repo: ${{ steps.mirror.outputs.release_repo }}
           has_rclone: "true"
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}

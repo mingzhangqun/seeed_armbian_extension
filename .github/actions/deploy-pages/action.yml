@@ -11,9 +11,6 @@ inputs:
   release_repo:
     description: "Repo where the release lives (owner/repo)"
     required: true
-  boards:
-    description: "JSON array of board ids"
-    required: true
   has_rclone:
     description: "Whether RCLONE_CONFIG is available (true/false)"
     required: true
@@ -68,39 +65,52 @@ runs:
     - name: Walk OneDrive and collect share links
       if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
       shell: bash
-      env:
-        BOARDS: ${{ inputs.boards }}
       run: |
         set -euo pipefail
-        python3 - > links.json <<'PY'
-        import json, os, subprocess, sys
+        # One recursive listing covers the whole mirror — the slot-first
+        # layout (<slot>/<board>/<sub>/<file>) needs no board list, the
+        # page discovers boards from the walk itself.
+        python3 - > walk.json <<'PY'
+        import json, subprocess, sys
         from concurrent.futures import ThreadPoolExecutor
 
-        boards = json.loads(os.environ["BOARDS"])
-        paths = []
-        failed_boards = 0
-        for b in boards:
-            base = f"seeed-storage:armbian/images/{b}"
-            r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", base],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                print(f"::warning::lsjson failed for {b}: {r.stderr.strip()}", file=sys.stderr)
-                failed_boards += 1
-                continue
-            for it in json.loads(r.stdout):
-                paths.append((base, it["Path"]))
-        if boards and failed_boards == len(boards):
-            # Every board failed while rclone itself is configured — the
-            # mirror is unreachable. Rendering anyway would deploy a page
-            # with LINKS={} and strip every link for no reason.
-            print(f"::error::lsjson failed for all {len(boards)} boards — OneDrive unreachable? Refusing to render a stripped page.", file=sys.stderr)
+        base = "seeed-storage:armbian/images"
+        r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", base],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            # The mirror is unreachable. Rendering anyway would deploy a
+            # page with LINKS={} and strip every link for no reason.
+            print(f"::error::lsjson failed for {base}: {r.stderr.strip()}", file=sys.stderr)
             sys.exit(1)
-        # Progress goes to stderr — stdout is redirected into links.json
-        # and must contain ONLY the JSON document.
+        files = json.loads(r.stdout or "[]")
+
+        # Slot-first layout: paths are "<slot>/<board>/<sub>/[ota/]<file>"
+        # plus the per-slot identity files "<slot>/tag" — those are read
+        # for CONTENT (the tag names the build the slot holds) and never
+        # share-linked.
+        SLOT_DIRS = ("pre-release", "latest", "previous")
+        tag_slots, paths = [], []
+        for it in files:
+            p = it["Path"]
+            parts = p.split("/")
+            if len(parts) == 2 and parts[1] == "tag" and parts[0] in SLOT_DIRS:
+                tag_slots.append(parts[0])
+            else:
+                paths.append(p)
+
+        slots = {}
+        for slot in tag_slots:
+            c = subprocess.run(["rclone", "cat", f"{base}/{slot}/tag"],
+                               capture_output=True, text=True)
+            if c.returncode == 0 and c.stdout.strip():
+                slots[slot] = c.stdout.strip()
+            else:
+                print(f"::warning::could not read {slot}/tag — slot renders untagged", file=sys.stderr)
+
+        print(f"slot tags: {json.dumps(slots)}", file=sys.stderr)
         print(f"collecting share links for {len(paths)} files …", file=sys.stderr)
 
-        def make_link(args):
-            base, rel = args
+        def make_link(rel):
             lr = subprocess.run(["rclone", "link", "--timeout", "60s", f"{base}/{rel}"],
                                 capture_output=True, text=True)
             ok = lr.returncode == 0
@@ -127,9 +137,15 @@ runs:
             # all links from the page.
             print(f"::error::every rclone link call failed ({link_failures}/{len(paths)}) — OneDrive throttled? Refusing to deploy a stripped page.", file=sys.stderr)
             sys.exit(1)
-        print(json.dumps(links))
+        print(json.dumps({"links": links, "slots": slots}))
         PY
-        echo "links collected: $(python3 -c 'import json; print(len(json.load(open("links.json"))))')"
+        python3 - <<'PY'
+        import json
+        d = json.load(open("walk.json"))
+        json.dump(d["links"], open("links.json", "w"))
+        json.dump(d["slots"], open("slots.json", "w"))
+        print(f"links collected: {len(d['links'])}, slot tags: {d['slots']}")
+        PY
 
     - name: Render the page
       if: steps.gate.outputs.skip != 'true'
@@ -146,8 +162,10 @@ runs:
 
         if [ "${HAS_RCLONE:-}" = "true" ] && [ -f links.json ]; then
           export PAGE_LINKS="$(cat links.json)"
+          export PAGE_SLOTS="$(cat slots.json)"
         else
           export PAGE_LINKS="{}"
+          export PAGE_SLOTS="{}"
         fi
 
         # Fetch release list at build time and embed it — eliminates the
@@ -158,14 +176,17 @@ runs:
           > releases.json
         export PAGE_RELEASES="$(cat releases.json)"
 
-        envsubst '$PAGE_REPO $PAGE_LINKS $PAGE_RELEASES' \
+        envsubst '$PAGE_REPO $PAGE_LINKS $PAGE_RELEASES $PAGE_SLOTS' \
           < scripts/images-page.template.html > images.html
         grep -q "const CFG = Object.freeze({ repo: \"$PAGE_REPO\" });" images.html \
           || { echo "::error::repo not baked into the page"; exit 1; }
-        # LINKS must bake into a syntactically valid JS object literal —
-        # catches stray stdout polluting links.json upstream of envsubst.
+        # LINKS/SLOTS must bake into syntactically valid JS object literals —
+        # catches stray stdout polluting links.json/slots.json upstream of
+        # envsubst.
         grep -qE '^const LINKS = \{.*\};$' images.html \
           || { echo "::error::LINKS did not render as a JSON object — links.json is malformed?"; exit 1; }
+        grep -qE '^const SLOTS = \{.*\};$' images.html \
+          || { echo "::error::SLOTS did not render as a JSON object — slots.json is malformed?"; exit 1; }
         echo "=== page $(wc -c < images.html) bytes ==="
 
     # ── actions mode: deploy through the run's Pages deployment ──

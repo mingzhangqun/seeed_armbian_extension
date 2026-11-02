@@ -81,17 +81,29 @@ needs **before** the multi-hour build starts:
 
 Every run creates a draft pre-release in `release_repo` (a same-tag release
 from a re-run is deleted first). With `RCLONE_CONFIG` set, image/OTA
-binaries are uploaded to the OneDrive `pre-release/` slot and the release
+binaries are uploaded to the OneDrive mirror's slot-first tree
+
+```
+armbian/images/<slot>/<board>/<profile>[-secure-boot]/{*.img.xz,*.sha256,ota/}
+```
+
+where `<slot>` is `pre-release`, `latest` or `previous`, and the release
 carries only `build-info.json` — the promote workflow validates the
-OneDrive tree structurally against the build's entry list, so no per-entry
-manifests are attached. Without `RCLONE_CONFIG` (fork mode), the binaries
-are attached to the release itself — a file over GitHub's 2 GiB asset cap
-fails the upload and needs an OneDrive-mode run to ship. Download tables
-for the published slots live on the Pages download page. Promoting cleans
-up superseded JSON-only pre-releases, so the releases page stays at one
-asset per release. `Pages - Refresh` (`refresh-pages.yml`) is a
-dispatch-only re-render of the page against the live mirror — reach for
-it after manual OneDrive cleanup.
+OneDrive tree structurally against the build's entry list (and that the
+slot's `tag` file names the release being promoted), so no per-entry
+manifests are attached. Once every matrix entry has uploaded, the release
+job stamps the build's tag into `pre-release/tag` — that file is the
+page's slot binding — and flips the release visible. Promoting rotates
+the whole slot tree with one server-side move per slot
+(`previous ⟵ latest ⟵ pre-release`, all boards together) and carries the
+`tag` file into `latest/`/`previous/` with it. Without `RCLONE_CONFIG`
+(fork mode), the binaries are attached to the release itself — a file
+over GitHub's 2 GiB asset cap fails the upload and needs an OneDrive-mode
+run to ship. Download tables for the published slots live on the Pages
+download page. Promoting cleans up superseded JSON-only pre-releases, so
+the releases page stays at one asset per release. `Pages - Refresh`
+(`refresh-pages.yml`) is a dispatch-only re-render of the page against
+the live mirror — reach for it after manual OneDrive cleanup.
 
 Everything CI does is the documented local flow — the wrapper staging step,
 profiles, and secrets map 1:1 to [02-build-reference.md](02-build-reference.md).

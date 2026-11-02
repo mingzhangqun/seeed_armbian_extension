@@ -2,22 +2,23 @@
 <!--
   Images download page — static template.
 
-  Rendered by promote-images.yml's pages job with envsubst; the ONLY
-  substitution is $PAGE_REPO (release repo, for the API fetch). The
-  inline JS deliberately uses no backtick template literals: ${...}
-  sequences would collide with envsubst. Keep it that way.
+  Rendered by the images-page jobs (build/test/promote/refresh) with
+  envsubst; the substitutions are $PAGE_REPO, $PAGE_LINKS, $PAGE_RELEASES
+  and $PAGE_SLOTS. The inline JS deliberately uses no backtick template
+  literals: ${...} sequences would collide with envsubst. Keep it that way.
 
   Data flow (all client-side at browse time):
-    * /releases list → three slots: newest full release = Stable,
-      second full = Previous, newest prerelease = Pre-release (hidden
-      when older than Stable — already promoted)
-    * each slot's file list comes from that release's manifest__*.json
-      assets (OneDrive mode: builds upload images to OneDrive and only
-      small manifest fragments to the release); releases without
-      manifests fall back to their raw asset list (GitHub-assets mode)
-    * EVERY download button is a per-file OneDrive link derived from
-      the folder share link (shares/u!<b64url>/root:/armbian/images/
-      <board>/<slot>/<file>:/content) — no per-file link manifest needed
+    * slot binding: SLOTS — the mirror's per-slot <slot>/tag files, read
+      at render time — names the build each slot holds (latest/,
+      previous/, pre-release/). A slot without a tag file stays hidden,
+      so after promotion the pre slot vanishes (rotated away) with no
+      tag-ordering heuristic.
+    * RELEASES (list fetched at render time) joins in per-tag metadata
+      (publish date, GitHub link); release-list inference is only the
+      fallback when no mirror tags exist (fork mode: SLOTS={}).
+    * each slot's file list comes from LINKS — every file under
+      <slot>/<board>/<sub>/[/ota/] on the OneDrive mirror with its
+      share link; boards are discovered from the walk itself
   Layout: three collapsible slot bars (Stable expanded by default),
   pill anchor nav under the title, per-board cards (name above photo),
   downloads grouped mode × secure into stacked boxes, buttons grouped
@@ -140,11 +141,13 @@
 const CFG = Object.freeze({ repo: "$PAGE_REPO" });
 
 // ── Embedded data ──────────────────────────────────────────────────
-// Build-time: pages job walks OneDrive for share links and fetches the
-// release list from GitHub API, then embeds both here. Page renders
-// entirely from embedded data — no runtime API calls needed.
+// Render time: the pages walk reads the OneDrive mirror (every file's
+// share link + the per-slot tag files) and fetches the release list,
+// then embeds all three here. Page renders entirely from embedded data
+// — no runtime API calls needed.
 const LINKS = $PAGE_LINKS;
 const RELEASES = $PAGE_RELEASES;
+const SLOTS = $PAGE_SLOTS;
 
 const BOARD_PAT = /Recomputer-([A-Za-z0-9][A-Za-z0-9-]*?)_/;
 const VER_PAT = /^Armbian[^_]*_([^_]+)/;               // Armbian[-unofficial]_26.11.0-trunk_…
@@ -339,7 +342,25 @@ function fmtDate(iso) {
   return iso ? iso.slice(0, 10) + " " + iso.slice(11, 16) + " UTC" : "";
 }
 
-/* ── slot derivation: /releases list → latest / previous / pre ──────── */
+/* ── slot derivation ──────────────────────────────────────────────────
+   Ground truth (OneDrive mode): the mirror's per-slot tag files, read
+   at render time into SLOTS as {"latest"|"previous"|"pre-release": tag}.
+   A slot renders iff its tag exists. RELEASES only joins in per-tag
+   metadata (publish date, GitHub link). */
+const SLOT_DIRS = { latest: "latest", pre: "pre-release", prev: "previous" };
+
+function mirrorSlot(kind) {
+  const t = SLOTS[SLOT_DIRS[kind]];
+  if (!t) return null;
+  const rel = (RELEASES || []).find(r => String(r.tag_name) === String(t));
+  // Synthesize when the tag matches no release (release deleted after
+  // promotion): the slot still renders, just without a date.
+  return rel || { tag_name: t, prerelease: SLOT_DIRS[kind] === "pre-release",
+                  published_at: null };
+}
+
+// Fallback (fork mode — SLOTS={} because the mirror walk never ran):
+// infer the slots from the /releases list alone.
 function slotsFrom(list) {
   const fulls = [], pres = [];
   for (const r of list || []) (r.prerelease ? pres : fulls).push(r);
@@ -356,19 +377,19 @@ function slotsFrom(list) {
 // slot as LINKS — no runtime fetch needed (CORS blocks github.io →
 // github.com asset fetches).
 function slotAssets(slotDir) {
-  // Keys are "<slot>/<profile>[-secure-boot]/[ota/]<file>". Scope to this
-  // slot's subtree so the three slot sections don't all render the whole
-  // mirror; the -secure-boot profile dir is the ONLY secure marker
-  // (filenames are identical across profiles) — carry it into `secure`
-  // and keep the key on the asset for exact link lookups. Size is 0
-  // (rclone link doesn't report it).
+  // Keys are "<slot>/<board>/<profile>[-secure-boot]/[ota/]<file>".
+  // Scope to this slot's subtree so the three slot sections don't all
+  // render the whole mirror; the -secure-boot profile dir is the ONLY
+  // secure marker (filenames are identical across profiles) — carry it
+  // into `secure` and keep the key on the asset for exact link lookups.
+  // Size is 0 (rclone link doesn't report it).
   return Object.keys(LINKS)
-    .filter(path => path.startsWith(slotDir + "/"))
+    .filter(path => path.startsWith(slotDir + "/") && path !== slotDir + "/tag")
     .map(path => ({
       name: path.split("/").pop(),
       size: 0,
       browser_download_url: LINKS[path],
-      secure: (path.split("/")[1] || "").endsWith("-secure-boot"),
+      secure: (path.split("/")[2] || "").endsWith("-secure-boot"),
       lk: path,
     }));
 }
@@ -382,7 +403,7 @@ async function splitBoards(rel, slotDir) {
   return sections;
 }
 
-async function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
+async function buildSlot(rel, kind, slotDir) {  // kind: "latest" | "pre" | "prev"
   const det = document.createElement("details");
   det.className = "slot";
   det.id = "slot-" + kind;
@@ -413,8 +434,6 @@ async function buildSlot(rel, kind) {  // kind: "latest" | "pre" | "prev"
   if (kind === "pre" || (kind === "latest" && rel.prerelease))
     body.appendChild(el("div", "slot-note",
       "Build completed on all boards — pending on-device verification before promotion to stable."));
-  const slotDir = kind === "latest" ? (rel.prerelease ? "pre-release" : "latest")
-                : kind === "pre" ? "pre-release" : "previous";
   const sections = await splitBoards(rel, slotDir);
   // Empty slot (no assets parse into boards) → hide entirely. This happens
   // for stale/foreign releases whose assets don't match our naming scheme.
@@ -430,10 +449,13 @@ async function boot() {
   const boards = document.getElementById("boards");
   const fallback = document.getElementById("fallback");
   try {
-    // Use embedded release data (fetched at build time) instead of calling
-    // the GitHub API at runtime. This eliminates the 60 req/hr/IP limit
-    // and makes the page load instantly.
-    const s = slotsFrom(RELEASES);
+    // Use embedded render-time data only — no runtime GitHub API call.
+    // Mirror tag files bind the slots when present (OneDrive mode);
+    // release-list inference is the fallback (fork mode: SLOTS={}).
+    const hasMirror = !!(SLOTS && (SLOTS.latest || SLOTS["pre-release"] || SLOTS.previous));
+    const s = hasMirror
+      ? { latest: mirrorSlot("latest"), pre: mirrorSlot("pre"), previous: mirrorSlot("prev") }
+      : slotsFrom(RELEASES);
     if (!s.latest && !s.pre) throw new Error("no releases yet");
 
     boards.hidden = true;  // all three slots render as collapsible bars below
@@ -442,12 +464,12 @@ async function boot() {
     // No stable yet: show pre-release expanded in the "latest" position.
     const slotEls = [];
     if (!s.latest && s.pre) {
-      const d = await buildSlot(s.pre, "latest");
+      const d = await buildSlot(s.pre, "latest", "pre-release");
       if (d) slotEls.push(d);
     } else {
-      if (s.latest)   { const d = await buildSlot(s.latest, "latest");   if (d) slotEls.push(d); }
-      if (s.pre)      { const d = await buildSlot(s.pre, "pre");         if (d) slotEls.push(d); }
-      if (s.previous) { const d = await buildSlot(s.previous, "prev");   if (d) slotEls.push(d); }
+      if (s.latest)   { const d = await buildSlot(s.latest, "latest", "latest");   if (d) slotEls.push(d); }
+      if (s.pre)      { const d = await buildSlot(s.pre, "pre", "pre-release");    if (d) slotEls.push(d); }
+      if (s.previous) { const d = await buildSlot(s.previous, "prev", "previous"); if (d) slotEls.push(d); }
     }
     if (!slotEls.length) throw new Error("no renderable releases");
     slots.replaceChildren(...slotEls);

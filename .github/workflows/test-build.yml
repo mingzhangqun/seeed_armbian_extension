@@ -290,16 +290,13 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
-      - name: Reset OneDrive pre-release staging (per board)
+      - name: Reset OneDrive pre-release staging
+        # Slot-first layout: one purge clears every board's subtree.
         if: ${{ env.HAS_RCLONE == 'true' }}
-        env:
-          BOARDS: ${{ needs.plan.outputs.boards }}
         run: |
           set -euo pipefail
-          for b in $(python3 -c 'import json,os; print(" ".join(json.loads(os.environ["BOARDS"])))'); do
-            rclone purge "seeed-storage:armbian/images/$b/pre-release" --contimeout 15s 2>/dev/null \
-              || echo "armbian/images/$b/pre-release did not exist (first run) — nothing to purge"
-          done
+          rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
+            || echo "armbian/images/pre-release did not exist (first run) — nothing to purge"
 
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
@@ -420,8 +417,9 @@ jobs:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
       - name: Upload images to OneDrive pre-release (OneDrive mode)
-        # Mirrors build-images.yml — no per-entry manifests: the promote
-        # validation is structural against build-info.json.
+        # Mirrors build-images.yml (slot-first layout) — no per-entry
+        # manifests: the promote validation is structural against
+        # build-info.json.
         if: ${{ env.HAS_RCLONE == 'true' }}
         working-directory: output
         env:
@@ -439,7 +437,7 @@ jobs:
 
           sub="$PROFILE"
           [ -n "$SECURITY" ] && sub="$sub-$SECURITY"
-          dest="seeed-storage:armbian/images/$BOARD/pre-release/$sub"
+          dest="seeed-storage:armbian/images/pre-release/$BOARD/$sub"
           echo "Uploading to $dest"
           rclone mkdir "$dest" 2>/dev/null || true
           rclone copy images/ "$dest" \
@@ -513,6 +511,13 @@ jobs:
       - name: Publish release
         run: |
           set -euo pipefail
+          # Tag the pre-release slot FIRST, then flip the release visible
+          # (see build-images.yml — the <slot>/tag file is the page's slot
+          # binding; a tag-write failure must leave the release in draft).
+          if [ "${HAS_RCLONE}" = "true" ]; then
+            printf '%s\n' "$TAG" | rclone rcat "seeed-storage:armbian/images/pre-release/tag"
+            echo "tagged pre-release slot: $TAG"
+          fi
           gh release edit "$TAG" \
             --repo "$TARGET_REPO" \
             --draft=false \
@@ -543,7 +548,6 @@ jobs:
           # Forks: deploy to THIS repo's Pages via the actions deployment.
           repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.plan.outputs.release_repo || github.repository }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
-          boards: ${{ needs.plan.outputs.boards }}
           has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}

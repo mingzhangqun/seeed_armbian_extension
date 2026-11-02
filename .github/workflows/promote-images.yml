@@ -3,9 +3,11 @@ name: "Images - Release"
 # Promote the newest pre-release to Stable:
 #   1. pick newest pre-release (no input — no reason to promote an older tag)
 #   2. VALIDATE structurally: the OneDrive pre-release/ tree must match
-#      build-info.json's entry list — every expected <sub>/ has images with
-#      .sha256 siblings and a non-empty ota/, and there are no strays
-#   3. ROTATE per board: previous ⟵ latest ⟵ pre-release (server-side)
+#      build-info.json's entry list — the slot's tag file must name this
+#      release, every expected <board>/<sub>/ has images with .sha256
+#      siblings and a non-empty ota/, and there are no strays
+#   3. ROTATE the whole slot tree: previous ⟵ latest ⟵ pre-release
+#      (server-side, one move per slot — every board flips together)
 #   4. PUBLISH the GitHub release (prerelease → released)
 #   5. clean up superseded pre-releases; push the images page
 #
@@ -27,7 +29,6 @@ jobs:
     outputs:
       tag: ${{ steps.rel.outputs.tag }}
       target_repo: ${{ steps.rel.outputs.target_repo }}
-      boards: ${{ steps.meta.outputs.boards }}
       has_rclone: ${{ steps.probe.outputs.has_rclone }}
     steps:
       - name: Probe secrets
@@ -100,30 +101,28 @@ jobs:
             || { echo "::error::$TAG has no build-info.json — not built by build-images.yml?"; exit 1; }
           cat stage/build-info.json
 
-      - name: Extract boards list
-        id: meta
-        run: |
-          set -euo pipefail
-          boards="$(jq -c '.boards' stage/build-info.json)"
-          echo "boards=$boards" >> "$GITHUB_OUTPUT"
-          echo "boards: $boards"
-
       - name: Validate staging completeness
         # Structural check BEFORE anything is deleted: the OneDrive
         # pre-release/ tree must match the build's entry list.
-        #   a) every expected <sub>/ exists, holds >=1 *.img.xz with a
-        #      .sha256 sibling each, and a non-empty ota/
-        #   b) no stray files or subdirs the entries cannot account for
+        #   a) the slot's tag file names the release being promoted
+        #      (a build/promote mismatch must never rotate)
+        #   b) every expected <board>/<sub>/ exists, holds >=1 *.img.xz
+        #      with a .sha256 sibling each, and a non-empty ota/
+        #   c) no stray files, subs, or boards the entries cannot account for
         # The workflow's own gating (release job publishes only when every
         # matrix entry succeeded) already guarantees completeness at publish
         # time; this re-verifies against live OneDrive before rotating.
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
           python3 <<'PY'
-          import json, subprocess, sys
+          import json, os, subprocess, sys
           from collections import defaultdict
 
           info = json.load(open("stage/build-info.json"))
+          tag_expected = os.environ["TAG"].strip()
+          base = "seeed-storage:armbian/images/pre-release"
 
           def lsjson(path):
               r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", path],
@@ -134,8 +133,34 @@ jobs:
               return json.loads(r.stdout or "[]")
 
           errors = []
+
+          # a) the slot tag is the build's signature on pre-release/ — it
+          # must name THIS release, else the slot holds a different build.
+          cat = subprocess.run(["rclone", "cat", f"{base}/tag"],
+                               capture_output=True, text=True)
+          if cat.returncode != 0:
+              errors.append("pre-release/tag is missing — slot never finished a build?")
+          elif cat.stdout.strip() != tag_expected:
+              errors.append(f"pre-release/tag is {cat.stdout.strip()!r} but promoting {tag_expected!r} — build/promote mismatch")
+
+          files = lsjson(base)
           total_files = 0
 
+          # Slot-first layout: paths are "<board>/<sub>/[ota/]<file>";
+          # the root-level tag file is accounted for above.
+          by_board = defaultdict(list)
+          for f in files:
+              p = f["Path"]
+              if p == "tag":
+                  continue
+              total_files += 1
+              head, _, rest = p.partition("/")
+              if head and rest:
+                  by_board[head].append(rest)
+              else:
+                  errors.append(f"stray file at pre-release/ root: {p}")
+
+          # b) + c) per board
           for board in info["boards"]:
               subs = set()
               for e in info["entries"]:
@@ -146,116 +171,112 @@ jobs:
                       sub += "-" + e["security"]
                   subs.add(sub)
 
-              base = f"seeed-storage:armbian/images/{board}/pre-release"
-              files = lsjson(base)
-              total_files += len(files)
+              fs_all = by_board.pop(board, None)
+              if fs_all is None:
+                  errors.append(f"{board}: pre-release/{board}/ missing entirely")
+                  continue
 
               by_sub = defaultdict(list)
-              strays = []
-              for f in files:
-                  head, _, rest = f["Path"].partition("/")
+              for rel in fs_all:
+                  head, _, rest = rel.partition("/")
                   if head and rest:
                       by_sub[head].append(rest)
                   else:
-                      strays.append(f["Path"])
-              for p in strays:
-                  errors.append(f"{board}: stray file at pre-release/ root: {p}")
+                      errors.append(f"{board}: stray file at pre-release/{board}/ root: {rel}")
 
               for sub in sorted(subs):
                   fs = by_sub.pop(sub, None)
                   if fs is None:
-                      errors.append(f"{board}: pre-release/{sub}/ missing entirely")
+                      errors.append(f"{board}: pre-release/{board}/{sub}/ missing entirely")
                       continue
                   xz = sorted(n for n in fs if n.endswith(".img.xz"))
                   if not xz:
-                      errors.append(f"{board}: pre-release/{sub}/ has no *.img.xz")
+                      errors.append(f"{board}: pre-release/{board}/{sub}/ has no *.img.xz")
                   for x in xz:
                       if x + ".sha256" not in fs:
-                          errors.append(f"{board}: pre-release/{sub}/{x} has no .sha256 sibling")
+                          errors.append(f"{board}: pre-release/{board}/{sub}/{x} has no .sha256 sibling")
                   ota = [n for n in fs if n.startswith("ota/")]
                   if not ota:
-                      errors.append(f"{board}: pre-release/{sub}/ota/ is empty or missing")
+                      errors.append(f"{board}: pre-release/{board}/{sub}/ota/ is empty or missing")
                   print(f"{board}/{sub}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
 
               for sub in sorted(by_sub):
-                  errors.append(f"{board}: pre-release/{sub}/ is not in the build's entries (stray)")
+                  errors.append(f"{board}: pre-release/{board}/{sub}/ is not in the build's entries (stray)")
+
+          for board in sorted(by_board):
+              errors.append(f"{board}: on the mirror but not in the build's entries (stray board)")
 
           if errors:
               for e in errors:
                   print(f"::error::{e}")
               sys.exit(1)
-          print(f"staging OK: {len(info['boards'])} boards, {len(info['entries'])} entries, {total_files} files")
+          print(f"staging OK: tag {tag_expected}, {len(info['boards'])} boards, {len(info['entries'])} entries, {total_files} files")
           PY
 
-      - name: Rotate slots per board
-        # previous ⟵ latest ⟵ pre-release, server-side. Existence checked
-        # explicitly — bare `|| echo` would swallow real rclone failures,
-        # and moveto onto an existing dir nests instead of renaming.
-        # Order: publish first (flip release to stable), then rotate files.
-        # If rotate fails, we attempt rollback by restoring previous/ → latest/
-        # or deleting the new latest/ if there was none before.
+      - name: Rotate slots (whole tree, server-side)
+        # previous ⟵ latest ⟵ pre-release — ONE move per slot: the
+        # rotation unit is the release unit, so every board flips
+        # together. Existence checked explicitly — bare `|| echo` would
+        # swallow real rclone failures, and moveto onto an existing dir
+        # nests instead of renaming. Order: publish first (flip release
+        # to stable), then rotate; each move is a single server-side
+        # rename, so a mid-rotate failure leaves a clean state the
+        # rollback inspects rather than guesses about.
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           TAG: ${{ steps.rel.outputs.tag }}
           TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
         run: |
           set -euo pipefail
-          has_dir() { rclone lsf "$1" --dirs-only 2>/dev/null | grep -qx "$2/"; }
+          base="seeed-storage:armbian/images"
+          has_slot() { rclone lsf "$base" --dirs-only 2>/dev/null | grep -qx "$1/"; }
 
-          # Record which boards already had a latest/ before we touch anything
-          declare -A had_latest
-          for b in $(jq -r '.boards[]' stage/build-info.json); do
-            if has_dir "seeed-storage:armbian/images/$b" "latest"; then
-              had_latest[$b]=1
-            fi
-          done
+          # Record whether a stable slot exists before we touch anything
+          # (rollback only has something to restore when it did).
+          had_latest=false
+          if has_slot latest; then had_latest=true; fi
 
           # Step 1: publish the release (flip prerelease → stable)
           gh release edit "$TAG" --repo "$TARGET_REPO" --prerelease=false
           gh release edit "$TAG" --repo "$TARGET_REPO" --notes \
-            "Promoted to Stable: armbian/images/<board>/latest/ rotated (previous ⟵ latest, pre-release ⟵ latest)."
+            "Promoted to Stable: armbian/images/latest/ rotated (previous ⟵ latest, pre-release ⟵ latest)."
 
-          # Step 2: rotate OneDrive directories
-          rotate_board() {
-            local b="$1"
-            local base="seeed-storage:armbian/images/$b"
-            if has_dir "$base" "previous"; then
-              rclone purge "$base/previous" || { echo "::error::$b: purge previous/ failed"; return 1; }
+          # Step 2: rotate the whole slot tree — all boards at once
+          if ! (
+            set -e
+            if has_slot previous; then
+              rclone purge "$base/previous"
             else
-              echo "$b: no previous/ — nothing to purge"
+              echo "no previous/ — nothing to purge"
             fi
-            if has_dir "$base" "latest"; then
-              rclone moveto "$base/latest" "$base/previous" || { echo "::error::$b: latest → previous failed"; return 1; }
+            if has_slot latest; then
+              rclone moveto "$base/latest" "$base/previous"
             else
-              echo "$b: no latest/ (first promote)"
+              echo "no latest/ (first promote)"
             fi
-            has_dir "$base" "pre-release" \
-              || { echo "::error::$b: pre-release/ vanished (race with a build?)"; return 1; }
-            rclone moveto "$base/pre-release" "$base/latest" \
-              || { echo "::error::$b: pre-release → latest failed"; return 1; }
-            echo "$b: rotated — $(rclone lsf "$base/latest" --recursive --files-only | wc -l) files in latest/"
-          }
-          export -f rotate_board has_dir
-          # Parallelize per-board rotation; xargs -P 4 caps concurrent rclone
-          # sessions to avoid OneDrive throttling. Exit non-zero if any board fails.
-          if ! jq -r '.boards[]' stage/build-info.json \
-            | xargs -P 4 -I {} bash -c 'rotate_board "$@"' _ {}; then
-            echo "::error::rotate failed, attempting rollback..."
-            for b in $(jq -r '.boards[]' stage/build-info.json); do
-              if [ "${had_latest[$b]:-}" = "1" ]; then
-                # Restore original latest from previous
-                rclone purge "seeed-storage:armbian/images/$b/latest" 2>/dev/null || true
-                rclone moveto "seeed-storage:armbian/images/$b/previous" "seeed-storage:armbian/images/$b/latest" 2>/dev/null || true
-                echo "$b: rolled back latest/ from previous/"
+            has_slot pre-release \
+              || { echo "::error::pre-release/ vanished (race with a build?)"; exit 1; }
+            rclone moveto "$base/pre-release" "$base/latest"
+          ); then
+            echo "::error::rotate failed — inspecting state for rollback..."
+            if has_slot latest; then
+              # Failed before latest moved away: latest/ is intact.
+              # previous/ may be gone — it held superseded content either way.
+              echo "latest/ intact — nothing to roll back"
+            elif [ "$had_latest" = "true" ]; then
+              # latest was moved to previous/ but the new one never landed
+              if rclone moveto "$base/previous" "$base/latest" 2>/dev/null; then
+                echo "rolled back latest/ from previous/"
               else
-                # No latest before — delete the one we just created
-                rclone purge "seeed-storage:armbian/images/$b/latest" 2>/dev/null || true
-                echo "$b: deleted incomplete latest/"
+                echo "::error::rollback failed — the pre-rotate latest/ is at previous/, rotate by hand"
               fi
-            done
+            else
+              echo "no prior latest/ — nothing to restore; pre-release/ untouched"
+            fi
             echo "::error::rollback complete — release is stable but files not rotated"
             exit 1
           fi
+          echo "rotated — $(rclone lsf "$base/latest" --recursive --files-only | wc -l) files in latest/"
 
       - name: Clean up superseded pre-releases
         # Older pre-releases carry only build-info.json (the binaries live in
@@ -310,7 +331,6 @@ jobs:
           # Forks: deploy to THIS repo's Pages via the actions deployment.
           repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.promote.outputs.target_repo || github.repository }}
           release_repo: ${{ needs.promote.outputs.target_repo }}
-          boards: ${{ needs.promote.outputs.boards }}
           has_rclone: ${{ needs.promote.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
