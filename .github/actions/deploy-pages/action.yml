@@ -1,0 +1,231 @@
+name: "Deploy images page"
+description: "Walk OneDrive for share links, render the images page, and deploy it"
+
+inputs:
+  tag:
+    description: "Release tag (used in commit message)"
+    required: true
+  repo:
+    description: "Target repo for the page (owner/repo)"
+    required: true
+  release_repo:
+    description: "Repo where the release lives (owner/repo)"
+    required: true
+  boards:
+    description: "JSON array of board ids"
+    required: true
+  has_rclone:
+    description: "Whether RCLONE_CONFIG is available (true/false)"
+    required: true
+  rclone_config:
+    description: "RCLONE_CONFIG secret content"
+    required: false
+  pages_token:
+    description: "PAGES_TARGET_TOKEN secret content (cross-repo mode only)"
+    required: false
+  gh_token:
+    description: "GH_TOKEN for release/repo API calls"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # Same-repo deploys go through GitHub Actions page deployments
+    # (upload-pages-artifact + deploy-pages) — observable as a workflow
+    # run, no dependency on the legacy branch-build pipeline. Cross-repo
+    # targets keep the gh-pages API push; those need PAGES_TARGET_TOKEN.
+    - name: Resolve deploy mode
+      id: gate
+      shell: bash
+      env:
+        TOK: ${{ inputs.pages_token }}
+        TARGET_REPO: ${{ inputs.repo }}
+        CURRENT_REPO: ${{ github.repository }}
+      run: |
+        if [ "$TARGET_REPO" = "$CURRENT_REPO" ]; then
+          echo "mode=actions" >> "$GITHUB_OUTPUT"
+          echo "deploy mode: actions (same-repo workflow deployment)"
+          exit 0
+        fi
+        if [ -z "$TOK" ]; then
+          echo "::notice::PAGES_TARGET_TOKEN is not set — cross-repo images page push skipped."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "mode=api" >> "$GITHUB_OUTPUT"
+          echo "deploy mode: api (cross-repo gh-pages push)"
+        fi
+
+    - name: Checkout (page generator)
+      if: steps.gate.outputs.skip != 'true'
+      uses: actions/checkout@v4
+
+    - name: Setup rclone (seeed-storage OneDrive remote)
+      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      uses: ./.github/actions/setup-onedrive
+      with:
+        rclone_config: ${{ inputs.rclone_config }}
+
+    - name: Walk OneDrive and collect share links
+      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      shell: bash
+      env:
+        BOARDS: ${{ inputs.boards }}
+      run: |
+        set -euo pipefail
+        python3 - > links.json <<'PY'
+        import json, os, subprocess, sys
+        from concurrent.futures import ThreadPoolExecutor
+
+        boards = json.loads(os.environ["BOARDS"])
+        paths = []
+        for b in boards:
+            base = f"seeed-storage:armbian/images/{b}"
+            r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", base],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"::warning::lsjson failed for {b}: {r.stderr.strip()}", file=sys.stderr)
+                continue
+            for it in json.loads(r.stdout):
+                paths.append((base, it["Path"]))
+        # Progress goes to stderr — stdout is redirected into links.json
+        # and must contain ONLY the JSON document.
+        print(f"collecting share links for {len(paths)} files …", file=sys.stderr)
+
+        def make_link(args):
+            base, rel = args
+            lr = subprocess.run(["rclone", "link", "--timeout", "60s", f"{base}/{rel}"],
+                                capture_output=True, text=True)
+            ok = lr.returncode == 0
+            return rel, ok, lr.stdout.strip() if ok else lr.stderr.strip()
+
+        links = {}
+        # Serial rclone link is ~2-4 s per file against OneDrive — a full
+        # matrix test build (170+ files) blows a 10-minute job. Bounded
+        # parallelism keeps the walk minutes-scale without tripping
+        # OneDrive throttling.
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for i, (rel, ok, out) in enumerate(ex.map(make_link, paths), 1):
+                if ok:
+                    links[rel] = out
+                else:
+                    print(f"::warning::link failed for {rel}: {out}", file=sys.stderr)
+                if i % 25 == 0:
+                    print(f"  … {i}/{len(paths)} links", file=sys.stderr)
+        print(json.dumps(links))
+        PY
+        echo "links collected: $(python3 -c 'import json; print(len(json.load(open("links.json"))))')"
+
+    - name: Render the page
+      if: steps.gate.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        PAGE_REPO: ${{ inputs.release_repo }}
+        TAG: ${{ inputs.tag }}
+        HAS_RCLONE: ${{ inputs.has_rclone }}
+      run: |
+        set -euo pipefail
+        [ -n "$PAGE_REPO" ] \
+          || { echo "::error::PAGE_REPO empty"; exit 1; }
+
+        if [ "${HAS_RCLONE:-}" = "true" ] && [ -f links.json ]; then
+          export PAGE_LINKS="$(cat links.json)"
+        else
+          export PAGE_LINKS="{}"
+        fi
+
+        # Fetch release list at build time and embed it — eliminates the
+        # runtime GitHub API call (60 req/hr/IP limit for unauthenticated
+        # clients) and makes the page load instantly.
+        gh release list --repo "$PAGE_REPO" --limit 30 --json tagName,isPrerelease,publishedAt \
+          | jq '[.[] | {tag_name: .tagName, prerelease: .isPrerelease, published_at: .publishedAt}]' \
+          > releases.json
+        export PAGE_RELEASES="$(cat releases.json)"
+
+        envsubst '$PAGE_REPO $PAGE_LINKS $PAGE_RELEASES' \
+          < scripts/images-page.template.html > images.html
+        grep -q "const CFG = Object.freeze({ repo: \"$PAGE_REPO\" });" images.html \
+          || { echo "::error::repo not baked into the page"; exit 1; }
+        # LINKS must bake into a syntactically valid JS object literal —
+        # catches stray stdout polluting links.json upstream of envsubst.
+        grep -qE '^const LINKS = \{.*\};$' images.html \
+          || { echo "::error::LINKS did not render as a JSON object — links.json is malformed?"; exit 1; }
+        echo "=== page $(wc -c < images.html) bytes ==="
+
+    # ── actions mode: deploy through the run's Pages deployment ──
+
+    - name: Stage the site (actions mode)
+      if: steps.gate.outputs.mode == 'actions'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p site/images
+        cp images.html site/images/index.html
+        echo "staged images/index.html ($(wc -c < images.html) bytes)"
+
+    - name: Upload pages artifact (actions mode)
+      if: steps.gate.outputs.mode == 'actions'
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: site
+
+    - name: Deploy the site (actions mode)
+      if: steps.gate.outputs.mode == 'actions'
+      uses: actions/deploy-pages@v4
+
+    # ── api mode: push a gh-pages commit to the target repo ──
+
+    - name: Push to the target repo's gh-pages (api mode)
+      if: steps.gate.outputs.mode == 'api'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.pages_token }}
+        REPO: ${{ inputs.repo }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        BLOB=$(gh api --method POST "repos/$REPO/git/blobs" \
+          -f content="$(base64 -w0 images.html)" -f encoding=base64 --jq .sha)
+        TREE=$(gh api --method POST "repos/$REPO/git/trees" \
+          -f 'tree[][path]=images/index.html' -f 'tree[][mode]=100644' \
+          -f 'tree[][type]=blob' -f "tree[][sha]=$BLOB" --jq .sha)
+        PARENT=$(gh api "repos/$REPO/branches/gh-pages" --jq .commit.sha 2>/dev/null || true)
+        if [ -n "$PARENT" ]; then
+          COMMIT=$(gh api --method POST "repos/$REPO/git/commits" \
+            -f message="pages: images $TAG" -f tree="$TREE" -f "parents[]=$PARENT" --jq .sha)
+          gh api --method PATCH "repos/$REPO/git/refs/heads/gh-pages" -f sha="$COMMIT" --jq .object.sha
+        else
+          COMMIT=$(gh api --method POST "repos/$REPO/git/commits" \
+            -f message="pages: images $TAG" -f tree="$TREE" --jq .sha)
+          gh api --method POST "repos/$REPO/git/refs" -f ref=refs/heads/gh-pages -f sha="$COMMIT" --jq .ref
+        fi
+        echo "gh-pages commit pushed: $COMMIT"
+
+    - name: Trigger and verify the pages build (api mode)
+      # The legacy branch pipeline can wedge silently (seen 2026-11-02 on
+      # a fork: POST /pages/builds returns "queued" and nothing runs).
+      # Fail loudly instead of leaving the site on stale content.
+      if: steps.gate.outputs.mode == 'api'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.pages_token }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        gh api --method POST "repos/$REPO/pages" -f 'source[branch]=gh-pages' -f 'source[path]=/' >/dev/null 2>&1 \
+          || gh api --method PATCH "repos/$REPO/pages" -f 'source[branch]=gh-pages' -f 'source[path]=/' >/dev/null 2>&1 \
+          || echo "::warning::could not assert the pages source config"
+        if ! gh api --method POST "repos/$REPO/pages/builds" >/dev/null 2>&1; then
+          echo "::error::POST /pages/builds failed — the site would serve stale content"
+          exit 1
+        fi
+        for _ in $(seq 1 18); do
+          sleep 10
+          st="$(gh api "repos/$REPO/pages/builds/latest" --jq '.status' 2>/dev/null || echo '?')"
+          case "$st" in
+            queued|in_progress|building)
+              echo "pages build started: $st"; exit 0;;
+          esac
+        done
+        echo "::error::no pages build started within 3 minutes — pipeline stuck? The site would serve stale content."
+        exit 1
