@@ -1,0 +1,79 @@
+name: "Pages - Refresh"
+
+# Re-render and re-push the images page against the CURRENT state of the
+# OneDrive mirror and the release list — e.g. after manual cleanup on
+# OneDrive. Deploy-only: touches nothing but the gh-pages branch.
+
+on:
+  workflow_dispatch:
+
+# Serialize with builds and promotes: the walk must not sample a tree
+# that a build is filling or a promote is rotating.
+concurrency:
+  group: seeed-build
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # pages/id-token: deploy-pages actions-mode deployment.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Probe secrets
+        id: probe
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          # Hard fail here: without rclone a refresh would deploy a page
+          # with LINKS={} — stripping every file link for no reason.
+          if [ -z "$RCLONE_CONFIG" ]; then
+            echo "::error::RCLONE_CONFIG is not set — a refresh would strip all file links from the page; aborting."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Discover boards on the mirror
+        id: boards
+        run: |
+          set -euo pipefail
+          # The mirror is the source of truth for what the page can show.
+          # The release repo follows the owner/armbian-build convention
+          # (same resolution as plan in build-images.yml).
+          release_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
+          echo "release_repo=$release_repo" >> "$GITHUB_OUTPUT"
+          if rclone lsd seeed-storage:armbian/images --contimeout 15s 2>/dev/null \
+              | awk '{print $NF}' > boards.txt && [ -s boards.txt ]; then
+            boards="$(python3 -c 'import json; print(json.dumps([l.strip() for l in open("boards.txt") if l.strip()]))')"
+          else
+            echo "::warning::armbian/images/ is empty or unreachable — deploying an empty page"
+            boards="[]"
+          fi
+          echo "boards=$boards" >> "$GITHUB_OUTPUT"
+          echo "boards: $boards"
+          echo "release repo: $release_repo"
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: refresh
+          # Upstream: page on the build-source repo (cross-repo API push).
+          # Forks: deploy to THIS repo's Pages via the actions deployment.
+          repo: ${{ github.repository_owner == 'Seeed-Studio' && steps.boards.outputs.release_repo || github.repository }}
+          release_repo: ${{ steps.boards.outputs.release_repo }}
+          boards: ${{ steps.boards.outputs.boards }}
+          has_rclone: "true"
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
