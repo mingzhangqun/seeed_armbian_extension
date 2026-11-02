@@ -87,16 +87,23 @@ runs:
         # Slot-first layout: paths are "<slot>/<board>/<sub>/[ota/]<file>"
         # plus the per-slot identity files "<slot>/tag" — those are read
         # for CONTENT (the tag names the build the slot holds) and never
-        # share-linked.
+        # share-linked. Files outside the three slot dirs (stale layouts,
+        # foreign trees) are skipped: linking them wastes minutes per
+        # deploy and they never render on the page anyway.
         SLOT_DIRS = ("pre-release", "latest", "previous")
         tag_slots, paths = [], []
+        skipped = 0
         for it in files:
             p = it["Path"]
             parts = p.split("/")
             if len(parts) == 2 and parts[1] == "tag" and parts[0] in SLOT_DIRS:
                 tag_slots.append(parts[0])
-            else:
+            elif parts[0] in SLOT_DIRS:
                 paths.append(p)
+            else:
+                skipped += 1
+        if skipped:
+            print(f"::warning::{skipped} files sit outside the three slot dirs (stale layout on the mirror?) — not linked, not rendered", file=sys.stderr)
 
         slots = {}
         for slot in tag_slots:
