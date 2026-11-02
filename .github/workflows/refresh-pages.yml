@@ -3,6 +3,8 @@ name: "Pages - Refresh"
 # Re-render and re-push the images page against the CURRENT state of the
 # OneDrive mirror and the release list — e.g. after manual cleanup on
 # OneDrive. Deploy-only: touches nothing but the gh-pages branch.
+# Hard-fails if the mirror is unreachable — a refresh must never strip the
+# links off a good page over a transient OneDrive outage.
 
 on:
   workflow_dispatch:
@@ -53,11 +55,20 @@ jobs:
           # (same resolution as plan in build-images.yml).
           release_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
           echo "release_repo=$release_repo" >> "$GITHUB_OUTPUT"
-          if rclone lsd seeed-storage:armbian/images --contimeout 15s 2>/dev/null \
-              | awk '{print $NF}' > boards.txt && [ -s boards.txt ]; then
+          # "lsd failed" and "lsd came back empty" are different situations:
+          # the first means OneDrive is unreachable and a refresh would
+          # strip every link off the page for no reason (hard fail); the
+          # second is a legitimately emptied mirror and still deploys an
+          # empty page.
+          if ! rclone lsd seeed-storage:armbian/images --contimeout 15s > lsd.txt 2> lsd.err; then
+            echo "::error::rclone lsd failed — OneDrive unreachable? $(tr '\n' ' ' < lsd.err)"
+            exit 1
+          fi
+          awk '{print $NF}' lsd.txt > boards.txt
+          if [ -s boards.txt ]; then
             boards="$(python3 -c 'import json; print(json.dumps([l.strip() for l in open("boards.txt") if l.strip()]))')"
           else
-            echo "::warning::armbian/images/ is empty or unreachable — deploying an empty page"
+            echo "::warning::armbian/images/ is empty — deploying an empty page"
             boards="[]"
           fi
           echo "boards=$boards" >> "$GITHUB_OUTPUT"

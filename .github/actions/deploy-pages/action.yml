@@ -78,15 +78,23 @@ runs:
 
         boards = json.loads(os.environ["BOARDS"])
         paths = []
+        failed_boards = 0
         for b in boards:
             base = f"seeed-storage:armbian/images/{b}"
             r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", base],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 print(f"::warning::lsjson failed for {b}: {r.stderr.strip()}", file=sys.stderr)
+                failed_boards += 1
                 continue
             for it in json.loads(r.stdout):
                 paths.append((base, it["Path"]))
+        if boards and failed_boards == len(boards):
+            # Every board failed while rclone itself is configured — the
+            # mirror is unreachable. Rendering anyway would deploy a page
+            # with LINKS={} and strip every link for no reason.
+            print(f"::error::lsjson failed for all {len(boards)} boards — OneDrive unreachable? Refusing to render a stripped page.", file=sys.stderr)
+            sys.exit(1)
         # Progress goes to stderr — stdout is redirected into links.json
         # and must contain ONLY the JSON document.
         print(f"collecting share links for {len(paths)} files …", file=sys.stderr)
@@ -99,6 +107,7 @@ runs:
             return rel, ok, lr.stdout.strip() if ok else lr.stderr.strip()
 
         links = {}
+        link_failures = 0
         # Serial rclone link is ~2-4 s per file against OneDrive — a full
         # matrix test build (170+ files) blows a 10-minute job. Bounded
         # parallelism keeps the walk minutes-scale without tripping
@@ -108,9 +117,16 @@ runs:
                 if ok:
                     links[rel] = out
                 else:
+                    link_failures += 1
                     print(f"::warning::link failed for {rel}: {out}", file=sys.stderr)
                 if i % 25 == 0:
                     print(f"  … {i}/{len(paths)} links", file=sys.stderr)
+        if paths and not links:
+            # lsjson worked but every share-link call failed — systematic
+            # (throttling/auth), not per-file noise. Deploying would strip
+            # all links from the page.
+            print(f"::error::every rclone link call failed ({link_failures}/{len(paths)}) — OneDrive throttled? Refusing to deploy a stripped page.", file=sys.stderr)
+            sys.exit(1)
         print(json.dumps(links))
         PY
         echo "links collected: $(python3 -c 'import json; print(len(json.load(open("links.json"))))')"
