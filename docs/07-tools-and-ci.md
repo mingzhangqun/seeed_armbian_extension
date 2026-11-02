@@ -58,7 +58,7 @@ ARMBIAN_APT_GPG_KEY_ID=<gpg-key-id> ./scripts/publish-aptly.sh out/debs
 
 ## 3. CI builds (Seeed Build workflow)
 
-[`.github/workflows/seeed-build.yml`](../.github/workflows/seeed-build.yml)
+[`.github/workflows/build-images.yml`](../.github/workflows/build-images.yml)
 builds firmware on GitHub Actions — useful when you want images without a
 local build environment.
 
@@ -76,15 +76,22 @@ needs **before** the multi-hour build starts:
 | `PRIVATE_KEY_PEM` | FIT signing private key; staged into `cache/sources/fit-keys` and fed to the build via `UBOOT_FIT_KEYS_BACKUP_DIR` ([06 §3](06-secure-boot.md#3-signing-keys-keep-them-or-regenerate-them)) | `secure-boot` |
 | `DEV_CRT` | matching signing certificate (`dev.crt`); preflight checks it matches the private key | `secure-boot` |
 | `CRYPTROOT_PASSPHRASE` | LUKS rootfs passphrase, exactly 64 *hex* characters ([05](05-encryption.md)); preflight checks length only | `secure-boot` |
-| `ARMBIAN_BUILD_RELEASE_TOKEN` | GitHub token for publishing the Release | `publish_release` |
-| `RCLONE_CONFIG` | rclone remote config for the OneDrive upload | `upload_onedrive` |
+| `RELEASE_GH_TOKEN` | GitHub token for publishing the Release to a different `release_repo`; falls back to the workflow's own token | cross-repo `release_repo` |
+| `RCLONE_CONFIG` | rclone remote config for the OneDrive upload; without it the run falls back to GitHub-release assets (fork mode) | OneDrive mode |
 
-Optional: `publish_release` creates a GitHub Release with download tables;
-the release page prose lives in [`.github/release-body.md`](../.github/release-body.md)
-— CI fills in the per-board tables and OneDrive links.
-OneDrive upload is available via the `upload_onedrive` input. Artifacts are
-attached to the workflow run (`actions/upload-artifact`) — download from the
-run page, flash as usual.
+Every run creates a draft pre-release in `release_repo` (a same-tag release
+from a re-run is deleted first). With `RCLONE_CONFIG` set, image/OTA
+binaries are uploaded to the OneDrive `pre-release/` slot and the release
+carries only `build-info.json` — the promote workflow validates the
+OneDrive tree structurally against the build's entry list, so no per-entry
+manifests are attached. Without `RCLONE_CONFIG` (fork mode), the binaries
+are attached to the release itself — a file over GitHub's 2 GiB asset cap
+fails the upload and needs an OneDrive-mode run to ship. Download tables
+for the published slots live on the Pages download page. Promoting cleans
+up superseded JSON-only pre-releases, so the releases page stays at one
+asset per release. `Pages - Refresh` (`refresh-pages.yml`) is a
+dispatch-only re-render of the page against the live mirror — reach for
+it after manual OneDrive cleanup.
 
 Everything CI does is the documented local flow — the wrapper staging step,
 profiles, and secrets map 1:1 to [02-build-reference.md](02-build-reference.md).
