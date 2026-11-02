@@ -168,11 +168,10 @@ runs:
           || { echo "::error::PAGE_REPO empty"; exit 1; }
 
         if [ "${HAS_RCLONE:-}" = "true" ] && [ -f links.json ]; then
-          export PAGE_LINKS="$(cat links.json)"
-          export PAGE_SLOTS="$(cat slots.json)"
+          :   # links.json/slots.json come from the walk step
         else
-          export PAGE_LINKS="{}"
-          export PAGE_SLOTS="{}"
+          echo '{}' > links.json
+          echo '{}' > slots.json
         fi
 
         # Fetch release list at build time and embed it — eliminates the
@@ -181,15 +180,43 @@ runs:
         gh release list --repo "$PAGE_REPO" --limit 30 --json tagName,isPrerelease,publishedAt \
           | jq '[.[] | {tag_name: .tagName, prerelease: .isPrerelease, published_at: .publishedAt}]' \
           > releases.json
-        export PAGE_RELEASES="$(cat releases.json)"
 
-        envsubst '$PAGE_REPO $PAGE_LINKS $PAGE_RELEASES $PAGE_SLOTS' \
-          < scripts/images-page.template.html > images.html
+        # Substitute the placeholders from FILES, never environment
+        # variables: the share-link map grows with the mirror and blew
+        # past the kernel's 128 KiB per-argv/env-string limit, which made
+        # every exec in this step (cat/gh/jq) fail with "Argument list
+        # too long" (2026-11-02, 414-file walk).
+        python3 - <<'PY'
+        import json, os
+
+        def load(p):
+            try:
+                return open(p).read().strip() or "{}"
+            except FileNotFoundError:
+                return "{}"
+
+        vals = {
+            "PAGE_REPO": os.environ["PAGE_REPO"],
+            "PAGE_LINKS": load("links.json"),
+            "PAGE_RELEASES": load("releases.json"),
+            "PAGE_SLOTS": load("slots.json"),
+        }
+        for k, v in vals.items():
+            if k != "PAGE_REPO":
+                json.loads(v)  # each must be a valid JSON document
+
+        html = open("scripts/images-page.template.html").read()
+        for k, v in vals.items():
+            html = html.replace("$" + k, v)
+        leftover = [k for k in vals if ("$" + k) in html]
+        if leftover:
+            raise SystemExit(f"::error::placeholders not substituted: {leftover}")
+        open("images.html", "w").write(html)
+        PY
         grep -q "const CFG = Object.freeze({ repo: \"$PAGE_REPO\" });" images.html \
           || { echo "::error::repo not baked into the page"; exit 1; }
         # LINKS/SLOTS must bake into syntactically valid JS object literals —
-        # catches stray stdout polluting links.json/slots.json upstream of
-        # envsubst.
+        # catches stray stdout polluting links.json/slots.json upstream.
         grep -qE '^const LINKS = \{.*\};$' images.html \
           || { echo "::error::LINKS did not render as a JSON object — links.json is malformed?"; exit 1; }
         grep -qE '^const SLOTS = \{.*\};$' images.html \

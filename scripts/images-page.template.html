@@ -2,10 +2,12 @@
 <!--
   Images download page — static template.
 
-  Rendered by the images-page jobs (build/test/promote/refresh) with
-  envsubst; the substitutions are $PAGE_REPO, $PAGE_LINKS, $PAGE_RELEASES
-  and $PAGE_SLOTS. The inline JS deliberately uses no backtick template
-  literals: ${...} sequences would collide with envsubst. Keep it that way.
+  Rendered by the images-page jobs (build/test/promote/refresh) by the
+  deploy-pages action's renderer; the substitutions are $PAGE_REPO,
+  $PAGE_LINKS, $PAGE_RELEASES and $PAGE_SLOTS, fed from files (the
+  share-link map outgrew the kernel's env-var size limit). The inline JS
+  deliberately uses no backtick template literals — plain $NAME
+  substitution only, so keep avoiding ${...} sequences. Keep it that way.
 
   Data flow (all client-side at browse time):
     * slot binding: SLOTS — the mirror's per-slot <slot>/tag files, read
