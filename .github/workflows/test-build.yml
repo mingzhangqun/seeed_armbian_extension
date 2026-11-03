@@ -1,0 +1,607 @@
+name: "Test - Build & Pre-release (dummy)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ── Build source (which repo:branch to build from).
+      armbian_build_repo:
+        description: "armbian-build source (repo:branch)"
+        required: false
+        type: string
+        default: "armbian-build:main"
+
+      # ── Boards (all on by default; missing boards are skipped in plan).
+      recomputer-rk3576-devkit:
+        description: "Board: reComputer rk3576 DevKit"
+        type: boolean
+        default: true
+      recomputer-rk3576-module-devkit:
+        description: "Board: reComputer rk3576 Module DevKit"
+        type: boolean
+        default: false
+      recomputer-rk3576-industrial:
+        description: "Board: reComputer rk3576 Industrial"
+        type: boolean
+        default: false
+      recomputer-rk3588-devkit:
+        description: "Board: reComputer rk3588 DevKit"
+        type: boolean
+        default: false
+
+      # ── OTA modes (each becomes a matrix entry). recovery mandatory; ab opt-in.
+      ota_ab:
+        description: "OTA: A/B dual-partition"
+        type: boolean
+        default: false
+
+      # ── Security. plain mandatory; secure-boot opt-in.
+      secure_boot:
+        description: "Security: secure-boot"
+        type: boolean
+        default: false
+
+      # ── Other options
+      desktop_tier:
+        description: "Desktop tier size"
+        required: true
+        type: choice
+        options:
+          - minimal
+          - mid
+          - full
+        default: mid
+
+env:
+  PRIVATE_CCACHE: "yes"
+  USE_CCACHE: "yes"
+  ENABLE_SEEED_RK_EXTENSION: "yes"
+  KERNEL_CONFIGURE: "no"
+  VENDOR: "Armbian"
+  DOCKER_IMAGE: "ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest"
+
+concurrency:
+  group: images-mirror
+  cancel-in-progress: false
+
+jobs:
+  probe-secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      has_rclone: ${{ steps.p.outputs.has_rclone }}
+    steps:
+      - id: p
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [ -n "$RCLONE_CONFIG" ]; then
+            echo "has_rclone=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "has_rclone=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  preflight:
+    needs: probe-secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run preflight checks
+        uses: ./.github/actions/preflight-checks
+        with:
+          secure_boot: ${{ inputs.secure_boot }}
+          has_rclone: ${{ env.HAS_RCLONE }}
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          private_key_pem: ${{ secrets.PRIVATE_KEY_PEM }}
+          dev_crt: ${{ secrets.DEV_CRT }}
+          cryptroot_passphrase: ${{ secrets.CRYPTROOT_PASSPHRASE }}
+
+  plan:
+    needs: [probe-secrets, preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      boards: ${{ steps.gen.outputs.boards }}
+      count: ${{ steps.gen.outputs.count }}
+      tag: ${{ steps.gen.outputs.tag }}
+      ab_repo: ${{ steps.gen.outputs.ab_repo }}
+      release_repo: ${{ steps.gen.outputs.release_repo }}
+    steps:
+      - name: Generate matrix JSON from checkbox inputs
+        id: gen
+        run: |
+          set -euo pipefail
+
+          tag="$(date -u +%y%m%d-%H%M)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          python3 <<'PY'
+          import json, os, itertools
+
+          def flag(name):
+              v = os.environ.get(name, "false").strip().lower()
+              return v in ("true", "1", "yes", "on")
+
+          inputs = json.loads(os.environ["INPUTS_JSON"])
+          boards = sorted(
+              k for k, v in inputs.items()
+              if k.startswith("recomputer-") and str(v).lower() in ("true", "1", "yes", "on")
+          )
+
+          if not boards:
+              raise SystemExit("ERROR: select at least one board")
+
+          import urllib.request, urllib.error
+          ab_repo = os.environ.get("AB_REPO", "").strip()
+          if not ab_repo:
+              ab_repo = "armbian-build:main"
+          if "/" not in ab_repo.split(":")[0]:
+              owner = os.environ["GITHUB_REPOSITORY_OWNER"]
+              repo_part, _, branch_part = ab_repo.partition(":")
+              ab_repo = f"{owner}/{repo_part}:{branch_part}"
+          repo, _, branch = ab_repo.partition(":")
+          branch = branch or "main"
+
+          def board_exists(board):
+              headers = {"Accept": "application/vnd.github+json"}
+              tok = os.environ.get("GH_TOKEN", "").strip()
+              if tok:
+                  headers["Authorization"] = f"Bearer {tok}"
+              for ext in (".conf", ".csc"):
+                  url = f"https://api.github.com/repos/{repo}/contents/config/boards/{board}{ext}?ref={branch}"
+                  req = urllib.request.Request(url, headers=headers)
+                  try:
+                      with urllib.request.urlopen(req, timeout=15) as r:
+                          if r.status == 200:
+                              return True
+                  except urllib.error.HTTPError as e:
+                      if e.code == 404:
+                          continue
+                      raise
+              return False
+
+          present = []
+          for b in boards:
+              try:
+                  ok = board_exists(b)
+              except Exception as e:
+                  print(f"::warning::board check failed for {b} ({e}); keeping it")
+                  ok = True
+              if ok:
+                  present.append(b)
+              else:
+                  print(f"::notice::{b} is not in {repo}:{branch}; skipping it")
+          boards = present
+          if not boards:
+              raise SystemExit(f"ERROR: none of the selected boards exist in {repo}:{branch}")
+
+          variants = [("cli", "trixie"), ("gnome", "resolute")]
+
+          otas = ["recovery"]
+          if flag("OTA_AB"): otas.append("ab")
+
+          securities = [""]
+          if flag("SECURE_BOOT"): securities.append("secure-boot")
+
+          entries = []
+          for b, (t, r), p, s in itertools.product(boards, variants, otas, securities):
+              entries.append({
+                  "board": b,
+                  "tier": t,
+                  "release": r,
+                  "profile": p,
+                  "security": s,
+              })
+
+          print(f"::group::Matrix entries ({len(entries)})")
+          for e in entries:
+              print(f"  board={e['board']:<28} release={e['release']:<10} tier={e['tier']:<8} profile={e['profile'] or '(none)'} security={e['security'] or '(none)'}")
+          print("::endgroup::")
+
+          boards_unique = list(dict.fromkeys(boards))
+          release_repo = repo
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps({'include': entries})}\n")
+              f.write(f"boards={json.dumps(boards_unique)}\n")
+              f.write(f"count={len(entries)}\n")
+              f.write(f"ab_repo={ab_repo}\n")
+              f.write(f"release_repo={release_repo}\n")
+          PY
+        env:
+          INPUTS_JSON: ${{ toJSON(inputs) }}
+          OTA_AB:       ${{ inputs.ota_ab }}
+          SECURE_BOOT:  ${{ inputs.secure_boot }}
+          AB_REPO:      ${{ inputs.armbian_build_repo }}
+          GH_TOKEN:     ${{ github.token }}
+
+      - name: Print summary
+        run: |
+          echo "Total matrix entries: ${{ steps.gen.outputs.count }}"
+          echo "Boards to release: ${{ steps.gen.outputs.boards }}"
+          echo "Release tag: ${{ steps.gen.outputs.tag }}"
+          echo "Release target: ${{ steps.gen.outputs.release_repo }}"
+          echo "armbian-build: ${{ steps.gen.outputs.ab_repo }}"
+
+  init-release:
+    name: Init draft release
+    needs: [probe-secrets, plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Reset OneDrive pre-release staging
+        # Slot-first layout: one purge clears every board's subtree.
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        run: |
+          set -euo pipefail
+          rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
+            || echo "armbian/images/pre-release did not exist (first run) — nothing to purge"
+
+      - name: Create draft release ${{ needs.plan.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          BOARDS: ${{ needs.plan.outputs.boards }}
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          # No build-info asset (see build-images.yml): the slot's tag
+          # file is the build signature; the release carries no metadata.
+          if gh release view "${TAG}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — deleting old release + tag"
+            # No --cleanup-tag: an unpublished draft has no tag ref yet
+            # and the flag 422s (observed 2026-11-03). Delete the
+            # release plainly, then the ref best-effort.
+            gh release delete "${TAG}" --repo "$TARGET_REPO" --yes
+            gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+          fi
+          target_args=()
+          if [ "$TARGET_REPO" = "$GITHUB_REPOSITORY" ]; then
+            target_args=(--target "$GITHUB_SHA")
+          fi
+          # Self-describing title derived from the tag (YYMMDD-HHMM UTC).
+          boards_n="$(jq length <<<"$BOARDS")"
+          images_n="$(jq '.include | length' <<<"$MATRIX")"
+          title="TEST Images 20${TAG:0:2}-${TAG:2:2}-${TAG:4:2} ${TAG:7:2}:${TAG:9:2} UTC · ${boards_n} boards · ${images_n} images"
+          gh release create "${TAG}" \
+            --repo "$TARGET_REPO" \
+            --draft \
+            --prerelease \
+            --title "$title" \
+            "${target_args[@]}" \
+            --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  # Catch the page up right after the pre-release purge (see
+  # build-images.yml) — otherwise the stale pre slot advertises dead
+  # links for the whole build window.
+  pages-purge:
+    name: Deploy images page (post-purge sync)
+    needs: [probe-secrets, plan, init-release]
+    if: ${{ !cancelled() && needs.init-release.result == 'success' && needs.probe-secrets.outputs.has_rclone == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: write
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          # Pages go to the build-source repo (armbian-build), like
+          # build-images.yml — same target on fork and upstream.
+          repo: ${{ needs.plan.outputs.release_repo }}
+          release_repo: ${{ needs.plan.outputs.release_repo }}
+          has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+
+  build:
+    needs: [probe-secrets, plan, init-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      BOARD: ${{ matrix.board }}
+      MATRIX_RELEASE: ${{ matrix.release }}
+      MATRIX_TIER: ${{ matrix.tier }}
+      MATRIX_PROFILE: ${{ matrix.profile }}
+      MATRIX_SECURITY: ${{ matrix.security }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate dummy images
+        run: |
+          set -euo pipefail
+          mkdir -p "output/images/${BOARD}/ota"
+
+          # Names must match real armbian output so the page parser
+          # accepts them: "Recomputer-" (capital R), variant "minimal"/
+          # "gnome_desktop", OTA as <stem>_OTA.tar.<codec> (v0.8: outer
+          # shell follows the payload codec — zst for recovery, xz for
+          # ab) + _OTA.checksums.
+          VARIANT="minimal"
+          [ "${MATRIX_TIER}" = "gnome" ] && VARIANT="gnome_desktop"
+          AB_PART=""
+          [ "${MATRIX_PROFILE}" = "ab" ] && AB_PART="_AB_PART"
+          OTA_CODEC="zst"
+          [ "${MATRIX_PROFILE}" = "ab" ] && OTA_CODEC="xz"
+          BOARD_SEG="Recomputer-${BOARD#recomputer-}"
+
+          STEM="Armbian_26.02.0_${BOARD_SEG}_${MATRIX_RELEASE}_vendor_6.1.0_${VARIANT}${AB_PART}"
+          IMG_NAME="${STEM}.img"
+          XZ_NAME="${IMG_NAME}.xz"
+          SHA_NAME="${XZ_NAME}.sha256"
+          SHA2_NAME="${IMG_NAME}.sha"
+          TXT_NAME="${IMG_NAME}.txt"
+          OTA_NAME="${STEM}_OTA.tar.${OTA_CODEC}"
+          OTA_CHK="${STEM}_OTA.checksums"
+
+          # Create dummy files
+          dd if=/dev/zero of="output/images/${IMG_NAME}" bs=1M count=1 2>/dev/null
+          xz -T0 -6 < "output/images/${IMG_NAME}" > "output/images/${XZ_NAME}"
+          (cd output/images && sha256sum "${XZ_NAME}" > "${SHA_NAME}")
+          (cd output/images && sha256sum "${IMG_NAME}" > "${SHA2_NAME}")
+          echo "Dummy image for ${BOARD} ${MATRIX_RELEASE} ${MATRIX_TIER} ${MATRIX_PROFILE} ${MATRIX_SECURITY}" > "output/images/${TXT_NAME}"
+
+          # OTA files
+          dd if=/dev/zero of="output/images/${BOARD}/ota/${OTA_NAME}" bs=1K count=100 2>/dev/null
+          (cd "output/images/${BOARD}/ota" && sha256sum "${OTA_NAME}" > "${OTA_CHK}")
+
+          rm -f "output/images/${IMG_NAME}"
+
+          echo "=== Generated files ==="
+          ls -lh output/images/
+          ls -lh "output/images/${BOARD}/ota/"
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Upload images to OneDrive pre-release (OneDrive mode)
+        # Mirrors build-images.yml (slot-first layout) — no manifests:
+        # promote validates slot shape (tag binding + per-sub completeness).
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        working-directory: output
+        env:
+          PROFILE: ${{ matrix.profile || 'recovery' }}
+          SECURITY: ${{ matrix.security }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(images/*.img.xz images/*.sha256 images/*.sha images/*.img.txt)
+          ota_files=(images/$BOARD/ota/*)
+          if [ ${#files[@]} -eq 0 ] && [ ${#ota_files[@]} -eq 0 ]; then
+            echo "::error::nothing found under images/ to upload"
+            exit 1
+          fi
+
+          sub="$PROFILE"
+          [ -n "$SECURITY" ] && sub="$sub-$SECURITY"
+          dest="seeed-storage:armbian/images/pre-release/$BOARD/$sub"
+          echo "Uploading to $dest"
+          rclone mkdir "$dest" 2>/dev/null || true
+          rclone copy images/ "$dest" \
+            --include "*.img.xz" --include "*.img.xz.sha256" --include "*.img.sha" --include "*.img.txt" \
+            --transfers 4 --stats-one-line --stats 30s
+          if [ ${#ota_files[@]} -gt 0 ]; then
+            rclone mkdir "$dest/ota" 2>/dev/null || true
+            rclone copy "images/$BOARD/ota/" "$dest/ota" \
+              --transfers 4 --stats-one-line --stats 30s
+          fi
+
+      - name: Upload images/OTA to draft release (GitHub-assets mode)
+        if: ${{ env.HAS_RCLONE != 'true' }}
+        working-directory: output
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(images/*.img.xz images/*.sha256 images/*.sha images/*.img.txt)
+          ota_files=(images/$BOARD/ota/*)
+          if [ ${#files[@]} -eq 0 ] && [ ${#ota_files[@]} -eq 0 ]; then
+            echo "::error::nothing found under images/ to upload"
+            exit 1
+          fi
+
+          args=("${files[@]}" "${ota_files[@]}")
+          for f in "${args[@]}"; do
+            size=$(stat -c%s "$f")
+            if [ "$size" -gt 2147483648 ]; then
+              echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — over GitHub's 2 GiB release-asset cap; it needs a OneDrive-mode build (RCLONE_CONFIG) to ship"
+              exit 1
+            fi
+          done
+
+          echo "=== uploading ${#args[@]} assets to ${TAG} @ ${TARGET_REPO} ==="
+          gh release upload "$TAG" "${args[@]}" --repo "$TARGET_REPO" --clobber
+          gh release view "$TAG" --repo "$TARGET_REPO" \
+            --json assets --jq '"release now has \(.assets | length) assets"'
+
+      - name: Upload output/images/ as-is
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Armbian-img-${{ matrix.board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ matrix.profile || 'recovery' }}-${{ matrix.security || 'plain' }}-${{ github.run_id }}
+          path: output/images/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    needs: [probe-secrets, plan, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          # Tag the pre-release slot FIRST, then flip the release visible
+          # (see build-images.yml — the <slot>/tag file is the page's slot
+          # binding; a tag-write failure must leave the release in draft).
+          if [ "${HAS_RCLONE}" = "true" ]; then
+            printf '%s\n' "$TAG" | rclone rcat "seeed-storage:armbian/images/pre-release/tag"
+            echo "tagged pre-release slot: $TAG"
+          fi
+          gh release edit "$TAG" \
+            --repo "$TARGET_REPO" \
+            --draft=false \
+            --prerelease
+
+  pages:
+    name: Deploy images page (template sync)
+    needs: [probe-secrets, plan, release]
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    # pages/id-token: deploy-pages actions-mode deployment.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: write
+    # The OneDrive share-link walk alone can take minutes on a full matrix.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          # Upstream: page on the build-source repo (cross-repo API push).
+          # Forks: deploy to THIS repo's Pages via the actions deployment.
+          # Pages go to the build-source repo (armbian-build), like
+          # build-images.yml — same target on fork and upstream.
+          repo: ${{ needs.plan.outputs.release_repo }}
+          release_repo: ${{ needs.plan.outputs.release_repo }}
+          has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+
+  # A cancelled/failed run strands the DRAFT release init-release created
+  # (the matrix never got far enough to publish it), and promote's
+  # stale-release cleanup only deletes PUBLISHED asset-less pre-releases —
+  # drafts are deliberately left alone there. Roll the draft back here.
+  # Only a STILL-DRAFT release is touched: once the release job flips it
+  # to a published pre-release the build is complete and must survive
+  # (e.g. a cancel during the trailing pages deploy).
+  cleanup:
+    name: Cleanup draft release (cancel/failure)
+    # Full chain so this runs LAST, after cancelled matrix jobs are fully
+    # terminal — no racing uploads while we delete/purge. The
+    # images-mirror concurrency group is held until this run completes,
+    # so a queued build cannot start filling the slot mid-purge either.
+    needs: [probe-secrets, plan, init-release, pages-purge, build, release, pages]
+    if: ${{ always() && (cancelled() || failure()) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Delete orphaned draft + partial slot
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "plan produced no tag — nothing was created; nothing to clean"
+            exit 0
+          fi
+          if ! gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "release $TAG does not exist — init-release never finished; nothing to clean"
+            exit 0
+          fi
+          if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::notice::$TAG is already published (the release job ran) — keeping release and slot"
+            exit 0
+          fi
+          # Still a draft: the run died before publishing — roll it back.
+          # No --cleanup-tag: a draft's tag ref only materializes on
+          # publish, so deleting it 422s with "Reference does not exist"
+          # (observed 2026-11-03). Plain delete drops the pending tag
+          # with the release; the ref delete below only matters when the
+          # tag name collided with an older published release's tag.
+          gh release delete "$TAG" --repo "$TARGET_REPO" --yes
+          gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          echo "deleted orphan draft release $TAG"
+          if [ "${HAS_RCLONE}" = "true" ]; then
+            # The slot was never tagged (the release job writes <slot>/tag
+            # before publishing), so whatever the matrix uploaded renders
+            # nowhere. Purge it now instead of leaving it for the next
+            # run's init-release.
+            rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
+              || echo "armbian/images/pre-release did not exist — nothing to purge"
+          fi
