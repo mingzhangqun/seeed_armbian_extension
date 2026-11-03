@@ -57,10 +57,10 @@ classify() {
             echo "Kernel"
             ;;
         # Armbian convention: linux-u-boot-${BOARD}_* — no extra dash between
-        # "linux-u-boot" and the board name. Both boards land in one U-Boot
-        # bucket so the page reads as a single category.
-        linux-u-boot-recomputer-rk3576-devkit*|\
-        linux-u-boot-recomputer-rk3588-devkit*)
+        # "linux-u-boot" and the board name. Match the prefix so every board
+        # (devkit, module-devkit, industrial, ...) lands in one U-Boot bucket;
+        # enumerating board names drops new boards into "Other".
+        linux-u-boot-*)
             echo "U-Boot"
             ;;
         armbian-ota*|recomputer-*ota*)
