@@ -27,7 +27,8 @@ if [[ "${OTA_ENABLE:-}" == "yes" ]]; then
         common/build-hooks/overlayroot \
         common/build-hooks/userdata-resize \
         common/build-hooks/ota-payload-security \
-        common/build-hooks/uboot-env-prefill
+        common/build-hooks/uboot-env-prefill \
+        common/build-hooks/slim-initrd-img
     do
         # shellcheck source=/dev/null
         source "${OTA_SUPPORT_DIR}/${ota_support_module}.sh"
