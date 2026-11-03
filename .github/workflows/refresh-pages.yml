@@ -24,7 +24,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-      actions: read
+      actions: write
     steps:
       - name: Probe secrets
         id: probe

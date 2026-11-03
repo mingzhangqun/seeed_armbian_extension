@@ -347,7 +347,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-      actions: read
+      actions: write
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -555,7 +555,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-      actions: read
+      actions: write
     # The OneDrive share-link walk alone can take minutes on a full matrix.
     timeout-minutes: 30
     steps:

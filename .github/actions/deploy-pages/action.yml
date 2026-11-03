@@ -283,6 +283,32 @@ runs:
 
     # ── actions mode: deploy through the run's Pages deployment ──
 
+    - name: Clear stale github-pages artifacts (actions mode)
+      # deploy-pages@v4 refuses when the run already holds a github-pages
+      # artifact — and a run CAN legitimately deploy twice (build-images:
+      # post-purge sync + post-release deploy). Drop this run's earlier
+      # artifact before uploading a fresh one.
+      if: steps.gate.outputs.mode == 'actions'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        gh api "repos/$REPO/actions/artifacts?per_page=100" > artifacts.json
+        ids="$(python3 -c '
+        import json, os
+        arts = json.load(open("artifacts.json")).get("artifacts", [])
+        run_id = int(os.environ["RUN_ID"])
+        print("\n".join(str(a["id"]) for a in arts
+                        if a["name"] == "github-pages"
+                        and (a.get("workflow_run") or {}).get("id") == run_id))')"
+        for id in $ids; do
+          gh api -X DELETE "repos/$REPO/actions/artifacts/$id" \
+            && echo "deleted stale github-pages artifact $id"
+        done
+
     - name: Stage the site (actions mode)
       if: steps.gate.outputs.mode == 'actions'
       shell: bash
