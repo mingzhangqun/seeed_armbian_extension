@@ -11,9 +11,12 @@
 # hook_pre_apply swaps only the files this board actually boots -- kernel
 # three-piece set, board dtb (+ EEPROM-detectable family) and referenced
 # overlays, boot.scr -- with a per-file "cp .swap_new + sync + rename"
-# sequence, uInitrd (the only initramfs U-Boot loads) last. Any power cut
-# leaves every file wholly old or wholly new, so whichever initramfs engine
-# boots next re-runs the prepared transaction and converges.
+# sequence, uInitrd (the only initramfs U-Boot loads) last. initrd.img-* is
+# classified skip: the slim build hook (common/build-hooks/slim-initrd-img.sh)
+# prunes it from the golden image and rk_secure_boot_find_ramdisk resolves
+# ramdisks without it. Any power cut leaves every file wholly old or wholly
+# new, so whichever initramfs engine boots next re-runs the prepared
+# transaction and converges.
 #
 # armbianEnv.txt / .dist are never swapped here: the live env feeds the
 # selection and is captured to ${LOGDIR}/armbianEnv.pre-ota for the
@@ -39,9 +42,14 @@ bsw_classify() { # $1=rel $2=fdtfile $3=overlay_prefix
         armbianEnv.txt|armbianEnv.txt.dist) echo skip ;;
         System.map-*|config-*|boot.cmd)     echo skip ;;
         lost+found|.next|.list)             echo skip ;;
+        # initrd.img-* was pruned from the golden image by
+        # common/build-hooks/slim-initrd-img.sh (v0.8 patch #7); U-Boot only
+        # loads uInitrd-*, so the raw file is dead weight on the wire and on
+        # the partition. Older payloads may still carry it: skip, don't swap.
+        initrd.img*)                        echo skip ;;
         boot.scr|boot.bmp)                  echo normal ;;
         uInitrd|uInitrd-*)                  echo critical ;;
-        Image|vmlinuz*|initrd.img*)         echo normal ;;
+        Image|vmlinuz*)                     echo normal ;;
         dtb)                                echo normal ;;
         dtb-*/"$2")                        echo normal ;;
         dtb-*/rockchip/*recomputer-rk*.dtb) echo normal ;;

@@ -81,6 +81,25 @@ function rk_secure_boot_apply_default_overlays() {
     mv -f "${tmp_out}" "${dtb_file}"
 }
 
+# FIT's ramdisk node takes the RAW gzip cpio; uInitrd-* on /boot is the same
+# payload with a 64-byte mkimage legacy header that FIT consumers must NOT see
+# (U-Boot boots FIT images directly, no outer uImage unwrap). initrd.img-*
+# used to be the raw source, but the slim build-hook prunes it, so resolve in
+# order: raw initrd.img-* (legacy layouts) -> strip uInitrd-* mkimage header ->
+# bare uInitrd symlink target -> rootfs.cpio.gz fallback.
+function rk_secure_boot_strip_uimage_header() {
+    local src="$1" dst="$2"
+
+    # mkimage legacy header magic: 0x27051956 at offset 0
+    if [[ "$(od -An -tx1 -N4 "${src}" 2>/dev/null | tr -d ' \n')" == "27051956" ]]; then
+        dd if="${src}" of="${dst}" bs=64 skip=1 status=none ||
+            exit_with_error "FIT packaging failed: cannot strip uImage header" "${src}"
+        printf '%s\n' "${dst}"
+        return 0
+    fi
+    printf '%s\n' "${src}"
+}
+
 function rk_secure_boot_find_ramdisk() {
     local boot_dir="$1"
 
@@ -88,9 +107,17 @@ function rk_secure_boot_find_ramdisk() {
     if compgen -G "${boot_dir}/initrd.img-"* > /dev/null; then
         RK_SECURE_BOOT_RAMDISK_PATH="$(ls -1t ${boot_dir}/initrd.img-* | head -1)"
         display_alert "fit-post-initrd" "Using official initrd: ${RK_SECURE_BOOT_RAMDISK_PATH}" "info"
+    elif compgen -G "${boot_dir}/uInitrd-"* > /dev/null; then
+        local uinitrd_versioned stripped
+        uinitrd_versioned="$(ls -1t ${boot_dir}/uInitrd-* | head -1)"
+        stripped="$(mktemp -t fit-initrd.XXXXXX)"
+        RK_SECURE_BOOT_RAMDISK_PATH="$(rk_secure_boot_strip_uimage_header "${uinitrd_versioned}" "${stripped}")"
+        display_alert "fit-post-initrd" "Using uInitrd (mkimage header stripped): ${uinitrd_versioned}" "info"
     elif [[ -f "${boot_dir}/uInitrd" ]]; then
-        RK_SECURE_BOOT_RAMDISK_PATH="${boot_dir}/uInitrd"
-        display_alert "fit-post-initrd" "Using uInitrd: ${RK_SECURE_BOOT_RAMDISK_PATH}" "info"
+        local stripped
+        stripped="$(mktemp -t fit-initrd.XXXXXX)"
+        RK_SECURE_BOOT_RAMDISK_PATH="$(rk_secure_boot_strip_uimage_header "${boot_dir}/uInitrd" "${stripped}")"
+        display_alert "fit-post-initrd" "Using uInitrd (mkimage header stripped): ${boot_dir}/uInitrd" "info"
     elif [[ -f "${SRC}/userpatches/overlay/rootfs.cpio.gz" ]]; then
         RK_SECURE_BOOT_RAMDISK_PATH="${SRC}/userpatches/overlay/rootfs.cpio.gz"
         display_alert "fit-post-initrd" "Official initrd not found, falling back to rootfs.cpio.gz" "warn"
@@ -105,9 +132,22 @@ function rk_secure_boot_find_kernel_image() {
     local kernel_version=""
     local kernel_path=""
 
+    # ramdisk_path may be an initrd.img-*, a stripped mktemp file derived from
+    # uInitrd-*, or a bare uInitrd. Recover the kernel version from whichever
+    # versioned artifact is on disk; prefer initrd.img-* (raw, paired with
+    # vmlinuz), fall back to uInitrd-* (same kernel, mkimage-wrapped).
     case "$(basename "${ramdisk_path}")" in
         initrd.img-*) kernel_version="$(basename "${ramdisk_path}" | sed 's/^initrd\.img-//')" ;;
+        uInitrd-*)    kernel_version="$(basename "${ramdisk_path}" | sed 's/^uInitrd-//')" ;;
     esac
+    if [[ -z "${kernel_version}" ]]; then
+        local cand
+        for cand in "${boot_dir}"/initrd.img-* "${boot_dir}"/uInitrd-*; do
+            [[ -e "${cand}" ]] || continue
+            kernel_version="$(basename "${cand}" | sed -e 's/^initrd\.img-//' -e 's/^uInitrd-//')"
+            break
+        done
+    fi
 
     if [[ -n "${kernel_version}" && -f "${boot_dir}/vmlinuz-${kernel_version}" ]]; then
         kernel_path="${boot_dir}/vmlinuz-${kernel_version}"
