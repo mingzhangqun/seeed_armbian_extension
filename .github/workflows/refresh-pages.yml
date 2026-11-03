@@ -12,7 +12,7 @@ on:
 # Serialize with builds and promotes: the walk must not sample a tree
 # that a build is filling or a promote is rotating.
 concurrency:
-  group: seeed-build
+  group: images-mirror
   cancel-in-progress: false
 
 jobs:

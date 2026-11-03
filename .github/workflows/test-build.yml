@@ -60,7 +60,7 @@ env:
   DOCKER_IMAGE: "ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest"
 
 concurrency:
-  group: seeed-build
+  group: images-mirror
   cancel-in-progress: false
 
 jobs:

@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: seeed-build
+  group: images-mirror
   cancel-in-progress: false
 
 jobs:

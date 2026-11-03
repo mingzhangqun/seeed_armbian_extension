@@ -64,9 +64,12 @@ env:
   VENDOR: "Armbian"
   DOCKER_IMAGE: "ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest"
 
-# serialize runs: init-release purges pre-release/ while the matrix fills it.
+# Serialize every run that touches the images mirror (this group is shared
+# with promote/refresh/test): init-release purges pre-release/ while the
+# matrix fills it, promote rotates the slots, the page walk samples the
+# tree — none of those may overlap.
 concurrency:
-  group: seeed-build
+  group: images-mirror
   cancel-in-progress: false
 
 jobs:
