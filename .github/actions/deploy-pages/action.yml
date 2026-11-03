@@ -234,10 +234,22 @@ runs:
 
         # Fetch release list at build time and embed it — eliminates the
         # runtime GitHub API call (60 req/hr/IP limit for unauthenticated
-        # clients) and makes the page load instantly.
-        gh release list --repo "$PAGE_REPO" --limit 30 --json tagName,isPrerelease,publishedAt \
-          | jq '[.[] | {tag_name: .tagName, prerelease: .isPrerelease, published_at: .publishedAt}]' \
-          > releases.json
+        # clients) and makes the page load instantly. The API throws
+        # occasional 504s (2026-11-03 refresh run) — retry instead of
+        # killing an otherwise-good deploy.
+        ok=""
+        for attempt in 1 2 3; do
+          if gh release list --repo "$PAGE_REPO" --limit 30 \
+               --json tagName,isPrerelease,publishedAt > releases.raw; then
+            ok=1
+            break
+          fi
+          echo "gh release list failed (attempt $attempt/3), retrying in $((attempt * 10))s" >&2
+          sleep $((attempt * 10))
+        done
+        [ -n "$ok" ] || { echo "::error::gh release list failed after 3 attempts"; exit 1; }
+        jq '[.[] | {tag_name: .tagName, prerelease: .isPrerelease, published_at: .publishedAt}]' \
+          < releases.raw > releases.json
 
         # Substitute the placeholders from FILES, never environment
         # variables: the share-link map grows with the mirror and blew
@@ -339,22 +351,59 @@ runs:
         TAG: ${{ inputs.tag }}
       run: |
         set -euo pipefail
-        BLOB=$(gh api --method POST "repos/$REPO/git/blobs" \
-          -f content="$(base64 -w0 images.html)" -f encoding=base64 --jq .sha)
-        TREE=$(gh api --method POST "repos/$REPO/git/trees" \
-          -f 'tree[][path]=images/index.html' -f 'tree[][mode]=100644' \
-          -f 'tree[][type]=blob' -f "tree[][sha]=$BLOB" --jq .sha)
-        PARENT=$(gh api "repos/$REPO/branches/gh-pages" --jq .commit.sha 2>/dev/null || true)
-        if [ -n "$PARENT" ]; then
-          COMMIT=$(gh api --method POST "repos/$REPO/git/commits" \
-            -f message="pages: images $TAG" -f tree="$TREE" -f "parents[]=$PARENT" --jq .sha)
-          gh api --method PATCH "repos/$REPO/git/refs/heads/gh-pages" -f sha="$COMMIT" --jq .object.sha
-        else
-          COMMIT=$(gh api --method POST "repos/$REPO/git/commits" \
-            -f message="pages: images $TAG" -f tree="$TREE" --jq .sha)
-          gh api --method POST "repos/$REPO/git/refs" -f ref=refs/heads/gh-pages -f sha="$COMMIT" --jq .ref
-        fi
-        echo "gh-pages commit pushed: $COMMIT"
+        # images.html embeds the full link map (hundreds of KB) — pass the
+        # JSON body via stdin, never the command line: a big page blew the
+        # kernel's 128 KiB per-arg limit and killed gh with "Argument list
+        # too long" (exit 126) before any API call.
+        python3 - "$REPO" "$TAG" <<'PYEOF'
+        import base64, json, subprocess, sys
+
+        repo, tag = sys.argv[1], sys.argv[2]
+
+        def gh(*args, input=None):
+            r = subprocess.run(["gh", "api", *args], input=input,
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"::error::gh api {' '.join(args)} failed: {r.stderr.strip()}", file=sys.stderr)
+                sys.exit(1)
+            return r.stdout.strip()
+
+        html = base64.b64encode(open("images.html", "rb").read()).decode()
+        blob = gh("--method", "POST", f"repos/{repo}/git/blobs", "--input", "-",
+                  "--jq", ".sha",
+                  input=json.dumps({"content": html, "encoding": "base64"}))
+        print(f"blob: {blob}")
+
+        tree = gh("--method", "POST", f"repos/{repo}/git/trees", "--input", "-",
+                  "--jq", ".sha",
+                  input=json.dumps({"tree": [{"path": "images/index.html", "mode": "100644",
+                                               "type": "blob", "sha": blob}]}))
+        print(f"tree: {tree}")
+
+        # gh api prints the raw error body to stdout on failure, so a 404
+        # (no gh-pages branch yet) leaves garbage in parent — validate the
+        # shape instead of testing for emptiness.
+        r = subprocess.run(["gh", "api", f"repos/{repo}/branches/gh-pages",
+                            "--jq", ".commit.sha"],
+                           capture_output=True, text=True)
+        parent = r.stdout.strip() if r.returncode == 0 else ""
+        import re
+        if re.fullmatch(r"[0-9a-f]{40}", parent):
+            body = {"message": f"pages: images {tag}", "tree": tree, "parents": [parent]}
+            commit = gh("--method", "POST", f"repos/{repo}/git/commits", "--input", "-",
+                        "--jq", ".sha", input=json.dumps(body))
+            gh("--method", "PATCH", f"repos/{repo}/git/refs/heads/gh-pages",
+               "--input", "-", "--jq", ".object.sha",
+               input=json.dumps({"sha": commit}))
+        else:
+            body = {"message": f"pages: images {tag}", "tree": tree}
+            commit = gh("--method", "POST", f"repos/{repo}/git/commits", "--input", "-",
+                        "--jq", ".sha", input=json.dumps(body))
+            gh("--method", "POST", f"repos/{repo}/git/refs",
+               "--input", "-", "--jq", ".ref",
+               input=json.dumps({"ref": "refs/heads/gh-pages", "sha": commit}))
+        print(f"gh-pages commit pushed: {commit}")
+        PYEOF
 
     - name: Trigger and verify the pages build (api mode)
       # The legacy branch pipeline can wedge silently (seen 2026-11-02 on
@@ -367,9 +416,15 @@ runs:
         REPO: ${{ inputs.repo }}
       run: |
         set -euo pipefail
-        gh api --method POST "repos/$REPO/pages" -f 'source[branch]=gh-pages' -f 'source[path]=/' >/dev/null 2>&1 \
-          || gh api --method PATCH "repos/$REPO/pages" -f 'source[branch]=gh-pages' -f 'source[path]=/' >/dev/null 2>&1 \
-          || echo "::warning::could not assert the pages source config"
+        # Assert by READING the config, not by writing it: the deploy token
+        # has contents+pages-build rights but NOT pages-settings admin —
+        # POST/PATCH /pages 404s (no perms), which made the old
+        # write-to-assert emit a permanent warning on every run
+        # (2026-11-03). GET is allowed; warn only on actual drift. The
+        # build trigger below remains the hard gate for stale content.
+        cur="$(gh api "repos/$REPO/pages" --jq '.source.branch + " " + .source.path' 2>/dev/null || echo '?')"
+        [ "$cur" = "gh-pages /" ] \
+          || echo "::warning::pages source is '$cur', expected 'gh-pages /' — fix in repo Settings → Pages"
         if ! gh api --method POST "repos/$REPO/pages/builds" >/dev/null 2>&1; then
           echo "::error::POST /pages/builds failed — the site would serve stale content"
           exit 1
