@@ -335,6 +335,35 @@ jobs:
             "${target_args[@]}" \
             --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
+  # Catch the page up right after the pre-release purge (see
+  # build-images.yml) — otherwise the stale pre slot advertises dead
+  # links for the whole build window.
+  pages-purge:
+    name: Deploy images page (post-purge sync)
+    needs: [probe-secrets, plan, init-release]
+    if: ${{ !cancelled() && needs.init-release.result == 'success' && needs.probe-secrets.outputs.has_rclone == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.plan.outputs.release_repo || github.repository }}
+          release_repo: ${{ needs.plan.outputs.release_repo }}
+          has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+
   build:
     needs: [probe-secrets, plan, init-release]
     runs-on: ubuntu-latest

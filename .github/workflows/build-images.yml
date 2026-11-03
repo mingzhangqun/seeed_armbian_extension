@@ -363,6 +363,39 @@ jobs:
             "${target_args[@]}" \
             --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
+  # The purge in init-release deleted the mirror's pre-release/ slot; the
+  # deployed page still advertises it (with dead links) for the whole
+  # build window. Catch it up immediately: latest/previous are full
+  # cache hits in the walk, so this costs under a minute. OneDrive mode
+  # only — without the mirror there is no purge and nothing to sync.
+  pages-purge:
+    name: Deploy images page (post-purge sync)
+    needs: [probe-secrets, plan, init-release]
+    if: ${{ !cancelled() && needs.init-release.result == 'success' && needs.probe-secrets.outputs.has_rclone == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: ${{ needs.plan.outputs.tag }}
+          # Upstream: page on the build-source repo (cross-repo API push).
+          # Forks: deploy to THIS repo's Pages via the actions deployment.
+          repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.plan.outputs.release_repo || github.repository }}
+          release_repo: ${{ needs.plan.outputs.release_repo }}
+          has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+
   build:
     needs: [probe-secrets, plan, init-release]
     runs-on: ubuntu-26.04
