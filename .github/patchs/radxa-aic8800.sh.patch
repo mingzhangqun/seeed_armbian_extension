@@ -1,8 +1,8 @@
 diff --git a/extensions/radxa-aic8800.sh b/extensions/radxa-aic8800.sh
-index 82ac3e17f..73eda00a6 100644
+index d8279cb55..2ea037f3a 100644
 --- a/extensions/radxa-aic8800.sh
 +++ b/extensions/radxa-aic8800.sh
-@@ -10,6 +10,31 @@ function extension_finish_config__install_kernel_headers_for_aic8800_dkms() {
+@@ -10,11 +10,72 @@ function extension_finish_config__install_kernel_headers_for_aic8800_dkms() {
  	display_alert "Forcing INSTALL_HEADERS=yes; for use with aic8800 dkms" "${EXTENSION}" "debug"
  }
  
@@ -33,9 +33,6 @@ index 82ac3e17f..73eda00a6 100644
 +
  function post_install_kernel_debs__install_aic8800_dkms_package() {
  
- 	if linux-version compare "${KERNEL_MAJOR_MINOR}" ge 7.3; then
-@@ -18,7 +43,43 @@ function post_install_kernel_debs__install_aic8800_dkms_package() {
- 	fi
  	[[ "${INSTALL_HEADERS}" != "yes" ]] || [[ "${KERNEL_HAS_WORKING_HEADERS}" != "yes" ]] && return 0
  	[[ -z $AIC8800_TYPE ]] && return 0
 -	latest_version="$(github_latest_release_tag "radxa-pkg/aic8800")" || return 1
@@ -79,15 +76,11 @@ index 82ac3e17f..73eda00a6 100644
  
  	# Determine the DKMS package name based on the requested AIC8800_TYPE.
  	declare aic8800_dkms_file_name
-@@ -35,24 +96,22 @@ function post_install_kernel_debs__install_aic8800_dkms_package() {
+@@ -31,24 +92,21 @@ function post_install_kernel_debs__install_aic8800_dkms_package() {
  	if [[ "${GITHUB_MIRROR}" == "ghproxy" ]]; then
  		ghproxy_header="https://ghfast.top/"
  	fi
 -	declare base_url="https://github.com/radxa-pkg/aic8800/releases/download/${latest_version}"
- 
--	# Local download cache on the host; the version is part of the filename, so it doubles as the cache key.
--	declare down_dir="${SRC}/cache/radxa-aic8800-debs"
--	mkdir -p "${down_dir}"
 +	# URL-encode the version for use in the default GitHub download URL.
 +	declare aic8800_version_encoded
 +	if [[ -n "${AIC8800_BASE_URL:-}" ]]; then
@@ -95,7 +88,10 @@ index 82ac3e17f..73eda00a6 100644
 +	else
 +		aic8800_version_encoded=$(printf '%s' "${latest_version}" | jq -sRr @uri)
 +	fi
-+
+ 
+-	# Local download cache on the host; the version is part of the filename, so it doubles as the cache key.
+-	declare down_dir="${SRC}/cache/radxa-aic8800-debs"
+-	mkdir -p "${down_dir}"
 +	# Base URL for the release assets. Override to use a local mirror.
 +	declare base_url="${AIC8800_BASE_URL:-https://github.com/radxa-pkg/aic8800/releases/download/${aic8800_version_encoded}}"
  

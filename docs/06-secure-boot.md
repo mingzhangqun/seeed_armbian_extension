@@ -133,7 +133,7 @@ Rules ([`secure-boot-uboot.sh:444-480`](../rk_secure-disk-encryption/build-hooks
 - The directory **must** contain `private_key.pem`; `dev.crt` and
   `public_key.pem` are optional — both are regenerated from the private
   key when absent. Take the pair from an earlier build or from your CI
-  secrets ([07](07-tools-and-ci.md#3-ci-builds-seeed-build-workflow)).
+  secrets ([07](07-tools-and-ci.md#3-ci-builds-images-build-workflow)).
 - Only the **path** crosses into the build container — the key material
   itself stays on the host. The build restores keys from the directory;
   it never writes back to it.

@@ -1,0 +1,392 @@
+name: "Images - Release"
+
+# Promote the newest pre-release to Stable:
+#   1. pick newest pre-release (no input — no reason to promote an older tag)
+#   2. VALIDATE the slot: its tag file must name this release (a build/
+#      promote mismatch must never rotate) and the tree must be well-formed
+#      — every <board>/<sub>/ holds >=1 *.img.xz with a .sha256 sibling
+#      each and a non-empty ota/, no stray files (exact expected-set
+#      checking returns with a future slot MANIFEST receipt)
+#   3. ROTATE the whole slot tree: previous ⟵ latest ⟵ pre-release
+#      (server-side, one move per slot — every board flips together)
+#   4. PUBLISH the GitHub release (prerelease → released)
+#   5. clean up superseded pre-releases; push the images page
+#
+# IDEMPOTENT RECOVERY: no pre-release at all + latest/tag already names the
+# newest stable release → a previous run died after rotate but before pages.
+# Recover by skipping validate/rotate/cleanup and jumping straight to pages
+# (mode=recover-page). Any other mismatch is a real failure and aborts.
+#
+# OneDrive-only: without RCLONE_CONFIG there is nothing to rotate.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: images-mirror
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.rel.outputs.tag }}
+      target_repo: ${{ steps.rel.outputs.target_repo }}
+      has_rclone: ${{ steps.probe.outputs.has_rclone }}
+      mode: ${{ steps.rel.outputs.mode }}
+    steps:
+      - name: Probe secrets
+        id: probe
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          if [ -n "$RCLONE_CONFIG" ]; then
+            echo "has_rclone=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_rclone=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        # Reads the rclone config from the repo's own setup-onedrive action
+        # inputs — NOT from secrets.RCLONE_CONFIG. secrets.* is not allowed
+        # in step-level if:, but action inputs are evaluated before if: and
+        # pass secrets through fine; rclone_conf then reads the file the
+        # action wrote. Keeps rclone usable inside Resolve for recovery.
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Resolve the tag and guard
+        id: rel
+        env:
+          # Cross-repo targets need RELEASE_GH_TOKEN (PAT with contents:write);
+          # same-repo falls back to GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RCLONE_CONFIG" ]; then
+            echo "::error::RCLONE_CONFIG is not set — promotion requires the OneDrive mirror. GitHub-assets-mode (fork) releases are promoted by hand in the UI."
+            exit 1
+          fi
+          # RCLONE_CONFIG env can't hold the secret (secrets.* is not allowed
+          # in the step-level if: above); the setup-onedrive action already
+          # wrote it to disk, so point rclone at that file instead.
+          export RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
+
+          # Find the newest pre-release across both repos we might have built
+          # into (this repo + the owner's armbian-build). Tags must match
+          # YYMMDD-HHMM (the build stamp) — a hand-made release with a
+          # free-form tag would win the lexicographic sort otherwise and then
+          # fail the OneDrive tag check anyway. Query both repos and pick the
+          # newer: either side may hold the latest build.
+          tag_pat='^[0-9]{6}-[0-9]{4}$'
+          jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
+          tag_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
+                  --json tagName,isPrerelease --jq "$jq_pick")"
+          ab_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
+          tag_ab="$(gh release list --repo "$ab_repo" \
+                  --json tagName,isPrerelease --jq "$jq_pick" 2>/dev/null || true)"
+          tag=""; target_repo=""
+          if [ -n "$tag_here" ] && [ -n "$tag_ab" ]; then
+            if [[ "$tag_here" > "$tag_ab" ]]; then
+              tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
+            else
+              tag="$tag_ab"; target_repo="$ab_repo"
+            fi
+          elif [ -n "$tag_here" ]; then
+            tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
+          elif [ -n "$tag_ab" ]; then
+            tag="$tag_ab"; target_repo="$ab_repo"
+          fi
+
+          # ── idempotent recovery: no pre-release means either "nothing to
+          # promote" or "a previous run died after rotate but before pages".
+          # Detect the latter (latest/tag == newest STABLE release) and let
+          # the pages job run; anything else is a real failure.
+          if [ -z "$tag" ]; then
+            jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
+            stable_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
+                --json tagName,isPrerelease --jq "$jq_stable")"
+            stable_ab="$(gh release list --repo "$ab_repo" \
+                --json tagName,isPrerelease --jq "$jq_stable" 2>/dev/null || true)"
+            stable=""; stable_repo=""
+            if [ -n "$stable_here" ] && [ -n "$stable_ab" ]; then
+              if [[ "$stable_here" > "$stable_ab" ]]; then
+                stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
+              else
+                stable="$stable_ab"; stable_repo="$ab_repo"
+              fi
+            elif [ -n "$stable_here" ]; then
+              stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
+            elif [ -n "$stable_ab" ]; then
+              stable="$stable_ab"; stable_repo="$ab_repo"
+            fi
+            [ -n "$stable" ] \
+              || { echo "::error::no pre-release and no stable release found anywhere"; exit 1; }
+
+            base="seeed-storage:armbian/images"
+            slot_listing="$(mktemp)"
+            rclone lsf "$base" --dirs-only --contimeout 15s > "$slot_listing" \
+              || { echo "::error::rclone lsf failed on $base — OneDrive unreachable?"; exit 1; }
+            grep -qx "pre-release/" "$slot_listing" \
+              && { echo "::error::no timestamped pre-release release but the slot exists — build in flight or orphan slot; aborting"; exit 1; }
+            grep -qx "latest/" "$slot_listing" \
+              || { echo "::error::no pre-release and no latest/ on the mirror — nothing was ever promoted"; exit 1; }
+            latest_tag="$(rclone cat "$base/latest/tag" --contimeout 15s 2>/dev/null | tr -d '[:space:]')"
+            [ "$latest_tag" = "$stable" ] \
+              || { echo "::error::no pre-release; latest/tag is '${latest_tag:-<empty>}' but newest stable is '$stable' — inconsistent state, refusing to guess"; exit 1; }
+
+            echo "::notice::no pre-release; latest/ already holds the newest stable ($stable) — recovering the pages deploy (mode=recover-page)"
+            echo "mode=recover-page" >> "$GITHUB_OUTPUT"
+            echo "tag=$stable" >> "$GITHUB_OUTPUT"
+            echo "target_repo=$stable_repo" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          state="$(gh release view "$tag" --repo "$target_repo" \
+                    --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
+          echo "release state (isDraft prerelease): $state"
+          [ "$state" = "false true" ] \
+            || { echo "::error::$tag is not a published pre-release (draft or already stable)"; exit 1; }
+          echo "mode=promote" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
+          echo "promoting $tag in $target_repo"
+
+      - name: Validate staging completeness
+        # Skipped in recover-page mode: there is nothing staged to validate.
+        if: steps.rel.outputs.mode == 'promote'
+        # Shape check BEFORE anything is deleted — no build manifest to
+        #   a) the slot's tag file names the release being promoted —
+        #      only the build's release job writes it, so this is both
+        #      the provenance gate and the race detector
+        #   b) every <board>/<sub>/ on the mirror is complete: >=1
+        #      *.img.xz, each with a .sha256 sibling, non-empty ota/
+        #   c) no stray files at the slot or board roots
+        # Release gating (draft publishes only when every matrix entry
+        # uploaded) already guarantees the planned subs are all there.
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, os, subprocess, sys
+          from collections import defaultdict
+
+          tag_expected = os.environ["TAG"].strip()
+          base = "seeed-storage:armbian/images/pre-release"
+
+          def lsjson(path):
+              r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", path],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f"::error::lsjson failed for {path}: {r.stderr.strip()}")
+                  sys.exit(1)
+              return json.loads(r.stdout or "[]")
+
+          errors = []
+
+          # a) the slot tag is the build's signature on pre-release/ — it
+          # must name THIS release, else the slot holds a different build.
+          cat = subprocess.run(["rclone", "cat", f"{base}/tag"],
+                               capture_output=True, text=True)
+          if cat.returncode != 0:
+              errors.append("pre-release/tag is missing — slot never finished a build?")
+          elif cat.stdout.strip() != tag_expected:
+              errors.append(f"pre-release/tag is {cat.stdout.strip()!r} but promoting {tag_expected!r} — build/promote mismatch")
+
+          files = lsjson(base)
+          total_files = 0
+
+          # Slot-first layout: paths are "<board>/<sub>/[ota/]<file>";
+          # the root-level tag file is accounted for above.
+          by_sub = defaultdict(list)
+          for f in files:
+              p = f["Path"]
+              if p == "tag":
+                  continue
+              total_files += 1
+              parts = p.split("/", 2)
+              if len(parts) == 1:
+                  errors.append(f"stray file at pre-release/ root: {p}")
+              elif len(parts) == 2:
+                  errors.append(f"stray file at pre-release/{parts[0]}/ root: {p}")
+              else:
+                  by_sub[(parts[0], parts[1])].append(parts[2])
+
+          if not by_sub:
+              errors.append("pre-release/ holds no <board>/<sub>/ content at all")
+
+          for (board, sub), fs in sorted(by_sub.items()):
+              xz = sorted(n for n in fs if n.endswith(".img.xz"))
+              if not xz:
+                  errors.append(f"{board}: pre-release/{board}/{sub}/ has no *.img.xz")
+              for x in xz:
+                  if x + ".sha256" not in fs:
+                      errors.append(f"{board}: pre-release/{board}/{sub}/{x} has no .sha256 sibling")
+              ota = [n for n in fs if n.startswith("ota/")]
+              if not ota:
+                  errors.append(f"{board}: pre-release/{board}/{sub}/ota/ is empty or missing")
+              print(f"{board}/{sub}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"staging OK: tag {tag_expected}, {len({b for b, _ in by_sub})} boards, "
+                f"{len(by_sub)} board/sub dirs, {total_files} files")
+          PY
+
+      - name: Rotate slots (whole tree, server-side)
+        # previous ⟵ latest ⟵ pre-release — ONE move per slot: the
+        # rotation unit is the release unit, so every board flips
+        # together. Existence checked explicitly — bare `|| echo` would
+        # swallow real rclone failures, and moveto onto an existing dir
+        # nests instead of renaming. Order: publish first (flip release
+        # to stable), then rotate; each move is a single server-side
+        # rename, so a mid-rotate failure leaves a clean state the
+        # rollback inspects rather than guesses about.
+        if: steps.rel.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
+        run: |
+          set -euo pipefail
+          base="seeed-storage:armbian/images"
+          slots_file="$(mktemp)"
+
+          # Snapshot the slot layout in ONE listing — a failed listing
+          # must fail the step, not masquerade as "slot missing" (the old
+          # per-check lsf swallowed errors behind 2>/dev/null), and one
+          # API call serves every existence check.
+          list_slots() {
+            rclone lsf "$base" --dirs-only --contimeout 15s > "$slots_file" \
+              || { echo "::error::rclone lsf failed on $base — OneDrive unreachable?"; exit 1; }
+          }
+          has_slot() { grep -qx "$1/" "$slots_file"; }
+
+          list_slots
+          # Record whether a stable slot exists before we touch anything
+          # (rollback only has something to restore when it did).
+          had_latest=false
+          if has_slot latest; then had_latest=true; fi
+
+          # Step 1: publish the release (flip prerelease → stable)
+          gh release edit "$TAG" --repo "$TARGET_REPO" --prerelease=false
+          gh release edit "$TAG" --repo "$TARGET_REPO" --notes \
+            "Promoted to Stable: armbian/images/latest/ rotated (previous ⟵ latest, pre-release ⟵ latest)."
+
+          # Step 2: rotate the whole slot tree — all boards at once. The
+          # pre-rotation snapshot stays valid throughout: the first two
+          # ops only touch previous/ and latest/, and the last op only
+          # needs pre-release/ to still exist.
+          if ! (
+            set -e
+            if has_slot previous; then
+              rclone purge "$base/previous"
+            else
+              echo "no previous/ — nothing to purge"
+            fi
+            if has_slot latest; then
+              rclone moveto "$base/latest" "$base/previous"
+            else
+              echo "no latest/ (first promote)"
+            fi
+            has_slot pre-release \
+              || { echo "::error::pre-release/ vanished (race with a build?)"; exit 1; }
+            rclone moveto "$base/pre-release" "$base/latest"
+          ); then
+            echo "::error::rotate failed — inspecting state for rollback..."
+            # Fresh, best-effort listing: the snapshot above is stale now.
+            if rclone lsf "$base" --dirs-only --contimeout 15s > "$slots_file" 2>/dev/null; then
+              if has_slot latest; then
+                # Failed before latest moved away: latest/ is intact.
+                # previous/ may be gone — it held superseded content either way.
+                echo "latest/ intact — nothing to roll back"
+              elif [ "$had_latest" = "true" ]; then
+                # latest was moved to previous/ but the new one never landed
+                if rclone moveto "$base/previous" "$base/latest" 2>/dev/null; then
+                  echo "rolled back latest/ from previous/"
+                else
+                  echo "::error::rollback failed — the pre-rotate latest/ is at previous/, rotate by hand"
+                fi
+              else
+                echo "no prior latest/ — nothing to restore; pre-release/ untouched"
+              fi
+            else
+              echo "::error::cannot re-list slots — inspect by hand: the pre-rotate latest/ (if any) sits at previous/"
+            fi
+            echo "::error::rollback complete — release is stable but files not rotated"
+            exit 1
+          fi
+          echo "rotated — $(rclone lsf "$base/latest" --recursive --files-only | wc -l) files in latest/"
+
+      - name: Clean up superseded pre-releases
+        # Older pre-releases carry no assets at all (the binaries live in
+        # the OneDrive slots; the slot's tag file is the build signature)
+        # — pure noise once superseded. Only asset-less releases are
+        # deleted, so a GitHub-assets-mode (fork) release with real
+        # binaries is never touched. Drafts are left alone — they may
+        # belong to in-flight builds. Skipped in recover-page mode:
+        # nothing was promoted, so nothing was superseded.
+        if: steps.rel.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          stale="$(gh release list --repo "$TARGET_REPO" --limit 100 \
+            --json tagName,isPrerelease,isDraft \
+            --jq ".[] | select(.isPrerelease and .isDraft == false and .tagName != \"$TAG\") | .tagName")"
+          [ -n "$stale" ] || { echo "no superseded pre-releases"; exit 0; }
+          while read -r t; do
+            kind="$(gh release view "$t" --repo "$TARGET_REPO" --json assets \
+              --jq 'if ([.assets[].name] == []) then "asset-less" else "has-binaries" end')"
+            if [ "$kind" = "asset-less" ]; then
+              echo "deleting superseded pre-release: $t"
+              gh release delete "$t" --repo "$TARGET_REPO" --yes --cleanup-tag \
+                || echo "::warning::failed to delete $t"
+            else
+              echo "keeping $t (assets are not asset-less)"
+            fi
+          done <<<"$stale"
+
+  # Static download page push (template sync).
+  pages:
+    name: Deploy the images page (build-source repo's Pages)
+    needs: promote
+    runs-on: ubuntu-latest
+    # pages/id-token: deploy-pages actions-mode deployment.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: write
+    # The OneDrive share-link walk alone can take minutes on a full matrix.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: ${{ needs.promote.outputs.tag }}
+          # The page always lives on the build-source repo (armbian-build),
+          # pushed cross-repo to its gh-pages via the API (needs
+          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
+          repo: ${{ needs.promote.outputs.target_repo }}
+          release_repo: ${{ needs.promote.outputs.target_repo }}
+          has_rclone: ${{ needs.promote.outputs.has_rclone }}
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
