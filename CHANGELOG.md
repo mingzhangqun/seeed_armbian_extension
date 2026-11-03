@@ -127,7 +127,7 @@ Covers the work against the initial import (merge base `9980aee`,
   key — no Armbian rebuild needed. Includes a sample-FIT builder mode for
   testing the re-sign path and refuses to re-sign the build-time staging
   artifact in place.
-- **`seeed-build` CI workflow.** A matrix image builder on GitHub Actions:
+- **Image-builder CI workflow (`build-images.yml`, was `seeed-build`).** A matrix image builder on GitHub Actions:
   preflight validates secrets before the multi-hour build (FIT key pair,
   64-char passphrase, live rclone probe), the matrix is planned from dispatch
   checkboxes (board × release × tier × OTA × security; plain and secure-boot
@@ -181,6 +181,53 @@ Covers the work against the initial import (merge base `9980aee`,
   `RKSDK_TOOLS_GIT_URL` / `RKSDK_TOOLS_BRANCH`.
 - **Mirror/cache passthrough** through the build wrapper.
 - **PCIe ASPM disabled** in generated images via `extraargs=pcie_aspm=off`.
+
+#### CI
+
+- **OneDrive mirror: slot-first layout + per-slot tag files; no more
+  build-info.json.** The images tree is re-rooted from
+  `images/<board>/<slot>/…` to
+  `images/<slot>/<board>/<profile>[-secure-boot]/…` (slot ∈ pre-release /
+  latest / previous): rotation unit now equals release unit, promotion is
+  one server-side move per slot (every board flips together, no per-board
+  parallel rclone), and the staging purge at build start is a single
+  call. Each slot carries a `tag` file (the YYMMDD-HHMM build stamp)
+  written once every matrix entry has uploaded — it is the page's slot
+  binding (slot labels no longer inferred from release-list ordering) and
+  promote verifies it names the release being promoted before rotating.
+  The release carries no assets: the old `build-info.json` manifest is
+  gone (its identity role moved to `<slot>/tag`; releases without assets
+  are what promote's cleanup treats as superseded). The page walk lists
+  the whole `images/` tree in one `lsjson -R` (boards are discovered, no
+  board list input) and reads the three `tag` files; the release-list
+  inference stays as the fork-mode fallback (`SLOTS={}`).
+- **`apt-repo-publish.yml`: rk3576-module board, family-scoped kernel.**
+  New `build_rk3576_module` dispatch input extends the per-board matrix.
+  Kernel debs are family-scoped in Armbian (`linux-image`/`-headers`/
+  `-dtb` are per LINUXFAMILY and the DTB deb carries every family DTB),
+  so the first selected board of each family compiles the kernel once
+  and sibling boards build only their board-specific U-Boot — no
+  duplicate same-named kernel debs in the publish merge, no extra
+  kernel CI time per added board.
+- **`apt-repo-publish.yml`: rk3576-industrial board.** New
+  `build_rk3576_industrial` dispatch input (default on). Each matrix job
+  checks the board config exists in the selected `armbian_build_ref` and
+  skips gracefully with a notice when it does not — the board is not in
+  `Seeed-Studio/armbian-build` main yet, so default runs skip it until
+  the branch lands (meanwhile dispatch with
+  `armbian_build_ref=rk3576-industrial`).
+- **`apt-repo-publish.yml`: kernel compilation now opt-in.** New
+  `build_kernel` dispatch input (default false): the official Armbian
+  apt already hosts the `vendor-seeed-rk3576`/`rk3588` family kernels,
+  so the matrix builds U-Boot only by default; enable the input to
+  rebuild and publish family kernels (hotfix channel — the version
+  must outrank the official one to reach devices).
+- **`apt-repo-publish.yml`: kernel and U-Boot build in parallel.** The
+  board matrix carries a `target` dimension (`uboot` per selected board,
+  `kernel` per family when `build_kernel` is on), so each entry is an
+  independent job — a board's U-Boot no longer serializes behind its
+  kernel compile. Artifact names carry the target
+  (`debs-uboot-<board>`, `debs-kernel-<board>`).
 
 ### Changed
 
