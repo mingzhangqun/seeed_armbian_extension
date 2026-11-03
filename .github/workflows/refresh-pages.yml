@@ -70,9 +70,10 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: refresh
-          # Upstream: page on the build-source repo (cross-repo API push).
-          # Forks: deploy to THIS repo's Pages via the actions deployment.
-          repo: ${{ github.repository_owner == 'Seeed-Studio' && steps.mirror.outputs.release_repo || github.repository }}
+          # The page always lives on the build-source repo (armbian-build),
+          # pushed cross-repo to its gh-pages via the API (needs
+          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
+          repo: ${{ steps.mirror.outputs.release_repo }}
           release_repo: ${{ steps.mirror.outputs.release_repo }}
           has_rclone: "true"
           rclone_config: ${{ secrets.RCLONE_CONFIG }}

@@ -305,9 +305,10 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.promote.outputs.tag }}
-          # Upstream: page on the build-source repo (cross-repo API push).
-          # Forks: deploy to THIS repo's Pages via the actions deployment.
-          repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.promote.outputs.target_repo || github.repository }}
+          # The page always lives on the build-source repo (armbian-build),
+          # pushed cross-repo to its gh-pages via the API (needs
+          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
+          repo: ${{ needs.promote.outputs.target_repo }}
           release_repo: ${{ needs.promote.outputs.target_repo }}
           has_rclone: ${{ needs.promote.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
