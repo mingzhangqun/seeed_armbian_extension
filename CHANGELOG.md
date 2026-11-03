@@ -160,21 +160,23 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### CI
 
-- **OneDrive mirror: slot-first layout + per-slot tag files.** The images
-  tree is re-rooted from `images/<board>/<slot>/…` to
+- **OneDrive mirror: slot-first layout + per-slot tag files; no more
+  build-info.json.** The images tree is re-rooted from
+  `images/<board>/<slot>/…` to
   `images/<slot>/<board>/<profile>[-secure-boot]/…` (slot ∈ pre-release /
   latest / previous): rotation unit now equals release unit, promotion is
   one server-side move per slot (every board flips together, no per-board
   parallel rclone), and the staging purge at build start is a single
   call. Each slot carries a `tag` file (the YYMMDD-HHMM build stamp)
   written once every matrix entry has uploaded — it is the page's slot
-  binding (slot labels no longer inferred from release-list ordering)
-  and promote verifies it names the release being promoted before
-  rotating. The page walk lists the whole `images/` tree in one
-  `lsjson -R` (boards are discovered, no board list input) and reads the
-  three `tag` files; the release-list inference stays as the fork-mode
-  fallback (`SLOTS={}`). Promote validation additionally flags stray
-  boards on the mirror that the build's entries cannot account for.
+  binding (slot labels no longer inferred from release-list ordering) and
+  promote verifies it names the release being promoted before rotating.
+  The release carries no assets: the old `build-info.json` manifest is
+  gone (its identity role moved to `<slot>/tag`; releases without assets
+  are what promote's cleanup treats as superseded). The page walk lists
+  the whole `images/` tree in one `lsjson -R` (boards are discovered, no
+  board list input) and reads the three `tag` files; the release-list
+  inference stays as the fork-mode fallback (`SLOTS={}`).
 - **`apt-repo-publish.yml`: rk3576-module board, family-scoped kernel.**
   New `build_rk3576_module` dispatch input extends the per-board matrix.
   Kernel debs are family-scoped in Armbian (`linux-image`/`-headers`/

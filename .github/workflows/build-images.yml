@@ -329,24 +329,10 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
           TAG: ${{ needs.plan.outputs.tag }}
-          AB_REPO: ${{ needs.plan.outputs.ab_repo }}
           BOARDS: ${{ needs.plan.outputs.boards }}
           MATRIX: ${{ needs.plan.outputs.matrix }}
-          TIER: ${{ inputs.desktop_tier }}
         run: |
           set -euo pipefail
-          # build-info.json = run metadata read back by promote-images.yml.
-          python3 - > build-info.json <<'PY'
-          import json, os
-          print(json.dumps({
-              "tag": os.environ["TAG"],
-              "armbian_build_repo": os.environ["AB_REPO"],
-              "boards": json.loads(os.environ["BOARDS"]),
-              "entries": json.loads(os.environ["MATRIX"])["include"],
-              "desktop_tier": os.environ["TIER"],
-          }, indent=2))
-          PY
-          cat build-info.json
           # Same-minute re-runs can hit an existing release+tag: start fresh.
           if gh release view "${TAG}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — deleting old release + tag"
@@ -358,6 +344,8 @@ jobs:
             target_args=(--target "$GITHUB_SHA")
           fi
           # Self-describing title derived from the tag (YYMMDD-HHMM UTC).
+          # No build-info asset: the slot's tag file is the build signature
+          # (promote verifies it), the release itself carries no metadata.
           boards_n="$(jq length <<<"$BOARDS")"
           images_n="$(jq '.include | length' <<<"$MATRIX")"
           title="Images 20${TAG:0:2}-${TAG:2:2}-${TAG:4:2} ${TAG:7:2}:${TAG:9:2} UTC · ${boards_n} boards · ${images_n} images"
@@ -367,8 +355,7 @@ jobs:
             --prerelease \
             --title "$title" \
             "${target_args[@]}" \
-            --notes "Assets are attached by the build matrix; download tables live on the build-source repo's Pages. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            build-info.json
+            --notes "Assets are attached by the build matrix; download tables live on the build-source repo's Pages. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   build:
     needs: [probe-secrets, plan, init-release]
@@ -586,8 +573,9 @@ jobs:
       - name: Upload images to OneDrive pre-release (OneDrive mode)
         # dest = armbian/images/pre-release/<board>/<sub>[/ota]/ (slot-first
         # layout) where <sub> = "<profile>" or "<profile>-secure-boot".
-        # No per-entry manifests: promote-images.yml validates the tree
-        # structurally against build-info.json's entry list.
+        # No manifests: promote-images.yml validates slot shape (the tag
+        # file must name the release being promoted; every <board>/<sub>/
+        # must be complete).
         if: ${{ env.HAS_RCLONE == 'true' }}
         working-directory: armbian-build
         env:

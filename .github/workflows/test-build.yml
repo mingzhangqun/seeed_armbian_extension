@@ -303,23 +303,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
           TAG: ${{ needs.plan.outputs.tag }}
-          AB_REPO: ${{ needs.plan.outputs.ab_repo }}
           BOARDS: ${{ needs.plan.outputs.boards }}
           MATRIX: ${{ needs.plan.outputs.matrix }}
-          TIER: ${{ inputs.desktop_tier }}
         run: |
           set -euo pipefail
-          python3 - > build-info.json <<'PY'
-          import json, os
-          print(json.dumps({
-              "tag": os.environ["TAG"],
-              "armbian_build_repo": os.environ["AB_REPO"],
-              "boards": json.loads(os.environ["BOARDS"]),
-              "entries": json.loads(os.environ["MATRIX"])["include"],
-              "desktop_tier": os.environ["TIER"],
-          }, indent=2))
-          PY
-          cat build-info.json
+          # No build-info asset (see build-images.yml): the slot's tag
+          # file is the build signature; the release carries no metadata.
           if gh release view "${TAG}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — deleting old release + tag"
             gh release delete "${TAG}" --repo "$TARGET_REPO" --yes --cleanup-tag
@@ -338,8 +327,7 @@ jobs:
             --prerelease \
             --title "$title" \
             "${target_args[@]}" \
-            --notes "Assets are attached by the build matrix; download tables live on the build-source repo's Pages. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            build-info.json
+            --notes "Assets are attached by the build matrix; download tables live on the build-source repo's Pages. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   build:
     needs: [probe-secrets, plan, init-release]
@@ -417,9 +405,8 @@ jobs:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
       - name: Upload images to OneDrive pre-release (OneDrive mode)
-        # Mirrors build-images.yml (slot-first layout) — no per-entry
-        # manifests: the promote validation is structural against
-        # build-info.json.
+        # Mirrors build-images.yml (slot-first layout) — no manifests:
+        # promote validates slot shape (tag binding + per-sub completeness).
         if: ${{ env.HAS_RCLONE == 'true' }}
         working-directory: output
         env:
