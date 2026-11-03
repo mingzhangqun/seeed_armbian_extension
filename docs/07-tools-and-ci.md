@@ -6,7 +6,7 @@ release chain, CI builds. The always-on hardening features live in
 
 1. [repack-fit.sh — offline FIT re-signing](#1-repack-fitsh--offline-fit-re-signing)
 2. [Deb packaging and release chain](#2-deb-packaging-and-release-chain)
-3. [CI builds (Seeed Build workflow)](#3-ci-builds-seeed-build-workflow)
+3. [CI builds (Images Build workflow)](#3-ci-builds-images-build-workflow)
 
 ## 1. repack-fit.sh — offline FIT re-signing
 
@@ -41,7 +41,7 @@ warns before falling back to a tree mkimage; the result is verified with
 
 ## 2. Deb packaging and release chain
 
-Three scripts, normally driven by CI ([below](#3-ci-builds-seeed-build-workflow)):
+Three scripts, normally driven by CI ([below](#3-ci-builds-images-build-workflow)):
 
 | Script | Purpose |
 |---|---|
@@ -56,13 +56,13 @@ Local use example:
 ARMBIAN_APT_GPG_KEY_ID=<gpg-key-id> ./scripts/publish-aptly.sh out/debs
 ```
 
-## 3. CI builds (Seeed Build workflow)
+## 3. CI builds (Images Build workflow)
 
 [`.github/workflows/build-images.yml`](../.github/workflows/build-images.yml)
 builds firmware on GitHub Actions — useful when you want images without a
 local build environment.
 
-**Trigger**: Actions → *Seeed Build* → *Run workflow*. Select via checkboxes:
+**Trigger**: Actions → *Images - Build & Pre-release* → *Run workflow*. Select via checkboxes:
 
 - boards (rk3576 / rk3588 / rk3576 module devkits), releases (trixie / resolute), tier (cli / mid)
 - OTA mode (recovery / ab), security (plain / **secure-boot**)

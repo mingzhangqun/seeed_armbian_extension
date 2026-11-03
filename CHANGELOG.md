@@ -103,7 +103,7 @@ Covers the work against the initial import (merge base `9980aee`,
   key — no Armbian rebuild needed. Includes a sample-FIT builder mode for
   testing the re-sign path and refuses to re-sign the build-time staging
   artifact in place.
-- **`seeed-build` CI workflow.** A matrix image builder on GitHub Actions:
+- **Image-builder CI workflow (`build-images.yml`, was `seeed-build`).** A matrix image builder on GitHub Actions:
   preflight validates secrets before the multi-hour build (FIT key pair,
   64-char passphrase, live rclone probe), the matrix is planned from dispatch
   checkboxes (board × release × tier × OTA × security; plain and secure-boot
