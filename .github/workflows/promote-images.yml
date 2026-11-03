@@ -59,19 +59,30 @@ jobs:
             echo "::error::RCLONE_CONFIG is not set — promotion requires the OneDrive mirror. GitHub-assets-mode (fork) releases are promoted by hand in the UI."
             exit 1
           fi
-          # Find the newest pre-release across all repos we might have built into
-          # (this repo + any fork's armbian-build). Try current repo first.
-          tag="$(gh release list --repo "$GITHUB_REPOSITORY" \
-                  --json tagName,isPrerelease \
-                  --jq '[.[] | select(.isPrerelease)] | sort_by(.tagName) | last | .tagName // empty')"
-          target_repo="$GITHUB_REPOSITORY"
-          if [ -z "$tag" ]; then
-            # Try the armbian-build repo (same owner)
-            ab_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
-            tag="$(gh release list --repo "$ab_repo" \
-                    --json tagName,isPrerelease \
-                    --jq '[.[] | select(.isPrerelease)] | sort_by(.tagName) | last | .tagName // empty' 2>/dev/null || true)"
-            [ -n "$tag" ] && target_repo="$ab_repo"
+          # Find the newest pre-release across both repos we might have built
+          # into (this repo + the owner's armbian-build). Tags must match
+          # YYMMDD-HHMM (the build stamp) — a hand-made release with a
+          # free-form tag would win the lexicographic sort otherwise and then
+          # fail the OneDrive tag check anyway. Query both repos and pick the
+          # newer: either side may hold the latest build.
+          tag_pat='^[0-9]{6}-[0-9]{4}$'
+          jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
+          tag_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
+                  --json tagName,isPrerelease --jq "$jq_pick")"
+          ab_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
+          tag_ab="$(gh release list --repo "$ab_repo" \
+                  --json tagName,isPrerelease --jq "$jq_pick" 2>/dev/null || true)"
+          tag=""; target_repo=""
+          if [ -n "$tag_here" ] && [ -n "$tag_ab" ]; then
+            if [[ "$tag_here" > "$tag_ab" ]]; then
+              tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
+            else
+              tag="$tag_ab"; target_repo="$ab_repo"
+            fi
+          elif [ -n "$tag_here" ]; then
+            tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
+          elif [ -n "$tag_ab" ]; then
+            tag="$tag_ab"; target_repo="$ab_repo"
           fi
           [ -n "$tag" ] || { echo "::error::no pre-release found to promote"; exit 1; }
           state="$(gh release view "$tag" --repo "$target_repo" \
