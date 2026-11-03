@@ -449,7 +449,6 @@ async function buildSlot(rel, kind, slotDir) {  // kind: "latest" | "pre" | "pre
 
 async function boot() {
   const boards = document.getElementById("boards");
-  const fallback = document.getElementById("fallback");
   try {
     // Use embedded render-time data only — no runtime GitHub API call.
     // Mirror tag files bind the slots when present (OneDrive mode);

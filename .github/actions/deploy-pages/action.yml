@@ -62,17 +62,18 @@ runs:
       with:
         rclone_config: ${{ inputs.rclone_config }}
 
-    - name: Walk OneDrive and collect share links
+    - name: List the mirror
       if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
       shell: bash
       run: |
         set -euo pipefail
         # One recursive listing covers the whole mirror — the slot-first
-        # layout (<slot>/<board>/<sub>/<file>) needs no board list, the
-        # page discovers boards from the walk itself.
-        python3 - > walk.json <<'PY'
+        # layout needs no board list, the page discovers boards from the
+        # walk itself. Item IDs ride along: they survive the promote
+        # rotation's server-side moves, which is what makes the share-link
+        # cache in the next steps work.
+        python3 - > tree.json <<'PY'
         import json, subprocess, sys
-        from concurrent.futures import ThreadPoolExecutor
 
         base = "seeed-storage:armbian/images"
         r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", base],
@@ -85,13 +86,13 @@ runs:
         files = json.loads(r.stdout or "[]")
 
         # Slot-first layout: paths are "<slot>/<board>/<sub>/[ota/]<file>"
-        # plus the per-slot identity files "<slot>/tag" — those are read
-        # for CONTENT (the tag names the build the slot holds) and never
-        # share-linked. Files outside the three slot dirs (stale layouts,
-        # foreign trees) are skipped: linking them wastes minutes per
-        # deploy and they never render on the page anyway.
+        # plus the per-slot identity files "<slot>/tag" — read for CONTENT
+        # (the tag names the build the slot holds), never share-linked.
+        # Files outside the three slot dirs (stale layouts, foreign trees)
+        # are skipped: linking them wastes minutes per deploy and they
+        # never render on the page anyway.
         SLOT_DIRS = ("pre-release", "latest", "previous")
-        tag_slots, paths = [], []
+        tag_slots, payload = [], []
         skipped = 0
         for it in files:
             p = it["Path"]
@@ -99,7 +100,7 @@ runs:
             if len(parts) == 2 and parts[1] == "tag" and parts[0] in SLOT_DIRS:
                 tag_slots.append(parts[0])
             elif parts[0] in SLOT_DIRS:
-                paths.append(p)
+                payload.append({"path": p, "id": it.get("ID", "")})
             else:
                 skipped += 1
         if skipped:
@@ -114,45 +115,102 @@ runs:
             else:
                 print(f"::warning::could not read {slot}/tag — slot renders untagged", file=sys.stderr)
 
-        print(f"slot tags: {json.dumps(slots)}", file=sys.stderr)
-        print(f"collecting share links for {len(paths)} files …", file=sys.stderr)
-
-        def make_link(rel):
-            lr = subprocess.run(["rclone", "link", "--timeout", "60s", f"{base}/{rel}"],
-                                capture_output=True, text=True)
-            ok = lr.returncode == 0
-            return rel, ok, lr.stdout.strip() if ok else lr.stderr.strip()
-
-        links = {}
-        link_failures = 0
-        # Serial rclone link is ~2-4 s per file against OneDrive — a full
-        # matrix test build (170+ files) blows a 10-minute job. Bounded
-        # parallelism keeps the walk minutes-scale without tripping
-        # OneDrive throttling.
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for i, (rel, ok, out) in enumerate(ex.map(make_link, paths), 1):
-                if ok:
-                    links[rel] = out
-                else:
-                    link_failures += 1
-                    print(f"::warning::link failed for {rel}: {out}", file=sys.stderr)
-                if i % 25 == 0:
-                    print(f"  … {i}/{len(paths)} links", file=sys.stderr)
-        if paths and not links:
-            # lsjson worked but every share-link call failed — systematic
-            # (throttling/auth), not per-file noise. Deploying would strip
-            # all links from the page.
-            print(f"::error::every rclone link call failed ({link_failures}/{len(paths)}) — OneDrive throttled? Refusing to deploy a stripped page.", file=sys.stderr)
-            sys.exit(1)
-        print(json.dumps({"links": links, "slots": slots}))
+        print(json.dumps({"payload": payload, "slots": slots}))
         PY
         python3 - <<'PY'
         import json
-        d = json.load(open("walk.json"))
-        json.dump(d["links"], open("links.json", "w"))
+        d = json.load(open("tree.json"))
         json.dump(d["slots"], open("slots.json", "w"))
-        print(f"links collected: {len(d['links'])}, slot tags: {d['slots']}")
+        print(f"mirror: {len(d['payload'])} payload files, slot tags {d['slots']}")
         PY
+
+    - name: Restore share-link cache
+      # Links are cached by OneDrive item ID and survive rotations; see
+      # the collect step. run_id in the key always saves a fresh entry,
+      # restore-keys falls back to the newest older one.
+      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: linkcache
+        key: onedrive-links-v1-${{ github.run_id }}
+        restore-keys: |
+          onedrive-links-v1-
+
+    - name: Collect share links
+      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - > links.json <<'PY'
+        import json, os, subprocess, sys
+        from concurrent.futures import ThreadPoolExecutor
+
+        base = "seeed-storage:armbian/images"
+        payload = json.load(open("tree.json"))["payload"]
+
+        cached = {}
+        try:
+            cached = json.load(open("linkcache/links-by-id.json"))
+        except FileNotFoundError:
+            pass
+
+        # Share links are keyed by the OneDrive item ID: IDs survive the
+        # promote rotation (server-side moves), so a rotated slot is a
+        # full cache hit and only genuinely new files pay the ~2-4 s
+        # rclone link call (serial per-file linking blew a 10-minute job
+        # on a full matrix). Bounded parallelism covers the misses.
+        need = [e for e in payload if e["id"] and e["id"] not in cached]
+
+        def make_link(e):
+            lr = subprocess.run(["rclone", "link", "--timeout", "60s", f"{base}/{e['path']}"],
+                                capture_output=True, text=True)
+            ok = lr.returncode == 0
+            return e["id"], ok, lr.stdout.strip() if ok else lr.stderr.strip()
+
+        fresh, failures = {}, 0
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for i, (iid, ok, out) in enumerate(ex.map(make_link, need), 1):
+                if ok:
+                    fresh[iid] = out
+                else:
+                    failures += 1
+                    print(f"::warning::link failed: {out}", file=sys.stderr)
+                if i % 25 == 0:
+                    print(f"  … {i}/{len(need)} links", file=sys.stderr)
+
+        merged = {**cached, **fresh}
+        # Template-facing map stays path → URL (schema unchanged).
+        links = {e["path"]: merged[e["id"]] for e in payload
+                 if e["id"] and e["id"] in merged}
+        if payload and not links:
+            # lsjson worked but no link could be had — systematic
+            # (throttling/auth), not per-file noise. Deploying would strip
+            # every link from the page.
+            print(f"::error::no share links at all (cache empty, {failures}/{len(need)} fresh calls failed) — OneDrive throttled? Refusing to deploy a stripped page.", file=sys.stderr)
+            sys.exit(1)
+        for e in payload:
+            if not e["id"] or e["id"] not in merged:
+                print(f"::warning::no share link for {e['path']}", file=sys.stderr)
+
+        # Re-cache, pruned to the ids on the mirror RIGHT NOW (drops
+        # entries from slots that were rotated away or purged).
+        live_ids = {e["id"] for e in payload if e["id"]}
+        os.makedirs("linkcache", exist_ok=True)
+        json.dump({k: v for k, v in merged.items() if k in live_ids},
+                  open("linkcache/links-by-id.json", "w"))
+        print(f"links: {len(links)}/{len(payload)} "
+              f"({len(fresh)} freshly linked, {len(links) - len(fresh)} cached, {failures} failed)",
+              file=sys.stderr)
+        print(json.dumps(links))
+        PY
+        echo "links collected: $(python3 -c 'import json; print(len(json.load(open("links.json"))))')"
+
+    - name: Save share-link cache
+      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: linkcache
+        key: onedrive-links-v1-${{ github.run_id }}
 
     - name: Render the page
       if: steps.gate.outputs.skip != 'true'

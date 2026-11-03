@@ -187,8 +187,19 @@ jobs:
         run: |
           set -euo pipefail
           base="seeed-storage:armbian/images"
-          has_slot() { rclone lsf "$base" --dirs-only 2>/dev/null | grep -qx "$1/"; }
+          slots_file="$(mktemp)"
 
+          # Snapshot the slot layout in ONE listing — a failed listing
+          # must fail the step, not masquerade as "slot missing" (the old
+          # per-check lsf swallowed errors behind 2>/dev/null), and one
+          # API call serves every existence check.
+          list_slots() {
+            rclone lsf "$base" --dirs-only --contimeout 15s > "$slots_file" \
+              || { echo "::error::rclone lsf failed on $base — OneDrive unreachable?"; exit 1; }
+          }
+          has_slot() { grep -qx "$1/" "$slots_file"; }
+
+          list_slots
           # Record whether a stable slot exists before we touch anything
           # (rollback only has something to restore when it did).
           had_latest=false
@@ -199,7 +210,10 @@ jobs:
           gh release edit "$TAG" --repo "$TARGET_REPO" --notes \
             "Promoted to Stable: armbian/images/latest/ rotated (previous ⟵ latest, pre-release ⟵ latest)."
 
-          # Step 2: rotate the whole slot tree — all boards at once
+          # Step 2: rotate the whole slot tree — all boards at once. The
+          # pre-rotation snapshot stays valid throughout: the first two
+          # ops only touch previous/ and latest/, and the last op only
+          # needs pre-release/ to still exist.
           if ! (
             set -e
             if has_slot previous; then
@@ -217,19 +231,24 @@ jobs:
             rclone moveto "$base/pre-release" "$base/latest"
           ); then
             echo "::error::rotate failed — inspecting state for rollback..."
-            if has_slot latest; then
-              # Failed before latest moved away: latest/ is intact.
-              # previous/ may be gone — it held superseded content either way.
-              echo "latest/ intact — nothing to roll back"
-            elif [ "$had_latest" = "true" ]; then
-              # latest was moved to previous/ but the new one never landed
-              if rclone moveto "$base/previous" "$base/latest" 2>/dev/null; then
-                echo "rolled back latest/ from previous/"
+            # Fresh, best-effort listing: the snapshot above is stale now.
+            if rclone lsf "$base" --dirs-only --contimeout 15s > "$slots_file" 2>/dev/null; then
+              if has_slot latest; then
+                # Failed before latest moved away: latest/ is intact.
+                # previous/ may be gone — it held superseded content either way.
+                echo "latest/ intact — nothing to roll back"
+              elif [ "$had_latest" = "true" ]; then
+                # latest was moved to previous/ but the new one never landed
+                if rclone moveto "$base/previous" "$base/latest" 2>/dev/null; then
+                  echo "rolled back latest/ from previous/"
+                else
+                  echo "::error::rollback failed — the pre-rotate latest/ is at previous/, rotate by hand"
+                fi
               else
-                echo "::error::rollback failed — the pre-rotate latest/ is at previous/, rotate by hand"
+                echo "no prior latest/ — nothing to restore; pre-release/ untouched"
               fi
             else
-              echo "no prior latest/ — nothing to restore; pre-release/ untouched"
+              echo "::error::cannot re-list slots — inspect by hand: the pre-rotate latest/ (if any) sits at previous/"
             fi
             echo "::error::rollback complete — release is stable but files not rotated"
             exit 1

@@ -74,6 +74,8 @@ jobs:
   probe-secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      contents: read
     outputs:
       has_rclone: ${{ steps.p.outputs.has_rclone }}
     steps:
@@ -92,6 +94,8 @@ jobs:
     needs: probe-secrets
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     env:
       HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
     steps:
@@ -156,6 +160,8 @@ jobs:
   plan:
     needs: [probe-secrets, preflight]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
       boards: ${{ steps.gen.outputs.boards }}
@@ -355,7 +361,7 @@ jobs:
             --prerelease \
             --title "$title" \
             "${target_args[@]}" \
-            --notes "Assets are attached by the build matrix; download tables live on the build-source repo's Pages. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   build:
     needs: [probe-secrets, plan, init-release]
