@@ -52,6 +52,8 @@ jobs:
   # ──────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
       armbian_ref: ${{ steps.gen.outputs.armbian_ref }}
@@ -134,6 +136,8 @@ jobs:
   # ──────────────────────────────────────────────────
   build-userspace:
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
     container:
       image: debian:bookworm
     strategy:
@@ -256,6 +260,8 @@ jobs:
   # ──────────────────────────────────────────────────
   build-camera-engine:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     continue-on-error: true
     container:
       image: debian:bookworm
@@ -305,6 +311,8 @@ jobs:
   build-kernel-uboot:
     needs: prepare
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
