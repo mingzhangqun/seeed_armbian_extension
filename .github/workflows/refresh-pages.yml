@@ -1,0 +1,80 @@
+name: "Pages - Refresh"
+
+# Re-render and re-push the images page against the CURRENT state of the
+# OneDrive mirror and the release list — e.g. after manual cleanup on
+# OneDrive. Deploy-only: touches nothing but the gh-pages branch.
+# Hard-fails if the mirror is unreachable — a refresh must never strip the
+# links off a good page over a transient OneDrive outage.
+
+on:
+  workflow_dispatch:
+
+# Serialize with builds and promotes: the walk must not sample a tree
+# that a build is filling or a promote is rotating.
+concurrency:
+  group: images-mirror
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # pages/id-token: deploy-pages actions-mode deployment.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: write
+    steps:
+      - name: Probe secrets
+        id: probe
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          # Hard fail here: without rclone a refresh would deploy a page
+          # with LINKS={} — stripping every file link for no reason.
+          if [ -z "$RCLONE_CONFIG" ]; then
+            echo "::error::RCLONE_CONFIG is not set — a refresh would strip all file links from the page; aborting."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Check the mirror is reachable
+        id: mirror
+        run: |
+          set -euo pipefail
+          # The release repo follows the owner/armbian-build convention
+          # (same resolution as plan in build-images.yml).
+          release_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
+          echo "release_repo=$release_repo" >> "$GITHUB_OUTPUT"
+          echo "release repo: $release_repo"
+          # "lsd failed" and "lsd came back empty" are different situations:
+          # the first means OneDrive is unreachable and a refresh would
+          # strip every link off the page for no reason (hard fail); the
+          # second is a legitimately emptied mirror and still deploys an
+          # empty page. Boards need no discovery — the slot-first walk
+          # lists the whole images/ tree in one go.
+          if ! rclone lsd seeed-storage:armbian/images --contimeout 15s > /dev/null 2> lsd.err; then
+            echo "::error::rclone lsd failed — OneDrive unreachable? $(tr '\n' ' ' < lsd.err)"
+            exit 1
+          fi
+
+      - name: Deploy images page
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: refresh
+          # Upstream: page on the build-source repo (cross-repo API push).
+          # Forks: deploy to THIS repo's Pages via the actions deployment.
+          repo: ${{ github.repository_owner == 'Seeed-Studio' && steps.mirror.outputs.release_repo || github.repository }}
+          release_repo: ${{ steps.mirror.outputs.release_repo }}
+          has_rclone: "true"
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
