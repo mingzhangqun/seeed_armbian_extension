@@ -357,7 +357,9 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.plan.outputs.tag }}
-          repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.plan.outputs.release_repo || github.repository }}
+          # Pages go to the build-source repo (armbian-build), like
+          # build-images.yml — same target on fork and upstream.
+          repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
@@ -568,7 +570,9 @@ jobs:
           tag: ${{ needs.plan.outputs.tag }}
           # Upstream: page on the build-source repo (cross-repo API push).
           # Forks: deploy to THIS repo's Pages via the actions deployment.
-          repo: ${{ github.repository_owner == 'Seeed-Studio' && needs.plan.outputs.release_repo || github.repository }}
+          # Pages go to the build-source repo (armbian-build), like
+          # build-images.yml — same target on fork and upstream.
+          repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
