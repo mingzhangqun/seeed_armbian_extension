@@ -21,7 +21,7 @@ inputs:
     description: "PAGES_TARGET_TOKEN secret content (cross-repo mode only)"
     required: false
   gh_token:
-    description: "GH_TOKEN for release/repo API calls"
+    description: "GH_TOKEN for release/repo API calls (needs contents:read to list releases)"
     required: true
 
 runs:
@@ -206,6 +206,12 @@ runs:
         echo "links collected: $(python3 -c 'import json; print(len(json.load(open("links.json"))))')"
 
     - name: Save share-link cache
+      # Cache key includes run_id so each run saves a fresh entry; restore-keys
+      # falls back to the newest older one. Prune strategy: the cache is
+      # keyed by OneDrive item ID and entries are pruned to live ids on each
+      # collect step (see above), so the cache stays bounded by the current
+      # mirror size. No time-based expiry — a stale cache entry is harmless
+      # (just a miss on next walk).
       if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
       uses: actions/cache/save@v4
       with:

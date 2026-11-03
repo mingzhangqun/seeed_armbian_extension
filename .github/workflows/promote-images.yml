@@ -371,8 +371,9 @@ jobs:
       pages: write
       id-token: write
       actions: write
-    # The OneDrive share-link walk alone can take minutes on a full matrix.
-    timeout-minutes: 30
+    # The OneDrive share-link walk alone can take minutes on a full matrix;
+    # cold cache on 400+ files can exceed 30 min.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4

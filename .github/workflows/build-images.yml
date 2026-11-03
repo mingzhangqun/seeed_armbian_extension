@@ -94,6 +94,9 @@ jobs:
 
   preflight:
     # Fail fast on malformed secrets BEFORE the multi-hour build.
+    # Note: board_exists in plan job queries public repos by default;
+    # if armbian_build_repo points to a private repo, plan needs
+    # contents: read on that repo (token scope) — currently assumed public.
     needs: probe-secrets
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -105,60 +108,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' }}
-        uses: ./.github/actions/setup-onedrive
+      - name: Run preflight checks
+        uses: ./.github/actions/preflight-checks
         with:
+          secure_boot: ${{ inputs.secure_boot }}
+          has_rclone: ${{ env.HAS_RCLONE }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
-
-      - name: Check OneDrive mirror availability (hard gate)
-        if: ${{ env.HAS_RCLONE == 'true' }}
-        run: |
-          set -euo pipefail
-          if ! rclone lsd seeed-storage:armbian/images --max-depth 1 --contimeout 15s >/dev/null 2>&1; then
-            echo "::error::rclone cannot reach seeed-storage:armbian/images — create the folder on OneDrive first, or refresh the RCLONE_CONFIG token."
-            exit 1
-          fi
-          echo "OneDrive remote OK. Quota:"
-          rclone about seeed-storage: 2>/dev/null | grep -E 'Total:|Free:|Trashed:' || true
-
-      - name: OneDrive mode notice (no secret)
-        # Fork path: assets go to the GitHub release instead.
-        if: ${{ env.HAS_RCLONE != 'true' }}
-        run: |
-          echo "::notice::RCLONE_CONFIG is not set — GitHub-assets mode (fork): binaries are attached to the release; OneDrive upload and image-promote are skipped."
-
-      - name: Validate secure-boot secrets
-        if: ${{ inputs.secure_boot }}
-        env:
-          PRIVATE_KEY_PEM: ${{ secrets.PRIVATE_KEY_PEM }}
-          DEV_CRT: ${{ secrets.DEV_CRT }}
-          CRYPTROOT_PASSPHRASE: ${{ secrets.CRYPTROOT_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          fail=0
-          err() { echo "::error::$1"; fail=1; }
-
-          [ -n "$PRIVATE_KEY_PEM" ] || err "secret PRIVATE_KEY_PEM is empty (secure_boot selected)"
-          [ -n "$DEV_CRT" ]        || err "secret DEV_CRT is empty (secure_boot selected)"
-          [ "${#CRYPTROOT_PASSPHRASE}" -eq 64 ] \
-            || err "CRYPTROOT_PASSPHRASE must be exactly 64 chars, got ${#CRYPTROOT_PASSPHRASE}"
-          if [ -n "$PRIVATE_KEY_PEM" ]; then
-            printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -check -noout >/dev/null 2>&1 \
-              || err "PRIVATE_KEY_PEM is not a parsable RSA key"
-          fi
-          if [ -n "$DEV_CRT" ]; then
-            printf '%s\n' "$DEV_CRT" | openssl x509 -noout >/dev/null 2>&1 \
-              || err "DEV_CRT is not a parsable x509 certificate"
-          fi
-          if [ -n "$PRIVATE_KEY_PEM" ] && [ -n "$DEV_CRT" ]; then
-            key_pub=$(printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -pubout 2>/dev/null | openssl md5)
-            crt_pub=$(printf '%s\n' "$DEV_CRT" | openssl x509 -pubkey -noout 2>/dev/null | openssl md5)
-            [ "$key_pub" = "$crt_pub" ] || err "PRIVATE_KEY_PEM does not match DEV_CRT"
-          fi
-
-          [ "$fail" -eq 0 ] || exit 1
-          echo "Secure-boot secrets present and well-formed."
+          private_key_pem: ${{ secrets.PRIVATE_KEY_PEM }}
+          dev_crt: ${{ secrets.DEV_CRT }}
+          cryptroot_passphrase: ${{ secrets.CRYPTROOT_PASSPHRASE }}
 
   plan:
     needs: [probe-secrets, preflight]
