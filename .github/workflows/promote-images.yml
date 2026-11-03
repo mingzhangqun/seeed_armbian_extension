@@ -12,6 +12,11 @@ name: "Images - Release"
 #   4. PUBLISH the GitHub release (prerelease → released)
 #   5. clean up superseded pre-releases; push the images page
 #
+# IDEMPOTENT RECOVERY: no pre-release at all + latest/tag already names the
+# newest stable release → a previous run died after rotate but before pages.
+# Recover by skipping validate/rotate/cleanup and jumping straight to pages
+# (mode=recover-page). Any other mismatch is a real failure and aborts.
+#
 # OneDrive-only: without RCLONE_CONFIG there is nothing to rotate.
 
 on:
@@ -31,6 +36,7 @@ jobs:
       tag: ${{ steps.rel.outputs.tag }}
       target_repo: ${{ steps.rel.outputs.target_repo }}
       has_rclone: ${{ steps.probe.outputs.has_rclone }}
+      mode: ${{ steps.rel.outputs.mode }}
     steps:
       - name: Probe secrets
         id: probe
@@ -46,6 +52,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        # Reads the rclone config from the repo's own setup-onedrive action
+        # inputs — NOT from secrets.RCLONE_CONFIG. secrets.* is not allowed
+        # in step-level if:, but action inputs are evaluated before if: and
+        # pass secrets through fine; rclone_conf then reads the file the
+        # action wrote. Keeps rclone usable inside Resolve for recovery.
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
       - name: Resolve the tag and guard
         id: rel
         env:
@@ -59,6 +75,11 @@ jobs:
             echo "::error::RCLONE_CONFIG is not set — promotion requires the OneDrive mirror. GitHub-assets-mode (fork) releases are promoted by hand in the UI."
             exit 1
           fi
+          # RCLONE_CONFIG env can't hold the secret (secrets.* is not allowed
+          # in the step-level if: above); the setup-onedrive action already
+          # wrote it to disk, so point rclone at that file instead.
+          export RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
+
           # Find the newest pre-release across both repos we might have built
           # into (this repo + the owner's armbian-build). Tags must match
           # YYMMDD-HHMM (the build stamp) — a hand-made release with a
@@ -84,24 +105,65 @@ jobs:
           elif [ -n "$tag_ab" ]; then
             tag="$tag_ab"; target_repo="$ab_repo"
           fi
-          [ -n "$tag" ] || { echo "::error::no pre-release found to promote"; exit 1; }
+
+          # ── idempotent recovery: no pre-release means either "nothing to
+          # promote" or "a previous run died after rotate but before pages".
+          # Detect the latter (latest/tag == newest STABLE release) and let
+          # the pages job run; anything else is a real failure.
+          if [ -z "$tag" ]; then
+            jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
+            stable_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
+                --json tagName,isPrerelease --jq "$jq_stable")"
+            stable_ab="$(gh release list --repo "$ab_repo" \
+                --json tagName,isPrerelease --jq "$jq_stable" 2>/dev/null || true)"
+            stable=""; stable_repo=""
+            if [ -n "$stable_here" ] && [ -n "$stable_ab" ]; then
+              if [[ "$stable_here" > "$stable_ab" ]]; then
+                stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
+              else
+                stable="$stable_ab"; stable_repo="$ab_repo"
+              fi
+            elif [ -n "$stable_here" ]; then
+              stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
+            elif [ -n "$stable_ab" ]; then
+              stable="$stable_ab"; stable_repo="$ab_repo"
+            fi
+            [ -n "$stable" ] \
+              || { echo "::error::no pre-release and no stable release found anywhere"; exit 1; }
+
+            base="seeed-storage:armbian/images"
+            slot_listing="$(mktemp)"
+            rclone lsf "$base" --dirs-only --contimeout 15s > "$slot_listing" \
+              || { echo "::error::rclone lsf failed on $base — OneDrive unreachable?"; exit 1; }
+            grep -qx "pre-release/" "$slot_listing" \
+              && { echo "::error::no timestamped pre-release release but the slot exists — build in flight or orphan slot; aborting"; exit 1; }
+            grep -qx "latest/" "$slot_listing" \
+              || { echo "::error::no pre-release and no latest/ on the mirror — nothing was ever promoted"; exit 1; }
+            latest_tag="$(rclone cat "$base/latest/tag" --contimeout 15s 2>/dev/null | tr -d '[:space:]')"
+            [ "$latest_tag" = "$stable" ] \
+              || { echo "::error::no pre-release; latest/tag is '${latest_tag:-<empty>}' but newest stable is '$stable' — inconsistent state, refusing to guess"; exit 1; }
+
+            echo "::notice::no pre-release; latest/ already holds the newest stable ($stable) — recovering the pages deploy (mode=recover-page)"
+            echo "mode=recover-page" >> "$GITHUB_OUTPUT"
+            echo "tag=$stable" >> "$GITHUB_OUTPUT"
+            echo "target_repo=$stable_repo" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           state="$(gh release view "$tag" --repo "$target_repo" \
                     --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
           echo "release state (isDraft prerelease): $state"
           [ "$state" = "false true" ] \
             || { echo "::error::$tag is not a published pre-release (draft or already stable)"; exit 1; }
+          echo "mode=promote" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
           echo "promoting $tag in $target_repo"
 
-      - name: Setup rclone (seeed-storage OneDrive remote)
-        uses: ./.github/actions/setup-onedrive
-        with:
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-
       - name: Validate staging completeness
+        # Skipped in recover-page mode: there is nothing staged to validate.
+        if: steps.rel.outputs.mode == 'promote'
         # Shape check BEFORE anything is deleted — no build manifest to
-        # compare against (releases carry no assets in OneDrive mode):
         #   a) the slot's tag file names the release being promoted —
         #      only the build's release job writes it, so this is both
         #      the provenance gate and the race detector
@@ -191,6 +253,7 @@ jobs:
         # to stable), then rotate; each move is a single server-side
         # rename, so a mid-rotate failure leaves a clean state the
         # rollback inspects rather than guesses about.
+        if: steps.rel.outputs.mode == 'promote'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           TAG: ${{ steps.rel.outputs.tag }}
@@ -272,7 +335,9 @@ jobs:
         # — pure noise once superseded. Only asset-less releases are
         # deleted, so a GitHub-assets-mode (fork) release with real
         # binaries is never touched. Drafts are left alone — they may
-        # belong to in-flight builds.
+        # belong to in-flight builds. Skipped in recover-page mode:
+        # nothing was promoted, so nothing was superseded.
+        if: steps.rel.outputs.mode == 'promote'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
