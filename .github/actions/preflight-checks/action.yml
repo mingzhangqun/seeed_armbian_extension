@@ -73,6 +73,17 @@ runs:
         if [ -n "$PRIVATE_KEY_PEM" ]; then
           printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -check -noout >/dev/null 2>&1 \
             || err "PRIVATE_KEY_PEM is not a parsable RSA key"
+          # mkimage signs with the key's actual bit length; the secure fragment's
+          # ITS template hardcodes algo="sha256,rsa2048" and the SPL/U-Boot
+          # verifiers run rsa_mod_exp_sw with rsa,num-bits=2048. An RSA-4096 key
+          # would let mkimage emit a 512-byte signature that the verifier reads
+          # as a 256-byte EM and rejects with "invalid pss padding (0xbc is
+          # missing)". Pin the key size here so the build fails fast at plan time
+          # instead of in every secure-boot matrix leg.
+          key_bits=$(printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -text -noout 2>/dev/null \
+            | grep -oE 'Private-Key: \(([0-9]+) bit' | grep -oE '[0-9]+' | head -1)
+          [ "$key_bits" = "2048" ] \
+            || err "PRIVATE_KEY_PEM must be RSA-2048 (got RSA-${key_bits:-unknown})"
         fi
         if [ -n "$DEV_CRT" ]; then
           printf '%s\n' "$DEV_CRT" | openssl x509 -noout >/dev/null 2>&1 \
