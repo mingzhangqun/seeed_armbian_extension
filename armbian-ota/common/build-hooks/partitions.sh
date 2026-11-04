@@ -12,8 +12,25 @@ function ota_require_gpt_partition_table() {
     fi
 }
 
+# Raw-FIT boot layout (signed kernel FIT on a raw partition). BOOT_RAW_MODE is
+# exported by rk-secure-boot's pre_prepare_partitions__050 hook, but its
+# visibility in later hooks is timing-dependent across the host/container
+# hook rounds (observed: the same build produced the rescue partition in one
+# run and silently dropped it in the next). Re-derive the mode from the same
+# inputs rk_autodecrypt_fit_boot_required() uses -- RK_SECURE_UBOOT_ENABLE,
+# or auto-decrypt with the OP-TEE bootchain -- so every caller agrees.
+# KEEP IN SYNC with rk_secure-disk-encryption/build-hooks/common.sh.
 function ota_raw_boot_enabled() {
-    [[ "${BOOT_RAW_MODE:-}" == "yes" ]]
+    if [[ "${BOOT_RAW_MODE:-}" == "yes" ]]; then
+        return 0
+    fi
+    if [[ "${RK_SECURE_UBOOT_ENABLE:-}" == "yes" ]]; then
+        return 0
+    fi
+    if [[ "${CRYPTROOT_ENABLE:-}" == "yes" && "${RK_AUTO_DECRYP:-}" == "yes" && "${RK_OPTEE_BOOT_ENABLE:-}" == "yes" ]]; then
+        return 0
+    fi
+    return 1
 }
 
 function ota_install_overlayroot_dependencies() {
