@@ -230,6 +230,24 @@ write_raw_boot_itb() {
     fi
     stop_heartbeat
     sync
+
+    # Post-write verification: re-read the full FIT from the partition and
+    # compare sha256 against the source. The 4-byte magic check above only
+    # proves the write STARTED; a torn or partial dd still passes it. The
+    # package's boot.sha256 (verified at staging time) covers exactly this
+    # file, so a mismatch is a write failure, not a package defect.
+    if command -v sha256sum >/dev/null 2>&1; then
+        log "verifying written FIT against boot.sha256 ..."
+        written_sha="$(dd if="${target}" bs="${image_size}" count=1 2>/dev/null | sha256sum | awk '{print $1}')"
+        source_sha="$(sha256sum "${image}" | awk '{print $1}')"
+        if [ "${written_sha}" != "${source_sha}" ]; then
+            log "ERROR: written FIT sha256 (${written_sha}) != source (${source_sha})"
+            return 1
+        fi
+        log "boot.itb verified after write (sha256=${written_sha})"
+    else
+        log "WARN: sha256sum unavailable in initramfs; skipping post-write verification"
+    fi
 }
 
 # ===== validate recovery state on mounted rootfs =====
