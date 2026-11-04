@@ -444,6 +444,19 @@ function rk_secure_boot_prepare_uboot_tree() {
     if [[ -n "${persistent_keys_dir}" ]]; then
         [[ -f "${persistent_keys_dir}/private_key.pem" ]] ||
             exit_with_error "FIT signing private key missing" "${persistent_keys_dir}/private_key.pem"
+        # mkimage signs with the key's actual bit length, but the ITS template
+        # hardcodes algo="sha256,rsa2048" and the SPL/U-Boot verifiers run with
+        # rsa,num-bits=2048.  An RSA-4096 key yields a 512-byte signature that
+        # fit_check_sign reads as a 256-byte EM and rejects with
+        # "invalid pss padding (0xbc is missing)".  Refuse non-2048 keys here so
+        # the build fails fast with a clear message instead of 26 matrix legs
+        # deep in the FIT self-check.
+        local key_bits
+        key_bits=$(openssl rsa -in "${persistent_keys_dir}/private_key.pem" -text -noout 2>/dev/null |
+            grep -oE 'Private-Key: \([0-9]+ bit' | grep -oE '[0-9]+' | head -1)
+        [[ "${key_bits}" == "2048" ]] ||
+            exit_with_error "FIT signing private key must be RSA-2048" \
+                "${persistent_keys_dir}/private_key.pem is RSA-${key_bits:-unparseable}"
         display_alert "secure-uboot" "Restoring caller-supplied FIT signing keys" "${persistent_keys_dir}" "info"
         (
             cd "${keys_dir}" || exit 1
