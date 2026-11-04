@@ -447,8 +447,13 @@ jobs:
           cd armbian-build
           sed -i '/"--env" "ARMBIAN_RUNNING_IN_CONTAINER=yes"/a\\t\t"--env" "CRYPTROOT_PASSPHRASE=${CRYPTROOT_PASSPHRASE:-}"' \
               lib/functions/host/docker.sh
-          echo "=== CRYPTROOT_PASSPHRASE forwarding in docker.sh ==="
-          grep -n 'CRYPTROOT_PASSPHRASE' lib/functions/host/docker.sh
+          # Same container boundary: SEEED_EXTENSION_REPO/REF exported on the
+          # host never reach the wrapper sourcing inside the container, so the
+          # extension fetch silently falls back to upstream main.
+          sed -i '/"--env" "CRYPTROOT_PASSPHRASE=/a\\t\t"--env" "SEEED_EXTENSION_REPO=${SEEED_EXTENSION_REPO:-}"\n\t\t"--env" "SEEED_EXTENSION_REF=${SEEED_EXTENSION_REF:-}"' \
+              lib/functions/host/docker.sh
+          echo "=== env forwarding in docker.sh ==="
+          grep -nE 'CRYPTROOT_PASSPHRASE|SEEED_EXTENSION_(REPO|REF)' lib/functions/host/docker.sh
 
       - name: Patch radxa-aic8800 extension against GitHub API flakiness
         # api.github.com flakes on CI; upstream resolves the version to
