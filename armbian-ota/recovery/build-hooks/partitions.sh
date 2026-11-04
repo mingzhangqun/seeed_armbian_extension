@@ -49,21 +49,27 @@ function pre_prepare_partitions__recovery_ota() {
 function prepare_image_size__recovery_ota() {
     local boot_size=0
     local security_size=0
+    local rescue_size=0
 
     ota_get_default_partition_sizes
     ota_encrypted_rootfs_enabled && security_size=${OTA_SECURITY_SIZE}
     # Recovery always reserves space for a boot partition (ext4 for plain /
     # auto-decrypt modes, raw FIT for secure boot).
     boot_size=${BOOTSIZE:-${OTA_BOOT_SIZE}}
+    # Raw-FIT layouts add a dedicated rescue partition next to boot: the
+    # same signed FIT is flashed there and booted by the vendor boot_fit
+    # command (ota_rescue_boot_fit). Same size as boot -- the rescue FIT
+    # is a copy of the boot FIT, so it always fits.
+    ota_raw_boot_enabled && rescue_size=${boot_size}
 
-    FIXED_IMAGE_SIZE=$((OFFSET + boot_size + security_size + OTA_ROOTFS_SIZE + OTA_USERDATA_SIZE))
-    display_alert "Recovery OTA" "Setting FIXED_IMAGE_SIZE=${FIXED_IMAGE_SIZE} MiB (boot=${boot_size} MiB, rootfs=${OTA_ROOTFS_SIZE} MiB, userdata=${OTA_USERDATA_SIZE} MiB)" "info"
+    FIXED_IMAGE_SIZE=$((OFFSET + boot_size + rescue_size + security_size + OTA_ROOTFS_SIZE + OTA_USERDATA_SIZE))
+    display_alert "Recovery OTA" "Setting FIXED_IMAGE_SIZE=${FIXED_IMAGE_SIZE} MiB (boot=${boot_size} MiB, rescue=${rescue_size} MiB, rootfs=${OTA_ROOTFS_SIZE} MiB, userdata=${OTA_USERDATA_SIZE} MiB)" "info"
 }
 
 function create_partition_table__recovery_ota() {
     local next=${OFFSET}
     local p_index=1
-    local boot_index rootfs_index userdata_index security_index
+    local boot_index rescue_index rootfs_index userdata_index security_index
     local script="label: ${IMAGE_PARTITION_TABLE:-gpt}\n"
     local data_type="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
     script+="table-length: ${RECOVERY_GPT_TABLE_LENGTH:-64}\n"
@@ -74,6 +80,17 @@ function create_partition_table__recovery_ota() {
     # armbi_boot and mounts it at $MOUNT/boot.
     ota_partition_append boot_index "boot" "${BOOTSIZE:-${OTA_BOOT_SIZE}}" "${data_type}"
     bootpart=${boot_index}
+
+    if ota_raw_boot_enabled; then
+        # Rescue partition (v0.8 secure rescue): holds the same signed FIT
+        # as boot, flashed at image build time and never touched by OTA.
+        # Raw (no filesystem), no LegacyBIOSBootable attr -- only the
+        # ota_rescue_boot_fit script addresses it, via boot_fit_part.
+        # Sits BEFORE security/rootfs/userdata so userdata stays the last
+        # partition (armbian-resize-userdata hard-requires that).
+        ota_partition_append rescue_index "recovery" "${BOOTSIZE:-${OTA_BOOT_SIZE}}" "${data_type}"
+        RECOVERY_RESCUE_PART_INDEX=${rescue_index}
+    fi
 
     if ota_encrypted_rootfs_enabled; then
         ota_partition_append security_index "security" "${OTA_SECURITY_SIZE}" "${data_type}"
