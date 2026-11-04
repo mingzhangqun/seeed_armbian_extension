@@ -680,10 +680,20 @@ function ota_create_payload_archives() {
     local payload_id
 
     if [[ "${ota_security_mode}" == "secure-boot-encrypted-rootfs" ]]; then
-        # raw-FIT/secure is Phase 2 (deferred design doc); no payload-id flow
+        # Raw-FIT/secure payload (v0.8): the boot payload is the signed
+        # boot.itb instead of a boot partition tree, but the identity flow
+        # below is shared with plain -- without a PAYLOAD_ID the device side
+        # refuses the package (recovery_check_package_metadata) and no
+        # campaign can ever arm. The boot tree for the identity is the FIT
+        # itself (hardlinked -- same bytes, no multi-MB copy); clearing
+        # boot_partition skips the ext4 staging, the boot.tar seal and the
+        # /boot stamp in the shared tail (the applier dd-writes boot.itb to
+        # the raw partition via write_raw_boot_itb, and the health service
+        # skips the /boot marker check on raw-fit layouts).
         ota_copy_secure_boot_itb "${ota_temp_dir}" || return 1
-        rm -rf "${boot_mount}"
-        return 0
+        mkdir -p "${boot_stage}"
+        ln "${ota_temp_dir}/boot.itb" "${boot_stage}/boot.itb" || return 1
+        boot_partition=""
     fi
 
     # 1) stage the boot content (recovery/ and lost+found/ excluded) so the
@@ -805,11 +815,16 @@ function pre_umount_final_image__901_create_ota_payload_pkg() {
 
     display_alert "pre_umount_final_image__901 Extracting partition images from loop device" "Detecting and extracting partitions from ${LOOP}" "info"
 
-    # Determine OTA security mode.
+    # Determine OTA security mode. The FIT-payload branch is keyed on the
+    # LAYOUT (ota_raw_boot_enabled), not on ota_secure_boot_encrypted_
+    # rootfs_enabled: the auto-decrypt + OP-TEE flavor (profile
+    # "recovery secure-rootfs") also carries a raw boot + recovery partition
+    # pair and a signed FIT, and classifying it as ext4-boot made hook 901
+    # mount the raw partition (or die at 'PAYLOAD_ID not computed').
     local ota_security_mode="plain"
-    if ota_secure_boot_encrypted_rootfs_enabled; then
+    if ota_raw_boot_enabled && ota_encrypted_rootfs_enabled; then
         ota_security_mode="secure-boot-encrypted-rootfs"
-        display_alert "Secure boot and auto ota enabled" "Using FIT image workflow" "info"
+        display_alert "Raw-FIT encrypted OTA" "Using FIT image workflow" "info"
     elif ota_encrypted_rootfs_enabled; then
         ota_security_mode="encrypted-rootfs"
         display_alert "Encrypted auto-decrypt OTA" "Non-secure boot mode: use mapper rootfs and package plain boot partition" "info"

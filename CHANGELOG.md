@@ -14,6 +14,30 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Secure-boot rescue: dedicated `recovery` raw FIT partition.** Secure
+  boot Recovery images now split the boot area in two: the existing raw FIT
+  `boot` partition plus a new `PARTLABEL=recovery` partition (same size as
+  boot) holding the **same signed boot.itb**, flashed at image build time
+  (`rescue-artifacts.sh`) and booted by the new `ota_rescue_boot_fit` env
+  script (vendor `boot_fit` command, `boot_fit_part recovery` — mirroring
+  the A/B raw-fit slot boot, so FIT signature verification applies). The
+  rescue dispatcher `ota_rescue_boot` now chains
+  `ota_rescue_boot_fs || ota_rescue_boot_fit || distro_bootcmd` across the
+  three env producers (build-time prefill, `fw_env_write_routing_set`, and
+  the compiled-default-env U-Boot patch). The rescue partition is never
+  touched by OTA. Layout:
+  `[boot raw FIT][recovery raw FIT][security][rootfs LUKS+ext4][userdata LUKS+ext4]`.
+- **Secure-boot OTA packages.** `package-create.sh` computes a `PAYLOAD_ID`
+  for secure-boot recovery packages (identity over the rootfs tar + the
+  boot.itb tree) and stamps the rootfs `installed-payload-id` marker —
+  previously the secure branch shipped no `PAYLOAD_ID` and the build failed
+  at `ota_write_package_env`. Device-side `recovery_assert_dual_tar` accepts
+  the `boot.itb + boot.sha256` payload shape; the lazy last-good backup
+  reads the signed FIT from the raw boot partition (exact FDT-header size)
+  into `boot.tar.zst`, restoring through the existing
+  `write_raw_boot_itb` path. The health service and the Rescue
+  success-reconciliation skip the `/boot/payload-id` check on raw-fit
+  layouts (stamped `/usr/share/armbian-ota/boot-mode`).
 - **Dedicated `/boot` partition for all Recovery images.** Plain and
   auto-decrypt Recovery builds now reserve a separate ext4 boot partition
   (label `armbi_boot`); the initramfs mounts it on top of overlayfs,
@@ -23,7 +47,7 @@ Covers the work against the initial import (merge base `9980aee`,
   edits, OTA tooling) being swallowed by the overlayfs upper layer on
   userdata and silently ignored by U-Boot on next boot. Secure-boot
   Recovery continues to use a raw FIT boot partition (`BOOT_RAW_MODE=yes`),
-  unchanged. The partition order is now `[boot][security?][rootfs][userdata]`.
+  unchanged. The partition order is now `[boot][recovery?][security?][rootfs][userdata]`.
 - **`recurse=0` on overlayroot.** The overlayroot package's init-bottom
   hook defaults to `recurse=1`, which wraps every fstab mount point in a
   per-directory overlay — so even with a dedicated boot partition, `/boot`

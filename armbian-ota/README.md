@@ -157,13 +157,14 @@ OTA_ENABLE=yes
 
 ### Partition Layout
 
-GPT partition table, located by partition labels. Order: `[boot][security?][rootfs][userdata]`.
+GPT partition table, located by partition labels. Order: `[boot][recovery?][security?][rootfs][userdata]`.
 
 | Partition | PARTLABEL / fs label | Purpose |
 |-----------|-------|---------|
 | p1 | `boot` / `armbi_boot` | `/boot` files (ext4, plain and auto-decrypt) or raw FIT image (secure boot) |
-| p2 (encrypted modes) | `security` | crypto key material, no filesystem |
-| p2/p3 | `rootfs` / `armbi_root` | rootfs (LUKS+ext4 in auto-decrypt mode) |
+| p2 (secure boot) | `recovery` | raw FIT rescue partition — same signed boot.itb, booted by `ota_rescue_boot_fit` (vendor `boot_fit`); never touched by OTA |
+| p2/p3 (encrypted modes) | `security` | crypto key material, no filesystem |
+| following | `rootfs` / `armbi_root` | rootfs (LUKS+ext4 in auto-decrypt mode) |
 | last | `userdata` / `armbi_usrdata` | overlayfs upper layer + OTA transaction store |
 
 Plain recovery:
@@ -178,7 +179,7 @@ Auto-decrypt recovery (RK_OPTEE_BOOT_ENABLE=yes):
 
 Secure boot recovery (RK_SECURE_UBOOT_ENABLE=yes, BOOT_RAW_MODE=yes):
 ```
-[ boot raw FIT ][ security ][ rootfs LUKS+ext4 ][ userdata LUKS+ext4 ]
+[ boot raw FIT ][ recovery raw FIT ][ security ][ rootfs LUKS+ext4 ][ userdata LUKS+ext4 ]
 ```
 
 The `/boot` partition is **never** overlayed. The initramfs mounts it on top of overlayfs (`zz-seeed-mount-boot`, anchored to the rootfs disk; there is no `/boot` fstab entry), so any process writing to `/boot` (apt kernel upgrades, manual `armbianEnv.txt` edits, OTA tooling) hits the real boot partition — U-Boot reads the same bytes on next boot. `overlayroot` runs with `recurse=0` so the overlay covers `/` only and leaves the boot mount as a direct mount.
@@ -196,6 +197,27 @@ The `/boot` partition is **never** overlayed. The initramfs mounts it on top of 
 4. A separate userdata partition supplies the persistent overlay upper layer; user data written at runtime survives the update.
 
 Logs land in `/run/initramfs/ota.log` (carried into the running system via `/run`).
+
+### Rescue (the independent recovery environment)
+
+Every recovery image carries a rescue boot path that never depends on the
+rootfs; U-Boot routes to it through the transactional `bootcmd` whenever
+`ota_in_progress=1` or a normal boot falls through. Two flavors share one
+dispatcher (`ota_rescue_boot=run ota_rescue_boot_fs || run ota_rescue_boot_fit
+|| run distro_bootcmd`):
+
+- **ext4 layouts** (`ota_rescue_boot_fs`): `Image` + `uInitrd` + `board.dtb`
+  in `boot/recovery/`, loaded with `ext4load` and started with `booti`.
+- **raw-FIT/secure layouts** (`ota_rescue_boot_fit`): the same **signed
+  boot.itb** flashed to the dedicated `PARTLABEL=recovery` partition at image
+  build time, booted with the vendor `boot_fit` command (`boot_fit_part
+  recovery`) — FIT signature verification applies, and the FIT's ramdisk is
+  the same-build initramfs, so the rescue boots straight into the
+  `99-ota-apply` Rescue role (`armbian.ota_role=recovery`).
+
+The rescue set is **never updated by OTA** (packages stage the boot
+partition with `recovery/` excluded and never touch the recovery partition),
+so a bad update can never destroy its own rescuer.
 
 ### Usage
 

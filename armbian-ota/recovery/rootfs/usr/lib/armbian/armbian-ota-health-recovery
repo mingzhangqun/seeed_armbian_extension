@@ -76,6 +76,33 @@ echo "OTA health: transaction in flight (STATUS=${status} CANDIDATE=${candidate}
 }
 [ -n "${candidate}" ] || { health_fail "empty CANDIDATE_ID"; ota_health_schedule_reboot; }
 
+# --- layout probe (check 6 gate) ----------------------------------------------
+# Check 6 (/boot/payload-id) is filesystem-layout only: raw-FIT (secure
+# boot) images carry no ext4 boot partition, and the raw boot partition has
+# no place for a marker file -- the FIT's own signature chain plus the
+# phase-2 write verification (write_raw_boot_itb) cover that side. The
+# build-time stamp (rescue-artifacts.sh) answers first; when it is missing
+# (its build-side write is warn-only) probe the boot partition instead. With
+# no boot partition resolvable at all, skip: a false skip drops one advisory
+# check, a false demand reboots a healthy transaction forever.
+ota_health_boot_is_raw_fit() {
+    local mode dev disk found=0
+
+    mode="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null || true)"
+    [ "${mode}" = "raw-fit" ] && return 0
+    [ "${mode}" = "filesystem" ] && return 1
+    # probe only the boot disk: a cloned secure image attached as a second
+    # disk carries a raw PARTLABEL=boot and would otherwise flip the verdict
+    disk="$(fw_env_boot_disk "${lower_src}" 2>/dev/null || true)"
+    for dev in $(blkid -t PARTLABEL=boot -o device 2>/dev/null); do
+        [ -z "${disk}" ] || case "${dev}" in "${disk}"p[0-9]*) ;; *) continue ;; esac
+        found=1
+        [ -z "$(blkid -s TYPE -o value "${dev}" 2>/dev/null)" ] && return 0
+    done
+    [ "${found}" = "0" ] && return 0
+    return 1
+}
+
 # --- the six checks -----------------------------------------------------------
 [ -r /proc/version ] || health_fail "/proc/version unreadable"
 
@@ -93,9 +120,13 @@ run_marker="$(cat /run/armbian-ota/installed-payload-id 2>/dev/null || true)"
 [ -n "${run_marker}" ] || health_fail "/run/armbian-ota/installed-payload-id missing (normal-role initramfs hook did not run?)"
 [ "${run_marker}" = "${candidate}" ] || health_fail "/run marker ${run_marker:-none} != CANDIDATE_ID"
 
-boot_marker="$(cat /boot/payload-id 2>/dev/null || true)"
-[ -n "${boot_marker}" ] || health_fail "/boot/payload-id missing"
-[ "${boot_marker}" = "${candidate}" ] || health_fail "/boot marker ${boot_marker:-none} != CANDIDATE_ID"
+if ota_health_boot_is_raw_fit; then
+    echo "OTA health: raw-fit layout, /boot payload marker check skipped"
+else
+    boot_marker="$(cat /boot/payload-id 2>/dev/null || true)"
+    [ -n "${boot_marker}" ] || health_fail "/boot/payload-id missing"
+    [ "${boot_marker}" = "${candidate}" ] || health_fail "/boot marker ${boot_marker:-none} != CANDIDATE_ID"
+fi
 
 [ -n "${HEALTH_FAIL_ITEMS}" ] && ota_health_schedule_reboot
 
