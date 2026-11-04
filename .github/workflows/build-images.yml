@@ -518,10 +518,29 @@ jobs:
       # 10 GiB repo cache and evict the kernel debs cache (30+ min rebuild).
       # Rootfs from scratch is only ~10 min.
 
+      # The armbian-build wrapper extensions/seeed-extension.sh hardcodes the
+      # UPSTREAM extension repo (Seeed-Studio/seeed_armbian_extension @ main),
+      # so every build would compile the upstream code and never the fixes on
+      # the dispatched ref of THIS repo. Make the repo overridable (the ref
+      # already is via SEEED_EXTENSION_REF) and point both at this checkout.
+      - name: Point seeed-extension at this checkout
+        run: |
+          cd armbian-build
+          sed -i \
+            -e 's|^SEEED_EXTENSION_REPO=.*|SEEED_EXTENSION_REPO="${SEEED_EXTENSION_REPO:-https://github.com/Seeed-Studio/seeed_armbian_extension}"|' \
+            extensions/seeed-extension.sh
+          echo "=== seeed-extension repo/ref now overridable ==="
+          grep -n 'SEEED_EXTENSION_REPO=\|SEEED_EXTENSION_REF=' extensions/seeed-extension.sh | head -4
+
       - name: Build
         working-directory: armbian-build
         run: |
           set -euo pipefail
+          # Build the extension code from this workflow's repo + ref, not the
+          # upstream main the armbian-build wrapper pins by default.
+          export SEEED_EXTENSION_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          export SEEED_EXTENSION_REF="branch:${GITHUB_REF_NAME}"
+          echo "extension source: ${SEEED_EXTENSION_REPO} @ ${SEEED_EXTENSION_REF}"
           # cli → --minimal (Debian 13); gnome → desktop (Ubuntu 26.04)
           # sized by the desktop_tier choice.
           TIER_ARGS=""
