@@ -5,23 +5,27 @@ Subject: [PATCH] rk35xx: fail-safe default environment for OTA rescue routing
 The single-copy U-Boot env blob (0x3f8000, no redundant copy) can lose
 its CRC when saveenv hits a power cut mid-write. In that state U-Boot
 falls back to the compiled default environment, which must fail SAFE:
-route into the independent OTA Rescue assets in boot/recovery/
-(Image/uInitrd/board.dtb) instead of running distro_bootcmd across
-arbitrary media.
+route into the independent OTA Rescue assets -- the ext4 /recovery/
+directory (plain recovery builds) or the signed FIT on the dedicated
+PARTLABEL=recovery partition (raw-FIT secure builds) -- instead of
+running distro_bootcmd across arbitrary media.
 
-- embed the p1-anchored ota_rescue_boot script in the default env --
-  the only key its default bootcmd consumes; the transactional keys
-  (ota_in_progress/ota_boot_next/ota_normal_boot) ride in the
-  prefilled env blob, and fw_env tools read that blob, never this
-  compiled default
+- embed the rescue script pair in the default env -- ota_rescue_boot_fs
+  (ext4load/booti from boot partition 1) and ota_rescue_boot_fit
+  (vendor boot_fit from the PARTLABEL=recovery partition, mirroring the
+  A/B raw-fit slot boot), chained behind the ota_rescue_boot dispatcher
+  (the only key its default bootcmd consumes); the transactional keys
+  (ota_in_progress/ota_boot_next/ota_normal_boot) ride in the prefilled
+  env blob, and fw_env tools read that blob, never this compiled default
 - redefine the default bootcmd to "run ota_rescue_boot"
 
-ota_rescue_boot is self-routing: when any of the three ext4loads (or
-booti) falls through -- /recovery/ assets absent on plain and A/B
-builds, or an asset is corrupt -- it lands in "run distro_bootcmd".
-The patch is therefore inert on every build flavor and is staged
-unconditionally: no compile-time gating, and one stable U-Boot
-artifact hash across flavors sharing a checkout.
+ota_rescue_boot is self-routing: the fs branch falls through when boot
+partition 1 carries no ext4 /recovery/ assets (raw-FIT and A/B builds),
+the fit branch falls through when no recovery partition exists (plain
+and A/B builds), and the chain lands in "run distro_bootcmd". The patch
+is therefore inert on every build flavor and is staged unconditionally:
+no compile-time gating, and one stable U-Boot artifact hash across
+flavors sharing a checkout.
 
 The persistent (prefilled) env carries the full transactional bootcmd;
 this default is its CRC-failure fallback (Seeed recovery OTA v0.8,
@@ -30,7 +34,7 @@ design section 3.4).
 ---
 --- a/include/configs/rk3576_common.h
 +++ b/include/configs/rk3576_common.h
-@@ -77,13 +77,31 @@
+@@ -77,13 +77,34 @@
  
  #include <config_distro_bootcmd.h>
  
@@ -38,15 +42,18 @@ design section 3.4).
 + * Seeed OTA rescue routing (v0.8 design section 3.4): the single-copy env
 + * blob at 0x3f8000 can lose its CRC when saveenv hits a power cut. The
 + * compiled default environment must fail SAFE in that case -- boot the
-+ * independent Rescue in boot/recovery/, or distro_bootcmd without it.
-+ * Only ota_rescue_boot lives here (the default bootcmd is its sole
-+ * consumer); console is hardcoded to the rk35xx serial line like the
-+ * other two copies -- build-time prefill and fwenv re-injection -- so
-+ * the three cannot drift: an env-script ${console} evaluates empty and
-+ * blinds the rescue console.
++ * independent Rescue (ext4 /recovery/ assets on plain builds, the signed
++ * FIT on the PARTLABEL=recovery partition on raw-FIT secure builds), or
++ * distro_bootcmd without either. Only the rescue scripts live here (the
++ * default bootcmd is their sole consumer); console is hardcoded to the
++ * rk35xx serial line like the other two copies -- build-time prefill and
++ * fwenv re-injection -- so the three cannot drift: an env-script
++ * ${console} evaluates empty and blinds the rescue console.
 + */
 +#define OTA_RESCUE_ENV_SETTINGS \
-+	"ota_rescue_boot=ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=LABEL=armbi_root rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery\" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r} || run distro_bootcmd\0"
++	"ota_rescue_boot_fs=ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=LABEL=armbi_root rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery\" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}\0" \
++	"ota_rescue_boot_fit=setenv boot_fit_part recovery; setenv bootargs \"root=/dev/mapper/armbian-root rw rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery\"; boot_fit\0" \
++	"ota_rescue_boot=run ota_rescue_boot_fs || run ota_rescue_boot_fit || run distro_bootcmd\0"
 +
  #define CONFIG_EXTRA_ENV_SETTINGS \
  	ENV_MEM_LAYOUT_SETTINGS \
@@ -64,7 +71,7 @@ design section 3.4).
  /* rockchip ohci host driver */
 --- a/include/configs/rk3588_common.h
 +++ b/include/configs/rk3588_common.h
-@@ -84,6 +84,20 @@
+@@ -84,6 +84,23 @@
  
  #include <config_distro_bootcmd.h>
  
@@ -72,15 +79,18 @@ design section 3.4).
 + * Seeed OTA rescue routing (v0.8 design section 3.4): the single-copy env
 + * blob at 0x3f8000 can lose its CRC when saveenv hits a power cut. The
 + * compiled default environment must fail SAFE in that case -- boot the
-+ * independent Rescue in boot/recovery/, or distro_bootcmd without it.
-+ * Only ota_rescue_boot lives here (the default bootcmd is its sole
-+ * consumer); console is hardcoded to the rk35xx serial line like the
-+ * other two copies -- build-time prefill and fwenv re-injection -- so
-+ * the three cannot drift: an env-script ${console} evaluates empty and
-+ * blinds the rescue console.
++ * independent Rescue (ext4 /recovery/ assets on plain builds, the signed
++ * FIT on the PARTLABEL=recovery partition on raw-FIT secure builds), or
++ * distro_bootcmd without either. Only the rescue scripts live here (the
++ * default bootcmd is their sole consumer); console is hardcoded to the
++ * rk35xx serial line like the other two copies -- build-time prefill and
++ * fwenv re-injection -- so the three cannot drift: an env-script
++ * ${console} evaluates empty and blinds the rescue console.
 + */
 +#define OTA_RESCUE_ENV_SETTINGS \
-+	"ota_rescue_boot=ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=LABEL=armbi_root rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery\" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r} || run distro_bootcmd\0"
++	"ota_rescue_boot_fs=ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=LABEL=armbi_root rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery\" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}\0" \
++	"ota_rescue_boot_fit=setenv boot_fit_part recovery; setenv bootargs \"root=/dev/mapper/armbian-root rw rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery\"; boot_fit\0" \
++	"ota_rescue_boot=run ota_rescue_boot_fs || run ota_rescue_boot_fit || run distro_bootcmd\0"
 +
  #define CONFIG_EXTRA_ENV_SETTINGS \
  	BOOTENV_SHARED_MTD	\
