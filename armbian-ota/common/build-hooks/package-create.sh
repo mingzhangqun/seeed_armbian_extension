@@ -815,11 +815,16 @@ function pre_umount_final_image__901_create_ota_payload_pkg() {
 
     display_alert "pre_umount_final_image__901 Extracting partition images from loop device" "Detecting and extracting partitions from ${LOOP}" "info"
 
-    # Determine OTA security mode.
+    # Determine OTA security mode. The FIT-payload branch is keyed on the
+    # LAYOUT (ota_raw_boot_enabled), not on ota_secure_boot_encrypted_
+    # rootfs_enabled: the auto-decrypt + OP-TEE flavor (profile
+    # "recovery secure-rootfs") also carries a raw boot + recovery partition
+    # pair and a signed FIT, and classifying it as ext4-boot made hook 901
+    # mount the raw partition (or die at 'PAYLOAD_ID not computed').
     local ota_security_mode="plain"
-    if ota_secure_boot_encrypted_rootfs_enabled; then
+    if ota_raw_boot_enabled && ota_encrypted_rootfs_enabled; then
         ota_security_mode="secure-boot-encrypted-rootfs"
-        display_alert "Secure boot and auto ota enabled" "Using FIT image workflow" "info"
+        display_alert "Raw-FIT encrypted OTA" "Using FIT image workflow" "info"
     elif ota_encrypted_rootfs_enabled; then
         ota_security_mode="encrypted-rootfs"
         display_alert "Encrypted auto-decrypt OTA" "Non-secure boot mode: use mapper rootfs and package plain boot partition" "info"

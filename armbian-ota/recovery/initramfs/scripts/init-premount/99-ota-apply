@@ -244,17 +244,33 @@ reconcile_success_and_clear() {
         rescue_shell "cannot mount rootfs for success reconciliation"
     fi
     root_marker="$(cat "${ROOT_MNT}/usr/share/armbian-ota/installed-payload-id" 2>/dev/null)"
+    # Layout flavor from the rootfs stamp (written at build time; also by
+    # every OTA apply via the payload). Gates the boot-side marker check:
+    # raw-FIT layouts have no ext4 boot partition to carry a marker.
+    boot_mode="$(cat "${ROOT_MNT}/usr/share/armbian-ota/boot-mode" 2>/dev/null || true)"
     umount "${ROOT_MNT}" 2>/dev/null || true
 
+    check_boot_marker=0
     if [ "${HAS_BOOT_PART:-0}" -eq 1 ]; then
+        check_boot_marker=1
         mkdir -p "${BOOT_MNT}"
         if mount -t ext4 -o ro "${BOOT_DEV}" "${BOOT_MNT}" 2>/dev/null; then
             boot_marker="$(cat "${BOOT_MNT}/payload-id" 2>/dev/null)"
             umount "${BOOT_MNT}" 2>/dev/null || true
         fi
+    elif [ "${boot_mode}" = "raw-fit" ]; then
+        # secure boot: the FIT side is signature-verified at every boot;
+        # the root marker alone reconciles the identity.
+        log "raw-fit layout; boot marker check skipped"
+    else
+        # HAS_BOOT_PART=0 on an ext4-layout image means the boot-partition
+        # PROBE failed, not a raw-FIT device: silently skipping here would
+        # commit a transaction whose boot partition was never verified.
+        rescue_shell "no ext4 boot partition and no raw-fit stamp (boot probe failed?)"
     fi
 
-    if [ "${root_marker}" != "${installed_id}" ] || [ "${boot_marker}" != "${installed_id}" ]; then
+    if [ "${root_marker}" != "${installed_id}" ] ||
+       { [ "${check_boot_marker}" = "1" ] && [ "${boot_marker}" != "${installed_id}" ]; }; then
         log "ERROR: success reconciliation marker mismatch (root=${root_marker:-none} boot=${boot_marker:-none} installed=${installed_id})"
         rescue_shell "success markers do not match INSTALLED_ID"
     fi
@@ -413,6 +429,10 @@ OTA_STATE_FILE="${STATE_FILE}"
 state_init
 
 # 3) env access + reconciliation (section 6)
+# Encrypted layouts must root the fs rescue branch on the unlocked mapper:
+# the LUKS container carries no LABEL=armbi_root, so fw_env_write_routing_set
+# splices OTA_RESCUE_ROOT_DEFAULT into that script (plain default: LABEL).
+[ "${AUTO_DECRYPT_MODE:-0}" -eq 1 ] && OTA_RESCUE_ROOT_DEFAULT="/dev/mapper/armbian-root"
 fw_disk="$(fw_env_ensure_config "${USERDATA_DEV}")" || {
     log "ERROR: cannot resolve boot disk for fw_env (anchor=${USERDATA_DEV})"
     rescue_shell "fw_env unusable"
@@ -433,6 +453,12 @@ if fw_env_crc_bad; then
             run_campaign "$(state_get CANDIDATE_ID)"
             ;;
         success)
+            # Rebuild BEFORE reconciling: reconcile_success_and_clear writes
+            # a single key via fw_setenv, and on a bad-CRC env that write
+            # starts from EMPTY -- shipping ota_in_progress=0 without bootcmd
+            # or the boot scripts, an unrecoverable routing set.
+            fw_env_write_routing_set "0" "recovery" ||
+                rescue_shell "env CRC rebuild failed"
             reconcile_success_and_clear "$(state_get INSTALLED_ID)"
             ;;
         *)

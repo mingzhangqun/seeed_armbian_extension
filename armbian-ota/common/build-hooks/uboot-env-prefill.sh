@@ -88,13 +88,21 @@ function ota_uboot_env_prefill_compose() {
     # device had NO working normal boot at all. KEEP IN SYNC with fwenv.sh and
     # seeed-ota-rescue-default-env.patch.
     routing_env="$(mktemp)" || exit_with_error "mktemp failed"
+    # Rescue root for the fs branch, by layout (mirrors fwenv.sh's
+    # OTA_RESCUE_ROOT_DEFAULT): encrypted images carry no LABEL=armbi_root
+    # (the LUKS container has no fs label), so the rescue roots on the
+    # init-top-unlocked mapper instead.
+    local rescue_root="LABEL=armbi_root"
+    if ota_encrypted_rootfs_enabled; then
+        rescue_root="/dev/mapper/armbian-root"
+    fi
     {
         printf '%s\n' 'ota_in_progress=0'
         printf '%s\n' 'ota_boot_next=recovery'
         printf '%s\n' 'ota_normal_boot_fs=setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scriptaddr} /boot.scr && source ${scriptaddr}'
-        printf '%s\n' 'ota_normal_boot_fit=setenv boot_fit_part boot; setenv bootargs "console=ttyFIQ0 root=/dev/mapper/armbian-root rw rootwait armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
+        printf '%s\n' 'ota_normal_boot_fit=setenv boot_fit_part boot; setenv bootargs "console=ttyFIQ0 root=/dev/mapper/armbian-root rw rootwait rootfstype=ext4 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
         printf '%s\n' 'ota_normal_boot=run ota_normal_boot_fs || run ota_normal_boot_fit'
-        printf '%s\n' 'ota_rescue_boot_fs=ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root=LABEL=armbi_root rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
+        printf '%s\n' "ota_rescue_boot_fs=ext4load \${devtype} \${devnum}:1 \${kernel_addr_r} /recovery/Image && ext4load \${devtype} \${devnum}:1 \${ramdisk_addr_r} /recovery/uInitrd && ext4load \${devtype} \${devnum}:1 \${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=${rescue_root} rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=\${devtype} armbian.bootdevnum=\${devnum} armbian.ota_role=recovery\" && booti \${kernel_addr_r} \${ramdisk_addr_r} \${fdt_addr_r}"
         printf '%s\n' 'ota_rescue_boot_fit=setenv boot_fit_part recovery; setenv bootargs "root=/dev/mapper/armbian-root rw rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
         printf '%s\n' 'ota_rescue_boot=run ota_rescue_boot_fs || run ota_rescue_boot_fit || run distro_bootcmd'
         printf '%s\n' 'bootcmd=if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'

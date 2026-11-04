@@ -178,12 +178,19 @@ fw_env_set_multi() {
 # reconciliation rebuilds this full set before returning to normal.
 
 OTA_ENV_NORMAL_BOOT_FS='setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scriptaddr} /boot.scr && source ${scriptaddr}'
-OTA_ENV_NORMAL_BOOT_FIT='setenv boot_fit_part boot; setenv bootargs "console=ttyFIQ0 root=/dev/mapper/armbian-root rw rootwait armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
+OTA_ENV_NORMAL_BOOT_FIT='setenv boot_fit_part boot; setenv bootargs "console=ttyFIQ0 root=/dev/mapper/armbian-root rw rootwait rootfstype=ext4 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
 OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fs || run ota_normal_boot_fit'
-OTA_ENV_RESCUE_BOOT_FS='ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root=LABEL=armbi_root rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
 OTA_ENV_RESCUE_BOOT_FIT='setenv boot_fit_part recovery; setenv bootargs "root=/dev/mapper/armbian-root rw rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
 OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fs || run ota_rescue_boot_fit || run distro_bootcmd'
 OTA_ENV_BOOTCMD='if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
+
+# Rescue root for the fs branch, resolved at routing-set build time:
+# LABEL=armbi_root on plain ext4 layouts; /dev/mapper/armbian-root on
+# encrypted ones, where the LUKS container carries no filesystem label and
+# only the init-top unlock provides a mountable root. Callers set
+# OTA_RESCUE_ROOT_DEFAULT before fw_env_write_routing_set (the Rescue sets
+# it from AUTO_DECRYPT_MODE; the build prefill from its layout config).
+OTA_RESCUE_ROOT_DEFAULT="${OTA_RESCUE_ROOT_DEFAULT:-LABEL=armbi_root}"
 
 # Write the complete routing env with the given flag values
 # ($1 = ota_in_progress, $2 = ota_boot_next). Readback-verified.
@@ -191,13 +198,18 @@ fw_env_write_routing_set() {
     in_prog="$1"
     next="$2"
 
+    # single-quoted except for the rescue root splice: the ${devtype}/$
+    # {kernel_addr_r}/... tokens must stay literal for U-Boot, so they cannot
+    # sit inside a double-quoted argument
+    rescue_fs='ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root='"${OTA_RESCUE_ROOT_DEFAULT}"' rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
+
     fw_env_set_multi \
         "ota_in_progress=${in_prog}" \
         "ota_boot_next=${next}" \
         "ota_normal_boot_fs=${OTA_ENV_NORMAL_BOOT_FS}" \
         "ota_normal_boot_fit=${OTA_ENV_NORMAL_BOOT_FIT}" \
         "ota_normal_boot=${OTA_ENV_NORMAL_BOOT}" \
-        "ota_rescue_boot_fs=${OTA_ENV_RESCUE_BOOT_FS}" \
+        "ota_rescue_boot_fs=${rescue_fs}" \
         "ota_rescue_boot_fit=${OTA_ENV_RESCUE_BOOT_FIT}" \
         "ota_rescue_boot=${OTA_ENV_RESCUE_BOOT}" \
         "bootcmd=${OTA_ENV_BOOTCMD}"

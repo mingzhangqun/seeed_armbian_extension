@@ -44,23 +44,28 @@ function ota_rescue_artifacts_resolve_dtb() {
 
 # Stamp the layout flavor into the rootfs so the runtime health service can
 # branch without probing block devices (plain recovery stamps "filesystem").
+# Hard failure, not a warning: the Rescue success-reconciliation treats the
+# stamp as the deciding input on raw-FIT devices (HAS_BOOT_PART=0), so a
+# warn-only write could ship a rootfs whose next reconciliation wedges in
+# rescue_shell with an unclearable STATUS=success.
 function ota_rescue_stamp_boot_mode() {
     local mode="$1"
     local stamp_dir="${MOUNT}/usr/share/armbian-ota"
+    local stamp_file="${stamp_dir}/boot-mode"
 
-    mkdir -p "${stamp_dir}" 2>/dev/null || true
-    printf '%s\n' "${mode}" > "${stamp_dir}/boot-mode" 2>/dev/null || \
-        display_alert "Recovery rescue assets" "failed to stamp boot-mode=${mode}" "warn"
+    mkdir -p "${stamp_dir}" ||
+        exit_with_error "Recovery rescue assets" "cannot create ${stamp_dir} for boot-mode stamp"
+    printf '%s\n' "${mode}" > "${stamp_file}" ||
+        exit_with_error "Recovery rescue assets" "failed to stamp boot-mode=${mode}"
 }
 
 # Resolve the rescue partition from the loop's partition table by
 # PARTLABEL. The RECOVERY_RESCUE_PART_INDEX variable set by the partition
 # hook does not survive across hook rounds (same host/container split that
 # hit BOOT_RAW_MODE); parsing the live table needs no cross-hook state.
-# Emits "<node> <start-sector>" -- the sector is what the flash actually
-# uses, because this stage's loop is attached without -P and carries no
-# partition device nodes (observed: sfdisk sees the table, /dev/loopXpY
-# does not exist).
+# Emits "<node> <start-sector> <size-in-sectors>" -- the sector is what the
+# flash uses (this stage's loop is attached without -P and carries no
+# partition device nodes), the size feeds the FIT-vs-partition bound check.
 function ota_rescue_recovery_partition() {
     sfdisk -J "${LOOP}" 2>/dev/null | python3 -c '
 import json, sys
@@ -70,20 +75,29 @@ except Exception:
     sys.exit(1)
 for p in table.get("partitions", []):
     if p.get("name") == "recovery":
-        print(p["node"], p["start"])
+        print(p["node"], p["start"], p["size"])
         break
 '
 }
 
 function ota_rescue_flash_fit_partition() {
-    local fit_image rescue_dev rescue_start magic
+    local fit_image rescue_dev rescue_start rescue_sectors fit_size magic
 
     fit_image="$(ota_rescue_fit_image)"
-    read -r rescue_dev rescue_start <<< "$(ota_rescue_recovery_partition)"
+    read -r rescue_dev rescue_start rescue_sectors <<< "$(ota_rescue_recovery_partition)"
     [[ -n "${rescue_start}" ]] ||
         exit_with_error "Recovery rescue assets" "rescue partition not found on ${LOOP} by PARTLABEL=recovery"
     [[ -f "${fit_image}" ]] ||
         exit_with_error "Recovery rescue assets" "signed FIT missing for raw rescue: ${fit_image}"
+
+    # Same bound the device-side write_raw_boot_itb enforces: without it a
+    # small OTA_BOOT_SIZE plus a larger FIT dd's straight past the rescue
+    # partition into the following security/rootfs partition, and the
+    # 4-byte magic readback still passes.
+    fit_size="$(stat -c%s "${fit_image}")"
+    if [[ -n "${rescue_sectors}" && "${fit_size}" -gt $((rescue_sectors * 512)) ]]; then
+        exit_with_error "Recovery rescue assets" "signed FIT (${fit_size} bytes) exceeds the rescue partition ($((rescue_sectors * 512)) bytes); raise OTA_BOOT_SIZE"
+    fi
 
     display_alert "Recovery rescue assets" "flashing $(basename "${fit_image}") -> ${LOOP} @ sector ${rescue_start} (${rescue_dev})" "info"
     dd if="${fit_image}" of="${LOOP}" bs=512 seek="${rescue_start}" conv=notrunc status=none ||
@@ -109,7 +123,7 @@ function pre_umount_final_image__900_install_recovery_rescue() {
 
     local boot_dir="${MOUNT}/boot"
     local rescue_dir="${boot_dir}/recovery"
-    local image initrd dtb rescue_id
+    local image initrd dtb
 
     [[ -f "${boot_dir}/Image" ]] ||
         exit_with_error "Recovery rescue assets" "missing ${boot_dir}/Image"
@@ -129,18 +143,12 @@ function pre_umount_final_image__900_install_recovery_rescue() {
     cp "${dtb}" "${rescue_dir}/board.dtb" ||
         exit_with_error "Recovery rescue assets" "failed to copy board dtb"
 
-    # Rescue artifact identity (build record only; not part of the OTA
-    # payload identity -- the rescue set is never updated by OTA).
-    rescue_id="$(
-        {
-            sha256sum "${rescue_dir}/Image"
-            sha256sum "${rescue_dir}/uInitrd"
-            sha256sum "${rescue_dir}/board.dtb"
-        } | sha256sum | awk '{print $1}'
-    )"
-    printf '%s\n' "${rescue_id}" > "${rescue_dir}/payload-id"
+    # No identity file lives here: the rescue set is frozen at image build
+    # and never updated by OTA, and a self-stored digest proves nothing (it
+    # can be tampered with alongside the assets). Verify against the build
+    # log or the original image when in doubt.
 
     sync
     ota_rescue_stamp_boot_mode "filesystem"
-    display_alert "Recovery rescue assets" "installed, artifact id ${rescue_id:0:16}" "info"
+    display_alert "Recovery rescue assets" "installed (Image + uInitrd + board.dtb)" "info"
 }
