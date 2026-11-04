@@ -29,12 +29,13 @@ Created by [`recovery/build-hooks/partitions.sh`](../armbian-ota/recovery/build-
 ```text
 plain:         [ boot ext4 ][ rootfs ext4 ][ userdata ext4 ]
 auto-decrypt:  [ boot ext4 ][ security 4M ][ rootfs LUKS+ext4 ][ userdata LUKS+ext4 ]
-secure boot:   [ boot raw FIT ][ security 4M ][ rootfs LUKS+ext4 ][ userdata LUKS+ext4 ]
+secure boot:   [ boot raw FIT ][ recovery raw FIT ][ security 4M ][ rootfs LUKS+ext4 ][ userdata LUKS+ext4 ]
 ```
 
 | PARTLABEL | fs label | Role |
 |---|---|---|
 | `boot` | `armbi_boot` | `/boot`, mounted directly (never overlayed) — or raw FIT under secure boot |
+| `recovery` | — | secure boot only: raw FIT rescue partition (same signed boot.itb as boot, flashed at build time, booted by the U-Boot `boot_fit` command; never touched by OTA) |
 | `security` | — | key material (encrypted images only) |
 | `rootfs` | `armbi_root` | read-only rootfs lower layer |
 | `userdata` | `armbi_usrdata` | overlay upper layer + OTA transaction store; auto-expands on first boot |
