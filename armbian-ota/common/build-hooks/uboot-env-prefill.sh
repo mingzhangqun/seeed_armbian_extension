@@ -165,20 +165,34 @@ for entry in blob[4:].split(b"\0"):
         break
     print(entry.decode("utf-8", "replace"))
 ')" || exit_with_error "Env blob readback failed" "${env_info}"
-    grep -q '^ota_normal_boot_fit=' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks normal FIT boot script" "ota_normal_boot_fit not carried into blob"
-    grep -q '^ota_rescue_boot_fs=' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks rescue boot script" "ota_rescue_boot_fs not carried into blob"
-    grep -q '^ota_rescue_boot_fit=' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks rescue FIT boot script" "ota_rescue_boot_fit not carried into blob"
-    # the dispatcher keys themselves -- bootcmd runs these names, a blob that
-    # lost either one boots into an undefined variable
-    grep -q '^ota_normal_boot=run ota_normal_boot_fs' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks normal boot dispatcher" "ota_normal_boot not carried into blob"
-    grep -q '^ota_rescue_boot=run ota_rescue_boot_fs' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks rescue boot dispatcher" "ota_rescue_boot not carried into blob"
-    grep -q '^bootcmd=.*ota_in_progress' <<< "${env_info}" ||
-        exit_with_error "Prefilled env lacks transactional bootcmd" "bootcmd not carried into blob"
+    # Verify the tokens the composed env actually carries.  A/B blobs anchor
+    # on the armbian.bootdev bootcmd from /etc/u-boot-initial-env (plus the
+    # raw-fit override on secure images); only recovery blobs carry the v0.8
+    # transactional routing script.  Checking the recovery tokens on an A/B
+    # blob always fails and kills every A/B leg at image assembly.
+    if [[ "${AB_PART_OTA:-}" == "yes" ]]; then
+        grep -q '^bootcmd=.*armbian\.bootdev' <<< "${env_info}" ||
+            exit_with_error "Prefilled A/B env lacks bootdev bootcmd" "bootcmd not carried into blob"
+        if ota_raw_boot_enabled; then
+            grep -q '^ab_boot_mode=raw-fit' <<< "${env_info}" ||
+                exit_with_error "Prefilled A/B env lacks raw-fit mode" "ab_boot_mode not carried into blob"
+        fi
+    else
+        grep -q '^ota_normal_boot_fit=' <<< "${env_info}" ||
+            exit_with_error "Prefilled env lacks normal FIT boot script" "ota_normal_boot_fit not carried into blob"
+        grep -q '^ota_rescue_boot_fs=' <<< "${env_info}" ||
+            exit_with_error "Prefilled env lacks rescue boot script" "ota_rescue_boot_fs not carried into blob"
+        grep -q '^ota_rescue_boot_fit=' <<< "${env_info}" ||
+            exit_with_error "Prefilled env lacks rescue FIT boot script" "ota_rescue_boot_fit not carried into blob"
+        # the dispatcher keys themselves -- bootcmd runs these names, a blob that
+        # lost either one boots into an undefined variable
+        grep -q '^ota_normal_boot=run ota_normal_boot_fs' <<< "${env_info}" ||
+            exit_with_error "Prefilled env lacks normal boot dispatcher" "ota_normal_boot not carried into blob"
+        grep -q '^ota_rescue_boot=run ota_rescue_boot_fs' <<< "${env_info}" ||
+            exit_with_error "Prefilled env lacks rescue boot dispatcher" "ota_rescue_boot not carried into blob"
+        grep -q '^bootcmd=.*ota_in_progress' <<< "${env_info}" ||
+            exit_with_error "Prefilled env lacks transactional bootcmd" "bootcmd not carried into blob"
+    fi
 
     display_alert "OTA U-Boot env prefill" "$(grep '^bootcmd=' <<< "${env_info}")" "info"
 }
