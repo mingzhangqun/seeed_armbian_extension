@@ -84,23 +84,16 @@ ota_compute_payload_id() {
 
 recovery_check_package_metadata() {
     local package_path="$1" force="$2"
-    local payload_id board release
+    local payload_id
 
     payload_id="$(package_env_get_value "PAYLOAD_ID" || true)"
     [ -n "${payload_id}" ] ||
         error_exit "OTA package carries no PAYLOAD_ID (built by a pre-v0.8 toolchain); refused"
 
-    board="$(package_env_get_value "BOARD" || true)"
-    release="$(package_env_get_value "RELEASE" || true)"
-    local sys_board sys_release
-    sys_board="$(recovery_system_field BOARD)"
-    sys_release="$(recovery_system_field RELEASE)"
-    if [ -n "${sys_board}" ] && [ -n "${board}" ] && [ "${board}" != "${sys_board}" ]; then
-        error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
-    fi
-    if [ -n "${sys_release}" ] && [ -n "${release}" ] && [ "${release}" != "${sys_release}" ]; then
-        error_exit "OTA package RELEASE mismatch: package=${release}, device=${sys_release} (cross-release OTA is not supported)"
-    fi
+    # BOARD/RELEASE matching moved to the shared ota_check_board_release gate
+    # (invoked from the CLI check_ota_pkg pre-flight) so both modes enforce the
+    # identical contract; this backend keeps only the recovery-specific
+    # identity checks below.
 
     local installed_id
     installed_id="$(state_get INSTALLED_ID)"
@@ -111,66 +104,9 @@ recovery_check_package_metadata() {
     OTA_CLI_PAYLOAD_ID="${payload_id}"
 }
 
-# KIND=full implies BOTH the rootfs archive and a boot payload exist and are
-# covered by their checksum files. This is an explicit assertion, not a side
-# effect of checksum verification: a broken build can drop boot.tar together
-# with its checksum entry and still verify green (section 15.2).
-# Payload shapes by layout/tier:
-#   boot: dual tar (boot.tar.<fmt>, ext4 layouts) or signed boot.itb
-#         (raw-FIT/secure, written by write_raw_boot_itb)
-#   rootfs: rootfs.tar.<fmt>, or rootfs.tar.<fmt>.enc on encrypted builds --
-#         encryption is mandatory for secure boot, so demanding the plaintext
-#         member there refused every secure package at start time
-recovery_assert_dual_tar() {
-    local package_path="$1"
-    local fmt member root_member
-    fmt="$(package_env_get_value "PAYLOAD_FORMAT" || echo "gz")"
-    case "${fmt}" in
-        xz)   fmt="xz" ;;
-        zstd) fmt="zst" ;;
-        zst)  fmt="zst" ;;
-        gz)   fmt="gz" ;;
-        *) error_exit "Unknown PAYLOAD_FORMAT: ${fmt}" ;;
-    esac
-
-    local listing boot_member
-    listing="$(tar -tf "${package_path}" 2>/dev/null)" ||
-        error_exit "Cannot list OTA package: ${package_path}"
-
-    if printf '%s\n' "${listing}" | grep -qxE '(\./)?boot\.itb'; then
-        boot_member="boot.itb"
-    else
-        boot_member="boot.tar.${fmt}"
-    fi
-    if printf '%s\n' "${listing}" | grep -qxE "(\./)?rootfs\.tar\.${fmt//./\\.}"; then
-        root_member="rootfs.tar.${fmt}"
-    else
-        # encrypted builds ship only the blob; the plaintext materializes on
-        # device during staging (ota_process_encrypted_payload)
-        root_member="rootfs.tar.${fmt}.enc"
-    fi
-
-    # final tarball members carry no ./ prefix (find -printf '%P'), but be
-    # liberal and accept both spellings
-    for member in "${root_member}" "${boot_member}"; do
-        printf '%s\n' "${listing}" | grep -qxE "(\./)?${member//./\\.}" ||
-            error_exit "KIND=full package is missing ${member} (dual-payload assertion failed)"
-    done
-    for member in "rootfs.sha256" "boot.sha256"; do
-        printf '%s\n' "${listing}" | grep -qxE "(\./)?${member//./\\.}" ||
-            error_exit "OTA package is missing checksum file ${member} (dual-payload assertion failed)"
-    done
-
-    # each checksum file must actually cover its payload member. rootfs.sha256
-    # is written at build time against the PLAINTEXT tar name, before the
-    # encryption step replaces it, so it covers rootfs.tar.<fmt> even when the
-    # package ships only the .enc blob.
-    local root_sha boot_sha
-    root_sha="$(tar -xOf "${package_path}" "rootfs.sha256" 2>/dev/null | grep -c "rootfs.tar.${fmt}" || true)"
-    [ "${root_sha:-0}" -ge 1 ] || error_exit "rootfs.sha256 does not cover rootfs.tar.${fmt}"
-    boot_sha="$(tar -xOf "${package_path}" "boot.sha256" 2>/dev/null | grep -c "${boot_member}" || true)"
-    [ "${boot_sha:-0}" -ge 1 ] || error_exit "boot.sha256 does not cover ${boot_member}"
-}
+# KIND=full dual-payload assertion moved to the shared ota_assert_dual_payload
+# (common.sh) so both modes enforce it; see the comments there for the
+# payload-shape matrix (boot.tar.<fmt> vs boot.itb, plaintext vs .enc).
 
 recovery_check_space() {
     local package_path="$1" want_backup="$2"
@@ -518,7 +454,7 @@ recovery_start_ota() {
 
     # 1) cheap checks
     recovery_check_package_metadata "${package_path}" "${force}"
-    recovery_assert_dual_tar "${package_path}"
+    ota_assert_dual_payload "${package_path}"
     local want_backup="yes"
     [ -n "${no_backup}" ] && want_backup="no"
     recovery_check_space "${package_path}" "${want_backup}"

@@ -95,6 +95,103 @@ ota_assert_payload_matches_system() {
     return 0
 }
 
+# Match the package's BOARD/RELEASE against this running system before any
+# backend work: a payload built for another board carries the wrong dtb/kernel
+# FIT, and a cross-release flash silently switches the distro. Requires the
+# package metadata cache (load_package_env_metadata). The package side must
+# carry both fields (package-create.sh always stamps them -- absence means a
+# broken or hand-mangled package); the device side is read from
+# /etc/armbian-release and only enforced when readable. RELEASE honors
+# OTA_CLI_ALLOW_RELEASE_CHANGE (CLI --allow-release-change) as the explicit
+# distro-migration escape hatch; BOARD never gets one.
+ota_check_board_release() {
+    local board release sys_board sys_release
+
+    board="$(package_env_get_value "BOARD" || true)"
+    release="$(package_env_get_value "RELEASE" || true)"
+    [ -n "${board}" ] || error_exit "OTA package metadata missing BOARD; refusing"
+    [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
+
+    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+
+    if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
+        error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
+    fi
+
+    if [ -n "${sys_release}" ] && [ "${release}" != "${sys_release}" ]; then
+        if [ "${OTA_CLI_ALLOW_RELEASE_CHANGE:-}" = "yes" ]; then
+            log_warn "Cross-release OTA allowed: package=${release}, device=${sys_release}"
+        else
+            error_exit "OTA package RELEASE mismatch: package=${release}, device=${sys_release} (cross-release OTA needs --allow-release-change)"
+        fi
+    fi
+}
+
+# KIND=full implies BOTH the rootfs archive and a boot payload exist and are
+# covered by their checksum files. This is an explicit assertion, not a side
+# effect of checksum verification: a broken build can drop the boot member
+# together with its checksum entry and still verify green -- which would
+# apply "new rootfs + old boot" and leave the device unbootable. Shared by
+# both modes (A/B had no equivalent check at all before this).
+# Payload shapes by layout/tier:
+#   boot: dual tar (boot.tar.<fmt>, ext4 layouts) or signed boot.itb
+#         (raw-FIT/secure, written by write_raw_boot_itb)
+#   rootfs: rootfs.tar.<fmt>, or rootfs.tar.<fmt>.enc on encrypted builds --
+#         encryption is mandatory for secure boot, so demanding the plaintext
+#         member there refused every secure package at start time
+ota_assert_dual_payload() {
+    local package_path="$1"
+    local fmt member root_member
+
+    fmt="$(package_env_get_value "PAYLOAD_FORMAT" || echo "gz")"
+    case "${fmt}" in
+        xz)   fmt="xz" ;;
+        zstd) fmt="zst" ;;
+        zst)  fmt="zst" ;;
+        gz)   fmt="gz" ;;
+        *) error_exit "Unknown PAYLOAD_FORMAT: ${fmt}" ;;
+    esac
+
+    local listing boot_member
+    listing="$(tar -tf "${package_path}" 2>/dev/null)" ||
+        error_exit "Cannot list OTA package: ${package_path}"
+
+    if printf '%s\n' "${listing}" | grep -qxE '(\./)?boot\.itb'; then
+        boot_member="boot.itb"
+    else
+        boot_member="boot.tar.${fmt}"
+    fi
+    if printf '%s\n' "${listing}" | grep -qxE "(\./)?rootfs\.tar\.${fmt//./\\.}"; then
+        root_member="rootfs.tar.${fmt}"
+    else
+        # encrypted builds ship only the blob; the plaintext materializes on
+        # device during staging (ota_process_encrypted_payload)
+        root_member="rootfs.tar.${fmt}.enc"
+    fi
+
+    # final tarball members carry no ./ prefix (find -printf '%P'), but be
+    # liberal and accept both spellings
+    for member in "${root_member}" "${boot_member}"; do
+        printf '%s\n' "${listing}" | grep -qxE "(\./)?${member//./\\.}" ||
+            error_exit "KIND=full package is missing ${member} (dual-payload assertion failed)"
+    done
+    for member in "rootfs.sha256" "boot.sha256"; do
+        printf '%s\n' "${listing}" | grep -qxE "(\./)?${member//./\\.}" ||
+            error_exit "OTA package is missing checksum file ${member} (dual-payload assertion failed)"
+    done
+
+    # each checksum file must actually cover its payload member. rootfs.sha256
+    # is written at build time against the PLAINTEXT tar name, before the
+    # encryption step replaces it, so it covers rootfs.tar.<fmt> even when the
+    # package ships only the .enc blob.
+    local root_sha boot_sha
+    root_sha="$(tar -xOf "${package_path}" "rootfs.sha256" 2>/dev/null | grep -c "rootfs.tar.${fmt}" || true)"
+    [ "${root_sha:-0}" -ge 1 ] || error_exit "rootfs.sha256 does not cover rootfs.tar.${fmt}"
+    boot_sha="$(tar -xOf "${package_path}" "boot.sha256" 2>/dev/null | grep -c "${boot_member}" || true)"
+    [ "${boot_sha:-0}" -ge 1 ] || error_exit "boot.sha256 does not cover ${boot_member}"
+}
+
 # Runtime identity and capability declaration. OTA_RUNTIME_VERSION tracks the
 # armbian-ota deb version; bump it whenever OTA_RUNTIME_FORMATS or the apply
 # hook contract changes. Packages declare PAYLOAD_FORMAT / MIN_RUNTIME_VERSION

@@ -35,7 +35,8 @@ Common entry (`check_ota_pkg` in `usr/sbin/armbian-ota`):
 | 3 | list members, locate `package.env`, read it | `tar -tf` (auto-detects compression) | `metadata missing` |
 | 4 | validate `OTA_MODE ∈ {ab, recovery}`, `OTA_ENCRYPTED ∈ {yes, no}` | — | explicit error |
 | 5 | device-side encryption probe; must equal package declaration. Recovery probes the fs this system runs from; AB probes GPT PARTLABELs anchored to the U-Boot boot disk | `findmnt`/`df`/`blkid` | mismatch aborts |
-| 6 | dispatch to `<mode>_start_ota` (absent backend = unsupported firmware) | — | `backend not installed` |
+| 6 | BOARD/RELEASE match vs `/etc/armbian-release` (`ota_check_board_release`, shared by both modes; missing package fields abort; RELEASE escapable via `--allow-release-change`) | `sed` | mismatch aborts |
+| 7 | dispatch to `<mode>_start_ota` (absent backend = unsupported firmware) | — | `backend not installed` |
 
 Recovery prepare (`recovery_start_ota`, runs in the live system):
 

@@ -184,6 +184,23 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **Dual-payload assertion shared by both OTA modes.** The KIND=full
+  assertion (both the rootfs archive and a boot member must exist AND be
+  covered by their checksum files -- a broken build that drops e.g. boot.tar
+  together with boot.sha256 would otherwise still verify green and apply
+  "new rootfs + old boot") moved from `recovery_assert_dual_tar` to
+  `ota_assert_dual_payload` in `common.sh`; `ab_start_ota` now runs it too
+  (A/B previously had no equivalent check).
+- **BOARD/RELEASE gate now covers both OTA modes, with an explicit
+  cross-release escape hatch.** The board/release matching that Recovery
+  enforced inside `recovery_check_package_metadata` moved into the shared
+  `ota_check_board_release` pre-flight (`armbian-ota start`'s `check_ota_pkg`
+  step), so A/B packages are now checked too (previously A/B accepted any
+  board/release silently). Packages missing `BOARD`/`RELEASE` in `package.env`
+  are refused outright instead of silently passing. Cross-release updates
+  (e.g. trixie <-> resolute) remain blocked by default but can be accepted
+  explicitly with the new `armbian-ota start --allow-release-change` (both
+  modes; BOARD mismatch is never overridable).
 - **Stock image naming; OTA packages under `ota/`.** Recovery images no
   longer carry a `_RECOVERY` suffix (stock names, no router changes); A/B
   keeps its `_AB_PART` marker. OTA packages are layout-agnostic
@@ -264,6 +281,17 @@ Covers the work against the initial import (merge base `9980aee`,
   `rk-cryptroot-verbosity.sh`, board defconfigs that lived in-repo).
 
 ### Fixed
+
+- **A/B payload extraction died on compressed tarballs (`tar: Archive is
+  compressed. Use -J option`).** `ab_extract_tar_payload` piped the raw
+  payload through `pv` straight into `tar -xf -`; GNU tar only auto-detects
+  compression on seekable archive files, so reading compressed bytes from a
+  pipe aborts (observed on rk3576, tar 1.35, encrypted `rootfs.tar.xz` —
+  decrypt and verify had already succeeded). The no-`pv` fallback was
+  equally broken, hardcoding `-xzf` (gzip-only). Both paths now run an
+  explicit `<decompressor> | tar -xf -` pipeline with the codec picked by
+  payload suffix (xz/zst/gz, mirroring the recovery initramfs `payload.sh`),
+  with `xz -T0` matching the build-side parallel compression.
 
 - **Encrypted-package phase-1 regression and bidirectional encryption
   gate.** The format-negotiation refactor (`16e43ad8`) made
