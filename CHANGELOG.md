@@ -312,6 +312,17 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Fixed
 
+- **A/B payload extraction died on compressed tarballs (`tar: Archive is
+  compressed. Use -J option`).** `ab_extract_tar_payload` piped the raw
+  payload through `pv` straight into `tar -xf -`; GNU tar only auto-detects
+  compression on seekable archive files, so reading compressed bytes from a
+  pipe aborts (observed on rk3576, tar 1.35, encrypted `rootfs.tar.xz` —
+  decrypt and verify had already succeeded). The no-`pv` fallback was
+  equally broken, hardcoding `-xzf` (gzip-only). Both paths now run an
+  explicit `<decompressor> | tar -xf -` pipeline with the codec picked by
+  payload suffix (xz/zst/gz, mirroring the recovery initramfs `payload.sh`),
+  with `xz -T0` matching the build-side parallel compression.
+
 - **Encrypted-package phase-1 regression and bidirectional encryption
   gate.** The format-negotiation refactor (`16e43ad8`) made
   `ota_resolve_payload_names()` require a plaintext `rootfs.tar.<fmt>` to

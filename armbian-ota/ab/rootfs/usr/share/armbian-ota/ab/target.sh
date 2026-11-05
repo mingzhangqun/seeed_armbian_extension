@@ -25,20 +25,34 @@ ab_extract_tar_payload() {
     local label="$3"
     local size
 
+    # Explicit "<decompressor> | tar -xf -" pipeline, format picked by payload
+    # suffix (same lesson as recovery payload.sh): GNU tar only auto-detects
+    # compression on seekable archive files, so piping raw tar.xz into
+    # "tar -xf -" dies with "Archive is compressed. Use -J option" (observed
+    # on rk3576, tar 1.35). xz gets -T0: payloads are compressed with -T0, so
+    # decode runs in parallel too (biggest wall-clock lever, per payload.sh).
+    local dec
+    case "${archive}" in
+        *.tar.xz)  dec="xz -dc -T0" ;;
+        *.tar.zst) dec="zstd -dc" ;;
+        *)         dec="gzip -dc" ;;
+    esac
+
     log_info "Extracting ${label} payload"
 
     if command -v pv >/dev/null 2>&1; then
         size="$(stat -c '%s' "${archive}" 2>/dev/null || true)"
         if [ -n "${size}" ]; then
             pv -f -n -s "${size}" "${archive}" 2> >(ab_log_extract_progress "${label}" >&2) |
+                ${dec} |
                 tar --xattrs --acls --numeric-owner -xf - -C "${target}"
         else
-            pv -f "${archive}" | tar --xattrs --acls --numeric-owner -xf - -C "${target}"
+            pv -f "${archive}" | ${dec} | tar --xattrs --acls --numeric-owner -xf - -C "${target}"
         fi
         return $?
     fi
 
-    tar --xattrs --acls --numeric-owner -xzf "${archive}" -C "${target}"
+    ${dec} "${archive}" | tar --xattrs --acls --numeric-owner -xf - -C "${target}"
 }
 
 ab_write_target_state() {
