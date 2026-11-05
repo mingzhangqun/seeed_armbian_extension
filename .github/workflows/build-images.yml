@@ -328,7 +328,7 @@ jobs:
 
   # The purge in init-release deleted the mirror's pre-release/ slot; the
   # deployed page still advertises it (with dead links) for the whole
-  # build window. Catch it up immediately: latest/previous are full
+  # build window. Catch it up immediately: stable/previous are full
   # cache hits in the walk, so this costs under a minute. OneDrive mode
   # only — without the mirror there is no purge and nothing to sync.
   pages-purge:
@@ -706,7 +706,7 @@ jobs:
           set -euo pipefail
           # Tag the pre-release slot FIRST, then flip the release visible.
           # The <slot>/tag file is the page's slot binding (promote carries
-          # it into latest/ on rotation) — an untagged slot stays hidden —
+          # it into stable/ on rotation) — an untagged slot stays hidden —
           # so a tag-write failure must leave the release in draft: this
           # job fails and gh release edit never runs.
           if [ "${HAS_RCLONE}" = "true" ]; then

@@ -91,7 +91,7 @@ runs:
         # Files outside the three slot dirs (stale layouts, foreign trees)
         # are skipped: linking them wastes minutes per deploy and they
         # never render on the page anyway.
-        SLOT_DIRS = ("pre-release", "latest", "previous")
+        SLOT_DIRS = ("pre-release", "stable", "previous")
         tag_slots, payload = [], []
         skipped = 0
         for it in files:
