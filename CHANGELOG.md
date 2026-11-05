@@ -231,6 +231,16 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **BOARD/RELEASE gate now covers both OTA modes, with an explicit
+  cross-release escape hatch.** The board/release matching that Recovery
+  enforced inside `recovery_check_package_metadata` moved into the shared
+  `ota_check_board_release` pre-flight (`armbian-ota start`'s `check_ota_pkg`
+  step), so A/B packages are now checked too (previously A/B accepted any
+  board/release silently). Packages missing `BOARD`/`RELEASE` in `package.env`
+  are refused outright instead of silently passing. Cross-release updates
+  (e.g. trixie <-> resolute) remain blocked by default but can be accepted
+  explicitly with the new `armbian-ota start --allow-release-change` (both
+  modes; BOARD mismatch is never overridable).
 - **Stock image naming; OTA packages under `ota/`.** Recovery images no
   longer carry a `_RECOVERY` suffix (stock names, no router changes); A/B
   keeps its `_AB_PART` marker. OTA packages are layout-agnostic

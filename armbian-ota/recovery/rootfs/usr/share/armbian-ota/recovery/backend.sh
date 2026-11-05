@@ -84,23 +84,16 @@ ota_compute_payload_id() {
 
 recovery_check_package_metadata() {
     local package_path="$1" force="$2"
-    local payload_id board release
+    local payload_id
 
     payload_id="$(package_env_get_value "PAYLOAD_ID" || true)"
     [ -n "${payload_id}" ] ||
         error_exit "OTA package carries no PAYLOAD_ID (built by a pre-v0.8 toolchain); refused"
 
-    board="$(package_env_get_value "BOARD" || true)"
-    release="$(package_env_get_value "RELEASE" || true)"
-    local sys_board sys_release
-    sys_board="$(recovery_system_field BOARD)"
-    sys_release="$(recovery_system_field RELEASE)"
-    if [ -n "${sys_board}" ] && [ -n "${board}" ] && [ "${board}" != "${sys_board}" ]; then
-        error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
-    fi
-    if [ -n "${sys_release}" ] && [ -n "${release}" ] && [ "${release}" != "${sys_release}" ]; then
-        error_exit "OTA package RELEASE mismatch: package=${release}, device=${sys_release} (cross-release OTA is not supported)"
-    fi
+    # BOARD/RELEASE matching moved to the shared ota_check_board_release gate
+    # (invoked from the CLI check_ota_pkg pre-flight) so both modes enforce the
+    # identical contract; this backend keeps only the recovery-specific
+    # identity checks below.
 
     local installed_id
     installed_id="$(state_get INSTALLED_ID)"

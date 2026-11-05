@@ -95,6 +95,39 @@ ota_assert_payload_matches_system() {
     return 0
 }
 
+# Match the package's BOARD/RELEASE against this running system before any
+# backend work: a payload built for another board carries the wrong dtb/kernel
+# FIT, and a cross-release flash silently switches the distro. Requires the
+# package metadata cache (load_package_env_metadata). The package side must
+# carry both fields (package-create.sh always stamps them -- absence means a
+# broken or hand-mangled package); the device side is read from
+# /etc/armbian-release and only enforced when readable. RELEASE honors
+# OTA_CLI_ALLOW_RELEASE_CHANGE (CLI --allow-release-change) as the explicit
+# distro-migration escape hatch; BOARD never gets one.
+ota_check_board_release() {
+    local board release sys_board sys_release
+
+    board="$(package_env_get_value "BOARD" || true)"
+    release="$(package_env_get_value "RELEASE" || true)"
+    [ -n "${board}" ] || error_exit "OTA package metadata missing BOARD; refusing"
+    [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
+
+    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+
+    if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
+        error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
+    fi
+
+    if [ -n "${sys_release}" ] && [ "${release}" != "${sys_release}" ]; then
+        if [ "${OTA_CLI_ALLOW_RELEASE_CHANGE:-}" = "yes" ]; then
+            log_warn "Cross-release OTA allowed: package=${release}, device=${sys_release}"
+        else
+            error_exit "OTA package RELEASE mismatch: package=${release}, device=${sys_release} (cross-release OTA needs --allow-release-change)"
+        fi
+    fi
+}
+
 # Runtime identity and capability declaration. OTA_RUNTIME_VERSION tracks the
 # armbian-ota deb version; bump it whenever OTA_RUNTIME_FORMATS or the apply
 # hook contract changes. Packages declare PAYLOAD_FORMAT / MIN_RUNTIME_VERSION
