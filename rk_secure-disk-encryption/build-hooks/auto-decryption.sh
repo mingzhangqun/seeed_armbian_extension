@@ -128,6 +128,27 @@ function rk_autodecrypt_resolve_tee_toolchains() {
 		return 1
 	fi
 
+	# type -P walks PATH; on ccache-enabled runners the first hit is the
+	# /usr/lib/ccache/ symlink dir, which only ships compiler aliases. The
+	# TA build also needs <triple>-objcopy/ld/etc, so strip any ccache
+	# wrapper dir and prefer the real toolchain bin/ from PATH order.
+	local candidate
+	for candidate in "${aarch64_gcc}" "/usr/bin/aarch64-linux-gnu-gcc"; do
+		[[ -x "${candidate}" && "${candidate}" != */ccache/* ]] || continue
+		aarch64_gcc="${candidate}"
+		break
+	done
+	for candidate in "${arm32_gcc}" "/usr/bin/arm-linux-gnueabihf-gcc"; do
+		[[ -x "${candidate}" && "${candidate}" != */ccache/* ]] || continue
+		arm32_gcc="${candidate}"
+		break
+	done
+
+	if [[ "${aarch64_gcc}" == */ccache/* || "${arm32_gcc}" == */ccache/* ]]; then
+		display_alert "optee" "toolchain resolved under /usr/lib/ccache, missing objcopy/ld for TA build" "err"
+		return 1
+	fi
+
 	export AARCH64_TOOLCHAIN="${aarch64_gcc%gcc}"
 	export ARM32_TOOLCHAIN="${arm32_gcc%gcc}"
 	display_alert "optee" "rk_tee_user toolchains: aarch64=${AARCH64_TOOLCHAIN} arm32=${ARM32_TOOLCHAIN}" "info"

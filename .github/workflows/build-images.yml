@@ -57,8 +57,10 @@ on:
         default: mid
 
 env:
+  # ccache is an extension in current armbian-build; PRIVATE_CCACHE/USE_CCACHE
+  # alone are ignored (see extensions/ccache.sh migration warning).
+  ENABLE_EXTENSIONS: "ccache"
   PRIVATE_CCACHE: "yes"
-  USE_CCACHE: "yes"
   ENABLE_SEEED_RK_EXTENSION: "yes"
   KERNEL_CONFIGURE: "no"
   VENDOR: "Armbian"
