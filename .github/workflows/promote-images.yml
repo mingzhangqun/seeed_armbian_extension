@@ -7,12 +7,12 @@ name: "Images - Release"
 #      — every <board>/<sub>/ holds >=1 *.img.xz with a .sha256 sibling
 #      each and a non-empty ota/, no stray files (exact expected-set
 #      checking returns with a future slot MANIFEST receipt)
-#   3. ROTATE the whole slot tree: previous ⟵ latest ⟵ pre-release
+#   3. ROTATE the whole slot tree: previous ⟵ stable ⟵ pre-release
 #      (server-side, one move per slot — every board flips together)
 #   4. PUBLISH the GitHub release (prerelease → released)
 #   5. clean up superseded pre-releases; push the images page
 #
-# IDEMPOTENT RECOVERY: no pre-release at all + latest/tag already names the
+# IDEMPOTENT RECOVERY: no pre-release at all + stable/tag already names the
 # newest stable release → a previous run died after rotate but before pages.
 # Recover by skipping validate/rotate/cleanup and jumping straight to pages
 # (mode=recover-page). Any other mismatch is a real failure and aborts.
@@ -65,8 +65,8 @@ jobs:
       - name: Resolve the tag and guard
         id: rel
         env:
-          # Cross-repo targets need RELEASE_GH_TOKEN (PAT with contents:write);
-          # same-repo falls back to GITHUB_TOKEN.
+          # The target repo (<owner>/armbian-build) is always cross-repo from
+          # here: needs RELEASE_GH_TOKEN (PAT with contents:write).
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
         run: |
@@ -80,56 +80,29 @@ jobs:
           # wrote it to disk, so point rclone at that file instead.
           export RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
 
-          # Find the newest pre-release across both repos we might have built
-          # into (this repo + the owner's armbian-build). Tags must match
-          # YYMMDD-HHMM (the build stamp) — a hand-made release with a
-          # free-form tag would win the lexicographic sort otherwise and then
-          # fail the OneDrive tag check anyway. Query both repos and pick the
-          # newer: either side may hold the latest build.
+          # Find the newest pre-release in the build-target repo. Builds
+          # publish into <owner>/armbian-build only (build-images derives
+          # release_repo from its armbian_build_repo input); this repo never
+          # holds a build's release. Tags must match YYMMDD-HHMM (the build
+          # stamp) — a hand-made release with a free-form tag would win the
+          # lexicographic sort otherwise and then fail the OneDrive tag
+          # check anyway.
           tag_pat='^[0-9]{6}-[0-9]{4}$'
           jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
-          tag_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
-                  --json tagName,isPrerelease --jq "$jq_pick")"
-          ab_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
-          tag_ab="$(gh release list --repo "$ab_repo" \
-                  --json tagName,isPrerelease --jq "$jq_pick" 2>/dev/null || true)"
-          tag=""; target_repo=""
-          if [ -n "$tag_here" ] && [ -n "$tag_ab" ]; then
-            if [[ "$tag_here" > "$tag_ab" ]]; then
-              tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
-            else
-              tag="$tag_ab"; target_repo="$ab_repo"
-            fi
-          elif [ -n "$tag_here" ]; then
-            tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
-          elif [ -n "$tag_ab" ]; then
-            tag="$tag_ab"; target_repo="$ab_repo"
-          fi
+          target_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
+          tag="$(gh release list --repo "$target_repo" \
+                --json tagName,isPrerelease --jq "$jq_pick")"
 
           # ── idempotent recovery: no pre-release means either "nothing to
           # promote" or "a previous run died after rotate but before pages".
-          # Detect the latter (latest/tag == newest STABLE release) and let
+          # Detect the latter (stable/tag == newest STABLE release) and let
           # the pages job run; anything else is a real failure.
           if [ -z "$tag" ]; then
             jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
-            stable_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
+            stable="$(gh release list --repo "$target_repo" \
                 --json tagName,isPrerelease --jq "$jq_stable")"
-            stable_ab="$(gh release list --repo "$ab_repo" \
-                --json tagName,isPrerelease --jq "$jq_stable" 2>/dev/null || true)"
-            stable=""; stable_repo=""
-            if [ -n "$stable_here" ] && [ -n "$stable_ab" ]; then
-              if [[ "$stable_here" > "$stable_ab" ]]; then
-                stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
-              else
-                stable="$stable_ab"; stable_repo="$ab_repo"
-              fi
-            elif [ -n "$stable_here" ]; then
-              stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
-            elif [ -n "$stable_ab" ]; then
-              stable="$stable_ab"; stable_repo="$ab_repo"
-            fi
             [ -n "$stable" ] \
-              || { echo "::error::no pre-release and no stable release found anywhere"; exit 1; }
+              || { echo "::error::no pre-release and no stable release found in $target_repo"; exit 1; }
 
             base="seeed-storage:armbian/images"
             slot_listing="$(mktemp)"
@@ -137,16 +110,16 @@ jobs:
               || { echo "::error::rclone lsf failed on $base — OneDrive unreachable?"; exit 1; }
             grep -qx "pre-release/" "$slot_listing" \
               && { echo "::error::no timestamped pre-release release but the slot exists — build in flight or orphan slot; aborting"; exit 1; }
-            grep -qx "latest/" "$slot_listing" \
-              || { echo "::error::no pre-release and no latest/ on the mirror — nothing was ever promoted"; exit 1; }
-            latest_tag="$(rclone cat "$base/latest/tag" --contimeout 15s 2>/dev/null | tr -d '[:space:]')"
-            [ "$latest_tag" = "$stable" ] \
-              || { echo "::error::no pre-release; latest/tag is '${latest_tag:-<empty>}' but newest stable is '$stable' — inconsistent state, refusing to guess"; exit 1; }
+            grep -qx "stable/" "$slot_listing" \
+              || { echo "::error::no pre-release and no stable/ on the mirror — nothing was ever promoted"; exit 1; }
+            stable_tag="$(rclone cat "$base/stable/tag" --contimeout 15s 2>/dev/null | tr -d '[:space:]')"
+            [ "$stable_tag" = "$stable" ] \
+              || { echo "::error::no pre-release; stable/tag is '${stable_tag:-<empty>}' but newest stable is '$stable' — inconsistent state, refusing to guess"; exit 1; }
 
-            echo "::notice::no pre-release; latest/ already holds the newest stable ($stable) — recovering the pages deploy (mode=recover-page)"
+            echo "::notice::no pre-release; stable/ already holds the newest stable ($stable) — recovering the pages deploy (mode=recover-page)"
             echo "mode=recover-page" >> "$GITHUB_OUTPUT"
             echo "tag=$stable" >> "$GITHUB_OUTPUT"
-            echo "target_repo=$stable_repo" >> "$GITHUB_OUTPUT"
+            echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -245,7 +218,7 @@ jobs:
           PY
 
       - name: Rotate slots (whole tree, server-side)
-        # previous ⟵ latest ⟵ pre-release — ONE move per slot: the
+        # previous ⟵ stable ⟵ pre-release — ONE move per slot: the
         # rotation unit is the release unit, so every board flips
         # together. Existence checked explicitly — bare `|| echo` would
         # swallow real rclone failures, and moveto onto an existing dir
@@ -276,17 +249,24 @@ jobs:
           list_slots
           # Record whether a stable slot exists before we touch anything
           # (rollback only has something to restore when it did).
-          had_latest=false
-          if has_slot latest; then had_latest=true; fi
+          had_stable=false
+          if has_slot stable; then had_stable=true; fi
 
           # Step 1: publish the release (flip prerelease → stable)
           gh release edit "$TAG" --repo "$TARGET_REPO" --prerelease=false
-          gh release edit "$TAG" --repo "$TARGET_REPO" --notes \
-            "Promoted to Stable: armbian/images/latest/ rotated (previous ⟵ latest, pre-release ⟵ latest)."
+          # The note REPLACES the draft's build/run pointer — restate the
+          # download entry point instead of rotation internals. The page
+          # always lives on the build-source repo's Pages (armbian-build).
+          # printf-built: a literal multi-line string would need deeper
+          # indentation than the YAML block scalar, and the extra spaces
+          # would render as a markdown code block.
+          page_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/armbian-build/images/"
+          notes="$(printf 'Promoted to Stable — on-device verification passed.\n\nDownloads: %s\nBinaries live in the OneDrive mirror stable/ slot; this release carries no assets.\n\nMirror slots rotated: previous ⟵ stable ⟵ pre-release.' "$page_url")"
+          gh release edit "$TAG" --repo "$TARGET_REPO" --notes "$notes"
 
           # Step 2: rotate the whole slot tree — all boards at once. The
           # pre-rotation snapshot stays valid throughout: the first two
-          # ops only touch previous/ and latest/, and the last op only
+          # ops only touch previous/ and stable/, and the last op only
           # needs pre-release/ to still exist.
           if ! (
             set -e
@@ -295,39 +275,39 @@ jobs:
             else
               echo "no previous/ — nothing to purge"
             fi
-            if has_slot latest; then
-              rclone moveto "$base/latest" "$base/previous"
+            if has_slot stable; then
+              rclone moveto "$base/stable" "$base/previous"
             else
-              echo "no latest/ (first promote)"
+              echo "no stable/ (first promote)"
             fi
             has_slot pre-release \
               || { echo "::error::pre-release/ vanished (race with a build?)"; exit 1; }
-            rclone moveto "$base/pre-release" "$base/latest"
+            rclone moveto "$base/pre-release" "$base/stable"
           ); then
             echo "::error::rotate failed — inspecting state for rollback..."
             # Fresh, best-effort listing: the snapshot above is stale now.
             if rclone lsf "$base" --dirs-only --contimeout 15s > "$slots_file" 2>/dev/null; then
-              if has_slot latest; then
-                # Failed before latest moved away: latest/ is intact.
+              if has_slot stable; then
+                # Failed before stable moved away: stable/ is intact.
                 # previous/ may be gone — it held superseded content either way.
-                echo "latest/ intact — nothing to roll back"
-              elif [ "$had_latest" = "true" ]; then
-                # latest was moved to previous/ but the new one never landed
-                if rclone moveto "$base/previous" "$base/latest" 2>/dev/null; then
-                  echo "rolled back latest/ from previous/"
+                echo "stable/ intact — nothing to roll back"
+              elif [ "$had_stable" = "true" ]; then
+                # stable was moved to previous/ but the new one never landed
+                if rclone moveto "$base/previous" "$base/stable" 2>/dev/null; then
+                  echo "rolled back stable/ from previous/"
                 else
-                  echo "::error::rollback failed — the pre-rotate latest/ is at previous/, rotate by hand"
+                  echo "::error::rollback failed — the pre-rotate stable/ is at previous/, rotate by hand"
                 fi
               else
-                echo "no prior latest/ — nothing to restore; pre-release/ untouched"
+                echo "no prior stable/ — nothing to restore; pre-release/ untouched"
               fi
             else
-              echo "::error::cannot re-list slots — inspect by hand: the pre-rotate latest/ (if any) sits at previous/"
+              echo "::error::cannot re-list slots — inspect by hand: the pre-rotate stable/ (if any) sits at previous/"
             fi
             echo "::error::rollback complete — release is stable but files not rotated"
             exit 1
           fi
-          echo "rotated — $(rclone lsf "$base/latest" --recursive --files-only | wc -l) files in latest/"
+          echo "rotated — $(rclone lsf "$base/stable" --recursive --files-only | wc -l) files in stable/"
 
       - name: Clean up superseded pre-releases
         # Older pre-releases carry no assets at all (the binaries live in
@@ -371,8 +351,9 @@ jobs:
       pages: write
       id-token: write
       actions: write
-    # The OneDrive share-link walk alone can take minutes on a full matrix.
-    timeout-minutes: 30
+    # The OneDrive share-link walk alone can take minutes on a full matrix;
+    # cold cache on 400+ files can exceed 30 min.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4

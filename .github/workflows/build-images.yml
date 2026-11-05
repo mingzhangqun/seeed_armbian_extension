@@ -57,8 +57,10 @@ on:
         default: mid
 
 env:
+  # ccache is an extension in current armbian-build; PRIVATE_CCACHE/USE_CCACHE
+  # alone are ignored (see extensions/ccache.sh migration warning).
+  ENABLE_EXTENSIONS: "ccache"
   PRIVATE_CCACHE: "yes"
-  USE_CCACHE: "yes"
   ENABLE_SEEED_RK_EXTENSION: "yes"
   KERNEL_CONFIGURE: "no"
   VENDOR: "Armbian"
@@ -94,6 +96,9 @@ jobs:
 
   preflight:
     # Fail fast on malformed secrets BEFORE the multi-hour build.
+    # Note: board_exists in plan job queries public repos by default;
+    # if armbian_build_repo points to a private repo, plan needs
+    # contents: read on that repo (token scope) — currently assumed public.
     needs: probe-secrets
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -105,60 +110,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' }}
-        uses: ./.github/actions/setup-onedrive
+      - name: Run preflight checks
+        uses: ./.github/actions/preflight-checks
         with:
+          secure_boot: ${{ inputs.secure_boot }}
+          has_rclone: ${{ env.HAS_RCLONE }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
-
-      - name: Check OneDrive mirror availability (hard gate)
-        if: ${{ env.HAS_RCLONE == 'true' }}
-        run: |
-          set -euo pipefail
-          if ! rclone lsd seeed-storage:armbian/images --max-depth 1 --contimeout 15s >/dev/null 2>&1; then
-            echo "::error::rclone cannot reach seeed-storage:armbian/images — create the folder on OneDrive first, or refresh the RCLONE_CONFIG token."
-            exit 1
-          fi
-          echo "OneDrive remote OK. Quota:"
-          rclone about seeed-storage: 2>/dev/null | grep -E 'Total:|Free:|Trashed:' || true
-
-      - name: OneDrive mode notice (no secret)
-        # Fork path: assets go to the GitHub release instead.
-        if: ${{ env.HAS_RCLONE != 'true' }}
-        run: |
-          echo "::notice::RCLONE_CONFIG is not set — GitHub-assets mode (fork): binaries are attached to the release; OneDrive upload and image-promote are skipped."
-
-      - name: Validate secure-boot secrets
-        if: ${{ inputs.secure_boot }}
-        env:
-          PRIVATE_KEY_PEM: ${{ secrets.PRIVATE_KEY_PEM }}
-          DEV_CRT: ${{ secrets.DEV_CRT }}
-          CRYPTROOT_PASSPHRASE: ${{ secrets.CRYPTROOT_PASSPHRASE }}
-        run: |
-          set -euo pipefail
-          fail=0
-          err() { echo "::error::$1"; fail=1; }
-
-          [ -n "$PRIVATE_KEY_PEM" ] || err "secret PRIVATE_KEY_PEM is empty (secure_boot selected)"
-          [ -n "$DEV_CRT" ]        || err "secret DEV_CRT is empty (secure_boot selected)"
-          [ "${#CRYPTROOT_PASSPHRASE}" -eq 64 ] \
-            || err "CRYPTROOT_PASSPHRASE must be exactly 64 chars, got ${#CRYPTROOT_PASSPHRASE}"
-          if [ -n "$PRIVATE_KEY_PEM" ]; then
-            printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -check -noout >/dev/null 2>&1 \
-              || err "PRIVATE_KEY_PEM is not a parsable RSA key"
-          fi
-          if [ -n "$DEV_CRT" ]; then
-            printf '%s\n' "$DEV_CRT" | openssl x509 -noout >/dev/null 2>&1 \
-              || err "DEV_CRT is not a parsable x509 certificate"
-          fi
-          if [ -n "$PRIVATE_KEY_PEM" ] && [ -n "$DEV_CRT" ]; then
-            key_pub=$(printf '%s\n' "$PRIVATE_KEY_PEM" | openssl rsa -pubout 2>/dev/null | openssl md5)
-            crt_pub=$(printf '%s\n' "$DEV_CRT" | openssl x509 -pubkey -noout 2>/dev/null | openssl md5)
-            [ "$key_pub" = "$crt_pub" ] || err "PRIVATE_KEY_PEM does not match DEV_CRT"
-          fi
-
-          [ "$fail" -eq 0 ] || exit 1
-          echo "Secure-boot secrets present and well-formed."
+          private_key_pem: ${{ secrets.PRIVATE_KEY_PEM }}
+          dev_crt: ${{ secrets.DEV_CRT }}
+          cryptroot_passphrase: ${{ secrets.CRYPTROOT_PASSPHRASE }}
 
   plan:
     needs: [probe-secrets, preflight]
@@ -489,8 +449,13 @@ jobs:
           cd armbian-build
           sed -i '/"--env" "ARMBIAN_RUNNING_IN_CONTAINER=yes"/a\\t\t"--env" "CRYPTROOT_PASSPHRASE=${CRYPTROOT_PASSPHRASE:-}"' \
               lib/functions/host/docker.sh
-          echo "=== CRYPTROOT_PASSPHRASE forwarding in docker.sh ==="
-          grep -n 'CRYPTROOT_PASSPHRASE' lib/functions/host/docker.sh
+          # Same container boundary: SEEED_EXTENSION_REPO/REF exported on the
+          # host never reach the wrapper sourcing inside the container, so the
+          # extension fetch silently falls back to upstream main.
+          sed -i '/"--env" "CRYPTROOT_PASSPHRASE=/a\\t\t"--env" "SEEED_EXTENSION_REPO=${SEEED_EXTENSION_REPO:-}"\n\t\t"--env" "SEEED_EXTENSION_REF=${SEEED_EXTENSION_REF:-}"' \
+              lib/functions/host/docker.sh
+          echo "=== env forwarding in docker.sh ==="
+          grep -nE 'CRYPTROOT_PASSPHRASE|SEEED_EXTENSION_(REPO|REF)' lib/functions/host/docker.sh
 
       - name: Patch radxa-aic8800 extension against GitHub API flakiness
         # api.github.com flakes on CI; upstream resolves the version to
@@ -560,10 +525,29 @@ jobs:
       # 10 GiB repo cache and evict the kernel debs cache (30+ min rebuild).
       # Rootfs from scratch is only ~10 min.
 
+      # The armbian-build wrapper extensions/seeed-extension.sh hardcodes the
+      # UPSTREAM extension repo (Seeed-Studio/seeed_armbian_extension @ main),
+      # so every build would compile the upstream code and never the fixes on
+      # the dispatched ref of THIS repo. Make the repo overridable (the ref
+      # already is via SEEED_EXTENSION_REF) and point both at this checkout.
+      - name: Point seeed-extension at this checkout
+        run: |
+          cd armbian-build
+          sed -i \
+            -e 's|^SEEED_EXTENSION_REPO=.*|SEEED_EXTENSION_REPO="${SEEED_EXTENSION_REPO:-https://github.com/Seeed-Studio/seeed_armbian_extension}"|' \
+            extensions/seeed-extension.sh
+          echo "=== seeed-extension repo/ref now overridable ==="
+          grep -n 'SEEED_EXTENSION_REPO=\|SEEED_EXTENSION_REF=' extensions/seeed-extension.sh | head -4
+
       - name: Build
         working-directory: armbian-build
         run: |
           set -euo pipefail
+          # Build the extension code from this workflow's repo + ref, not the
+          # upstream main the armbian-build wrapper pins by default.
+          export SEEED_EXTENSION_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          export SEEED_EXTENSION_REF="branch:${GITHUB_REF_NAME}"
+          echo "extension source: ${SEEED_EXTENSION_REPO} @ ${SEEED_EXTENSION_REF}"
           # cli → --minimal (Debian 13); gnome → desktop (Ubuntu 26.04)
           # sized by the desktop_tier choice.
           TIER_ARGS=""
@@ -767,3 +751,66 @@ jobs:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+
+  cleanup:
+    name: Cleanup draft release (cancel/failure)
+    # Full chain so this runs LAST, after cancelled matrix jobs are fully
+    # terminal — no racing uploads while we delete/purge. The
+    # images-mirror concurrency group is held until this run completes,
+    # so a queued build cannot start filling the slot mid-purge either.
+    # On success neither cancelled() nor failure() holds and this skips.
+    # Ported from test-build.yml (deleted 2026-11-05) — its cleanup was
+    # the only draft sweeper in the repo.
+    needs: [probe-secrets, preflight, plan, init-release, pages-purge, build, release, pages]
+    if: ${{ always() && (cancelled() || failure()) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Delete orphaned draft + partial slot
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "plan produced no tag — nothing was created; nothing to clean"
+            exit 0
+          fi
+          if ! gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "release $TAG does not exist — init-release never finished; nothing to clean"
+            exit 0
+          fi
+          if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::notice::$TAG is already published (the release job ran) — keeping release and slot"
+            exit 0
+          fi
+          # Still a draft: the run died before publishing — roll it back.
+          # No --cleanup-tag: a draft's tag ref only materializes on
+          # publish, so deleting it 422s with "Reference does not exist"
+          # (observed 2026-11-03). Plain delete drops the pending tag
+          # with the release; the ref delete below only matters when the
+          # tag name collided with an older published release's tag.
+          gh release delete "$TAG" --repo "$TARGET_REPO" --yes
+          gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          echo "deleted orphan draft release $TAG"
+          if [ "${HAS_RCLONE}" = "true" ]; then
+            # The slot was never tagged (the release job writes <slot>/tag
+            # before publishing), so whatever the matrix uploaded renders
+            # nowhere. Purge it now instead of leaving it for the next
+            # run's init-release.
+            rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
+              || echo "armbian/images/pre-release did not exist — nothing to purge"
+          fi
