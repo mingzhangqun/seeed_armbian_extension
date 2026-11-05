@@ -65,8 +65,8 @@ jobs:
       - name: Resolve the tag and guard
         id: rel
         env:
-          # Cross-repo targets need RELEASE_GH_TOKEN (PAT with contents:write);
-          # same-repo falls back to GITHUB_TOKEN.
+          # The target repo (<owner>/armbian-build) is always cross-repo from
+          # here: needs RELEASE_GH_TOKEN (PAT with contents:write).
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
         run: |
@@ -80,31 +80,18 @@ jobs:
           # wrote it to disk, so point rclone at that file instead.
           export RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
 
-          # Find the newest pre-release across both repos we might have built
-          # into (this repo + the owner's armbian-build). Tags must match
-          # YYMMDD-HHMM (the build stamp) — a hand-made release with a
-          # free-form tag would win the lexicographic sort otherwise and then
-          # fail the OneDrive tag check anyway. Query both repos and pick the
-          # newer: either side may hold the latest build.
+          # Find the newest pre-release in the build-target repo. Builds
+          # publish into <owner>/armbian-build only (build-images derives
+          # release_repo from its armbian_build_repo input); this repo never
+          # holds a build's release. Tags must match YYMMDD-HHMM (the build
+          # stamp) — a hand-made release with a free-form tag would win the
+          # lexicographic sort otherwise and then fail the OneDrive tag
+          # check anyway.
           tag_pat='^[0-9]{6}-[0-9]{4}$'
           jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
-          tag_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
-                  --json tagName,isPrerelease --jq "$jq_pick")"
-          ab_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
-          tag_ab="$(gh release list --repo "$ab_repo" \
-                  --json tagName,isPrerelease --jq "$jq_pick" 2>/dev/null || true)"
-          tag=""; target_repo=""
-          if [ -n "$tag_here" ] && [ -n "$tag_ab" ]; then
-            if [[ "$tag_here" > "$tag_ab" ]]; then
-              tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
-            else
-              tag="$tag_ab"; target_repo="$ab_repo"
-            fi
-          elif [ -n "$tag_here" ]; then
-            tag="$tag_here"; target_repo="$GITHUB_REPOSITORY"
-          elif [ -n "$tag_ab" ]; then
-            tag="$tag_ab"; target_repo="$ab_repo"
-          fi
+          target_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
+          tag="$(gh release list --repo "$target_repo" \
+                --json tagName,isPrerelease --jq "$jq_pick")"
 
           # ── idempotent recovery: no pre-release means either "nothing to
           # promote" or "a previous run died after rotate but before pages".
@@ -112,24 +99,10 @@ jobs:
           # the pages job run; anything else is a real failure.
           if [ -z "$tag" ]; then
             jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
-            stable_here="$(gh release list --repo "$GITHUB_REPOSITORY" \
+            stable="$(gh release list --repo "$target_repo" \
                 --json tagName,isPrerelease --jq "$jq_stable")"
-            stable_ab="$(gh release list --repo "$ab_repo" \
-                --json tagName,isPrerelease --jq "$jq_stable" 2>/dev/null || true)"
-            stable=""; stable_repo=""
-            if [ -n "$stable_here" ] && [ -n "$stable_ab" ]; then
-              if [[ "$stable_here" > "$stable_ab" ]]; then
-                stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
-              else
-                stable="$stable_ab"; stable_repo="$ab_repo"
-              fi
-            elif [ -n "$stable_here" ]; then
-              stable="$stable_here"; stable_repo="$GITHUB_REPOSITORY"
-            elif [ -n "$stable_ab" ]; then
-              stable="$stable_ab"; stable_repo="$ab_repo"
-            fi
             [ -n "$stable" ] \
-              || { echo "::error::no pre-release and no stable release found anywhere"; exit 1; }
+              || { echo "::error::no pre-release and no stable release found in $target_repo"; exit 1; }
 
             base="seeed-storage:armbian/images"
             slot_listing="$(mktemp)"
@@ -146,7 +119,7 @@ jobs:
             echo "::notice::no pre-release; stable/ already holds the newest stable ($stable) — recovering the pages deploy (mode=recover-page)"
             echo "mode=recover-page" >> "$GITHUB_OUTPUT"
             echo "tag=$stable" >> "$GITHUB_OUTPUT"
-            echo "target_repo=$stable_repo" >> "$GITHUB_OUTPUT"
+            echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -281,8 +254,15 @@ jobs:
 
           # Step 1: publish the release (flip prerelease → stable)
           gh release edit "$TAG" --repo "$TARGET_REPO" --prerelease=false
-          gh release edit "$TAG" --repo "$TARGET_REPO" --notes \
-            "Promoted to Stable: armbian/images/stable/ rotated (previous ⟵ stable, pre-release ⟵ stable)."
+          # The note REPLACES the draft's build/run pointer — restate the
+          # download entry point instead of rotation internals. The page
+          # always lives on the build-source repo's Pages (armbian-build).
+          # printf-built: a literal multi-line string would need deeper
+          # indentation than the YAML block scalar, and the extra spaces
+          # would render as a markdown code block.
+          page_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/armbian-build/images/"
+          notes="$(printf 'Promoted to Stable — on-device verification passed.\n\nDownloads: %s\nBinaries live in the OneDrive mirror stable/ slot; this release carries no assets.\n\nMirror slots rotated: previous ⟵ stable ⟵ pre-release.' "$page_url")"
+          gh release edit "$TAG" --repo "$TARGET_REPO" --notes "$notes"
 
           # Step 2: rotate the whole slot tree — all boards at once. The
           # pre-rotation snapshot stays valid throughout: the first two
