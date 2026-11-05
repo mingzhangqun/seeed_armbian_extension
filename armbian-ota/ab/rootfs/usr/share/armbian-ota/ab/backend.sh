@@ -85,6 +85,8 @@ ab_start_ota() {
         error_exit "Another AB OTA boot verification is still in progress"
     fi
 
+    ota_assert_dual_payload "${package_path}"
+
     temp_work="$(make_ota_work_dir "ab-package")"
     extract_ota_package "${package_path}" "${temp_work}"
     ota_assert_payload_matches_system "${temp_work}"

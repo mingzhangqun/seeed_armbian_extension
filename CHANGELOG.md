@@ -231,6 +231,13 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **Dual-payload assertion shared by both OTA modes.** The KIND=full
+  assertion (both the rootfs archive and a boot member must exist AND be
+  covered by their checksum files -- a broken build that drops e.g. boot.tar
+  together with boot.sha256 would otherwise still verify green and apply
+  "new rootfs + old boot") moved from `recovery_assert_dual_tar` to
+  `ota_assert_dual_payload` in `common.sh`; `ab_start_ota` now runs it too
+  (A/B previously had no equivalent check).
 - **BOARD/RELEASE gate now covers both OTA modes, with an explicit
   cross-release escape hatch.** The board/release matching that Recovery
   enforced inside `recovery_check_package_metadata` moved into the shared
