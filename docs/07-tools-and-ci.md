@@ -87,7 +87,7 @@ binaries are uploaded to the OneDrive mirror's slot-first tree
 armbian/images/<slot>/<board>/<profile>[-secure-boot]/{*.img.xz,*.sha256,ota/}
 ```
 
-where `<slot>` is `pre-release`, `latest` or `previous`, and the release
+where `<slot>` is `pre-release`, `stable` or `previous`, and the release
 carries **no assets at all** — the slot's `tag` file is the build
 signature. The promote workflow validates that the tag file names the
 release being promoted and that every `<board>/<sub>/` on the mirror is
@@ -96,8 +96,8 @@ strays). Once every matrix entry has uploaded, the release
 job stamps the build's tag into `pre-release/tag` — that file is the
 page's slot binding — and flips the release visible. Promoting rotates
 the whole slot tree with one server-side move per slot
-(`previous ⟵ latest ⟵ pre-release`, all boards together) and carries the
-`tag` file into `latest/`/`previous/` with it. Without `RCLONE_CONFIG`
+(`previous ⟵ stable ⟵ pre-release`, all boards together) and carries the
+`tag` file into `stable/`/`previous/` with it. Without `RCLONE_CONFIG`
 (fork mode), the binaries are attached to the release itself — a file
 over GitHub's 2 GiB asset cap fails the upload and needs an OneDrive-mode
 run to ship. Download tables for the published slots live on the Pages
