@@ -23,7 +23,7 @@ OTA_STATE_FILE="${OTA_STATE_DIR}/ota-state.env"
 # keeps the CPU pass under the eMMC I/O floor, no --long (decompressor window
 # cost outweighs the ratio for a once-per-device archive).
 OTA_BACKUP_ZSTD_LEVEL="${OTA_BACKUP_ZSTD_LEVEL:--3}"
-OTA_SPACE_MARGIN_MB="${OTA_SPACE_MARGIN_MB:-512}"
+# OTA_SPACE_MARGIN_MB lives in common.sh (shared with the A/B space gate).
 OTA_BACKUP_BOOT_EXCLUDES="recovery lost+found"
 
 . /usr/share/armbian-ota/fwenv.sh
@@ -115,7 +115,9 @@ recovery_check_space() {
     avail="$(df -B1 --output=avail "${RECOVERY_OVERLAY_BACKING_DIR}" 2>/dev/null | tail -n1)"
     [ -n "${avail}" ] || { log_warn "cannot read userdata free space; skipping space gate"; return 0; }
 
-    pkg_size="$(stat -c%s "${package_path}")"
+    # a failed stat must not silently collapse need to 0 (gate bypass)
+    pkg_size="$(stat -c%s "${package_path}" 2>/dev/null)" ||
+        error_exit "Cannot determine OTA package size: ${package_path}"
     need=$((pkg_size * 2))   # outer package + extracted payload members
 
     if [ "${want_backup}" = "yes" ]; then
@@ -471,13 +473,17 @@ recovery_start_ota() {
     recovery_require_transaction_store
     assert_package_mode_matches "${package_path}" "recovery"
 
-    # 1) cheap checks
+    # 1) cheap checks, cheapest first: space (df + a du walk of the live
+    # rootfs) and capacity (blockdev reads) are seconds-cheap, while the
+    # dual-payload assertion must stream-decompress the whole multi-GB
+    # package to list its members -- it runs last so a device-side
+    # shortfall (the more common field failure) fails fast.
     recovery_check_package_metadata "${package_path}" "${force}"
-    ota_assert_dual_payload "${package_path}"
     local want_backup="yes"
     [ -n "${no_backup}" ] && want_backup="no"
     recovery_check_space "${package_path}" "${want_backup}"
     recovery_check_capacity
+    ota_assert_dual_payload "${package_path}"
 
     # 2) full verification into staging (fail-fast, zero side effects)
     recovery_stage_payload "${package_path}"

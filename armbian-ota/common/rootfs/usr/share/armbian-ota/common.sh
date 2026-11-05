@@ -8,6 +8,10 @@ OTA_TMP_DIR="${OTA_TMP_DIR:-/var/run/armbian-ota}"
 OTA_LOCK_FILE="${OTA_LOCK_FILE:-/var/run/armbian-ota.lock}"
 OTA_LOG_DIR="${OTA_LOG_DIR:-/var/log/armbian-ota}"
 OTA_LOG_FILE="${OTA_LOG_FILE:-${OTA_LOG_DIR}/ota.log}"
+# Free-space headroom the staging space gate demands on top of the package
+# itself (outer tar + extracted members ≈ package size × 2). Shared by both
+# backends' space gates.
+OTA_SPACE_MARGIN_MB="${OTA_SPACE_MARGIN_MB:-512}"
 
 # OTA package payload file names shared by A/B and recovery modes.
 # Defaults are the legacy gz names; ota_resolve_payload_names() rebinds them

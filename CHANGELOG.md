@@ -231,6 +231,28 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **OTA gate order normalized: cheapest-first, pure checks before side
+  effects.** Three reorders, no logic changes: A/B's `ota_in_progress`
+  guard now runs first in the backend (one `fw_printenv` read beats the
+  PARTLABEL/blockdev probes it used to trail); `ota_assert_dual_payload`
+  moved before `ab_open_userdata` so a malformed package never triggers
+  the userdata mount/LUKS-open side effect; Recovery runs space + capacity
+  before the dual-payload assertion — `tar -tf` must stream-decompress the
+  whole multi-GB package to list members, making it the most expensive
+  pre-staging check, while a staging-space shortfall is the more common
+  field failure and now fails fast.
+- **A/B staging moved off the live rootfs, with a space gate.** `ab_start_ota`
+  now opens and mounts the reserved `userdata` partition for the duration of
+  the transaction (LUKS-unlocked with the same security-flow passphrase as the
+  root slots on encrypted layouts, swept of aborted runs' staging dirs,
+  idempotently torn down afterwards) and stages the package plus its extracted
+  members there. Previously staging went to `/ota_work` on the ACTIVE slot's
+  root filesystem -- a GB-scale write that could fill and wedge the running
+  system. A new `ab_check_space` (twin of recovery's space gate: package × 2
+  + shared 512 MiB margin) bounds whichever filesystem ends up hosting the
+  fallback; a failed `stat` no longer silently collapses `need` to 0 in
+  either mode's space gate. Any userdata open failure only downgrades staging
+  back to `/ota_work` with a warning.
 - **Partition capacity gate on both OTA modes.** `package-create.sh` now
   stamps `ROOTFS_BYTES`/`BOOT_BYTES` into `package.env` (`du --apparent-size`
   of the exact trees that get extracted, mirroring the payload tar's excludes

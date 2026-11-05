@@ -43,11 +43,12 @@ Recovery prepare (`recovery_start_ota`, runs in the live system):
 | # | Action | Tools | Notes |
 |---|---|---|---|
 | 1 | re-assert package mode | `tar -xOf` | |
-| 2 | transaction store mounted (`/media/root-rw`) | `mountpoint` | userdata overlay backing |
-| 3 | `extract_ota_package` → `ota_resolve_payload_names` | `tar -xf` | stages into `<userdata>/ota-recovery/ota_work`; resolver binds `OTA_PAYLOAD_ROOTFS_TAR`/`BOOT_TAR` to the files present (`.tar.xz` preferred over `.tar.gz`) |
-| 4 | `ota_verify_payload`: sha256 per archive; encrypted packages verify + decrypt `*.enc` first | `sha256sum`, `openssl` | |
-| 5 | `state_mark_prepared recovery prepared` | — | state file on userdata |
-| 6 | print reboot hint | — | phase 2 owns everything after |
+| 2 | cheap checks: PAYLOAD_ID/INSTALLED_ID identity, dual-payload assertion, userdata space gate, partition capacity gate (`ROOTFS_BYTES`/`BOOT_BYTES` vs running root source + boot target; 110% extract margin, raw FIT 1:1) | `tar`, `df`, `du`, `blockdev` | all fail before any side effect |
+| 3 | transaction store mounted (`/media/root-rw`) | `mountpoint` | userdata overlay backing |
+| 4 | `extract_ota_package` → `ota_resolve_payload_names` | `tar -xf` | stages into `<userdata>/ota-recovery/ota_work`; resolver binds `OTA_PAYLOAD_ROOTFS_TAR`/`BOOT_TAR` to the files present (`.tar.xz` preferred over `.tar.gz`) |
+| 5 | `ota_verify_payload`: sha256 per archive; encrypted packages verify + decrypt `*.enc` first | `sha256sum`, `openssl` | |
+| 6 | `state_mark_prepared recovery prepared` | — | state file on userdata |
+| 7 | print reboot hint | — | phase 2 owns everything after |
 
 AB prepare (`ab_start_ota`, runs in the live system, **flashes the target slot
 immediately**):
@@ -55,9 +56,11 @@ immediately**):
 | # | Action | Tools |
 |---|---|---|
 | 1 | environment check: U-Boot env sane, `rootfs_a/b` + `boot_a/b` PARTLABELs exist, current slot from kernel cmdline | `fw_printenv`, `blkid` |
-| 2 | `extract_ota_package` + `ota_verify_payload` (shared with recovery) | `tar`, `sha256sum`, `openssl` |
-| 3 | `ab_update_target_partition`: unlock target if LUKS (key from security partition flow) → mount → `empty_mount_dir` clean (**no mkfs**; UUID/label preserved) → extract rootfs payload → write target boot (tar extract or `boot.itb` dd) → rewrite target `fstab`/`armbianEnv.txt` UUIDs → sync + unmount | `cryptsetup`, `mount`, `tar`, `dd` |
-| 4 | `state ready_to_boot` + `ab_env_prepare` (switch `boot_slot`, set `ota_in_progress=1`) | `fw_setenv` |
+| 2 | partition capacity gate: `ROOTFS_BYTES`/`BOOT_BYTES` stamps vs target slot partitions, 110% extract margin (raw FIT 1:1), encrypted targets reserve the LUKS2 header | `blkid`, `blockdev` |
+| 3 | staging store: open + mount the `userdata` partition (LUKS-unlocked with the security-flow passphrase on encrypted layouts; `/ota_work` on the live rootfs as warned fallback), sweep aborted staging dirs, then the space gate (package × 2 + margin) and the shared dual-payload assertion | `cryptsetup`, `mount`, `df`, `tar` |
+| 4 | `extract_ota_package` + `ota_verify_payload` (shared with recovery) | `tar`, `sha256sum`, `openssl` |
+| 5 | `ab_update_target_partition`: unlock target if LUKS (key from security partition flow) → mount → `empty_mount_dir` clean (**no mkfs**; UUID/label preserved) → extract rootfs payload → write target boot (tar extract or `boot.itb` dd) → rewrite target `fstab`/`armbianEnv.txt` UUIDs → sync + unmount; staging store torn down afterwards | `cryptsetup`, `mount`, `tar`, `dd` |
+| 6 | `state ready_to_boot` + `ab_env_prepare` (switch `boot_slot`, set `ota_in_progress=1`) | `fw_setenv` |
 
 Key structural difference: recovery rewrites the rootfs partition from the
 initramfs (mkfs + extract, idempotent retries), AB writes the inactive slot
