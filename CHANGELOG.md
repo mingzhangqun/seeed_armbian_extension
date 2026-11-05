@@ -231,6 +231,21 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **Partition capacity gate on both OTA modes.** `package-create.sh` now
+  stamps `ROOTFS_BYTES`/`BOOT_BYTES` into `package.env` (`du --apparent-size`
+  of the exact trees that get extracted, mirroring the payload tar's excludes
+  -- the same measurement basis as the build framework's `rootfs_size`) plus a
+  `BOOT_KIND=itb|tar` shape stamp. Both backends compare them against the
+  target partition (`blockdev --getsize64`) with a 110% ext4-metadata margin
+  **before** any write: recovery before its mkfs destroys the old rootfs
+  (probing the running root source, i.e. the LUKS mapper on encrypted
+  builds), A/B against the inactive slot partitions by PARTLABEL (encrypted
+  targets additionally reserve the LUKS2 header area). A `BOOT_KIND=itb`
+  payload is dd'd verbatim and is compared 1:1 instead of with the extract
+  margin. Previously an oversized payload failed mid-extract, after
+  recovery's mkfs had already wiped the rootfs. Packages built before the
+  stamps exist skip the gate with a warning so the published fleet stays
+  updatable.
 - **Dual-payload assertion shared by both OTA modes.** The KIND=full
   assertion (both the rootfs archive and a boot member must exist AND be
   covered by their checksum files -- a broken build that drops e.g. boot.tar

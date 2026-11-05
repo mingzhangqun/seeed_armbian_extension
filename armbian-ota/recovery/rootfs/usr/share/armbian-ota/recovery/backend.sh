@@ -30,7 +30,7 @@ OTA_BACKUP_BOOT_EXCLUDES="recovery lost+found"
 
 recovery_require_tools() {
     ota_require_runtime tar sha256sum mount umount mountpoint sed grep awk \
-        find stat df zstd fw_setenv fw_printenv
+        find stat df zstd fw_setenv fw_printenv findmnt blockdev
 }
 
 recovery_require_transaction_store() {
@@ -137,6 +137,25 @@ recovery_check_space() {
         error_exit "Insufficient userdata space: avail=${avail}, need=${need} (payload=${pkg_size}, backup_est=${backup_est}, margin=${margin}); use --no-backup to drop the backup term"
     fi
     log_info "Space gate: avail=${avail} need=${need} (backup_est=${backup_est})"
+}
+
+# Capacity gate targets: the rootfs partition this system runs from is the one
+# the initramfs will reflash (recovery_lower_source resolves the LUKS mapper on
+# encrypted builds -- its size IS the usable ext4 capacity, so no header
+# allowance is needed). Boot target is the raw FIT partition on raw-boot
+# layouts, else the /boot partition mount.
+recovery_check_capacity() {
+    local root_dev boot_dev
+
+    root_dev="$(recovery_lower_source)"
+    [ -b "${root_dev}" ] || {
+        log_warn "Capacity gate: rootfs source ${root_dev:-<empty>} is not a block device; skipping"
+        return 0
+    }
+    if ! boot_dev="$(recovery_raw_boot_dev 2>/dev/null)"; then
+        boot_dev="$(findmnt -n -o SOURCE /boot 2>/dev/null || true)"
+    fi
+    ota_check_payload_capacity "${root_dev}" "${boot_dev:-}" 0 0
 }
 
 # ===== staging (15.2 steps 2 and 4) ==========================================
@@ -458,6 +477,7 @@ recovery_start_ota() {
     local want_backup="yes"
     [ -n "${no_backup}" ] && want_backup="no"
     recovery_check_space "${package_path}" "${want_backup}"
+    recovery_check_capacity
 
     # 2) full verification into staging (fail-fast, zero side effects)
     recovery_stage_payload "${package_path}"

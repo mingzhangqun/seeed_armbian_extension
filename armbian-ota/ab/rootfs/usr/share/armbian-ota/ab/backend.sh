@@ -65,6 +65,25 @@ ab_get_target_slot() {
     ab_other_slot "$(ab_get_current_slot)"
 }
 
+# Capacity gate: the payload must fit the TARGET slot partitions before any
+# write. Encrypted targets are probed closed at start time, so the LUKS2
+# header + keyslots area (16 MiB by default; reserved at 32 MiB) is
+# subtracted as an allowance instead of measured.
+ab_check_capacity() {
+    local root_label="$1" boot_label="$2"
+    local root_dev boot_dev root_allowance=0
+
+    root_dev="$(ab_get_part_by_label "${root_label}")"
+    boot_dev="$(ab_get_part_by_label "${boot_label}")"
+    [ -n "${root_dev}" ] || error_exit "Capacity gate: cannot find target root partition ${root_label}"
+    [ -n "${boot_dev}" ] || error_exit "Capacity gate: cannot find target boot partition ${boot_label}"
+
+    if [ "$(blkid -o value -s TYPE "${root_dev}" 2>/dev/null)" = "crypto_LUKS" ]; then
+        root_allowance=$((32 * 1024 * 1024))
+    fi
+    ota_check_payload_capacity "${root_dev}" "${boot_dev}" "${root_allowance}" 0
+}
+
 # Public A/B OTA commands
 ab_start_ota() {
     local package_path="$1"
@@ -80,6 +99,7 @@ ab_start_ota() {
     target_slot="$(ab_get_target_slot)"
     target_boot_label="$(ab_get_slot_boot_label "${target_slot}")"
     target_root_label="$(ab_get_slot_root_label "${target_slot}")"
+    ab_check_capacity "${target_root_label}" "${target_boot_label}"
 
     if [ "$(ab_env_get ota_in_progress)" = "1" ]; then
         error_exit "Another AB OTA boot verification is still in progress"
