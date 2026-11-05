@@ -101,6 +101,15 @@ A fresh build generates all key material itself
 | `dev.crt` | self-signed x509 from the same key (`/CN=Armbian FIT Key/`) | Rockchip loader-signing chain (`rk_sign_tool cc/lk/sb/vb`) |
 | `system_enc_key` | `openssl rand -hex 32` | Rockchip toolchain requirement |
 
+> **The key must be RSA-2048.** The ITS template hardcodes
+> `algo = "sha256,rsa2048"` and the SPL/U-Boot verifiers run with
+> `rsa,num-bits=2048`. `mkimage` signs with the key's actual bit length,
+> so an RSA-4096 key produces a 512-byte signature the verifier reads as
+> a 256-byte EM and rejects with
+> `padding_pss_verify: invalid pss padding (0xbc is missing)`. The
+> preflight action rejects non-2048 keys up front
+> ([`action.yml`](../.github/actions/preflight-checks/action.yml)).
+
 All self-signed — there is no CA/PKI chain anywhere. The OTA public key is
 installed into the image at `/usr/share/armbian-ota/keys/ota-payload.pub.pem`
 ([`ota-payload-security.sh`](../armbian-ota/common/build-hooks/ota-payload-security.sh)).
