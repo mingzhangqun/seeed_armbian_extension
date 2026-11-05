@@ -751,3 +751,66 @@ jobs:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+
+  cleanup:
+    name: Cleanup draft release (cancel/failure)
+    # Full chain so this runs LAST, after cancelled matrix jobs are fully
+    # terminal — no racing uploads while we delete/purge. The
+    # images-mirror concurrency group is held until this run completes,
+    # so a queued build cannot start filling the slot mid-purge either.
+    # On success neither cancelled() nor failure() holds and this skips.
+    # Ported from test-build.yml (deleted 2026-11-05) — its cleanup was
+    # the only draft sweeper in the repo.
+    needs: [probe-secrets, preflight, plan, init-release, pages-purge, build, release, pages]
+    if: ${{ always() && (cancelled() || failure()) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
+      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup rclone (seeed-storage OneDrive remote)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        uses: ./.github/actions/setup-onedrive
+        with:
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Delete orphaned draft + partial slot
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "plan produced no tag — nothing was created; nothing to clean"
+            exit 0
+          fi
+          if ! gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "release $TAG does not exist — init-release never finished; nothing to clean"
+            exit 0
+          fi
+          if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::notice::$TAG is already published (the release job ran) — keeping release and slot"
+            exit 0
+          fi
+          # Still a draft: the run died before publishing — roll it back.
+          # No --cleanup-tag: a draft's tag ref only materializes on
+          # publish, so deleting it 422s with "Reference does not exist"
+          # (observed 2026-11-03). Plain delete drops the pending tag
+          # with the release; the ref delete below only matters when the
+          # tag name collided with an older published release's tag.
+          gh release delete "$TAG" --repo "$TARGET_REPO" --yes
+          gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          echo "deleted orphan draft release $TAG"
+          if [ "${HAS_RCLONE}" = "true" ]; then
+            # The slot was never tagged (the release job writes <slot>/tag
+            # before publishing), so whatever the matrix uploaded renders
+            # nowhere. Purge it now instead of leaving it for the next
+            # run's init-release.
+            rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
+              || echo "armbian/images/pre-release did not exist — nothing to purge"
+          fi
