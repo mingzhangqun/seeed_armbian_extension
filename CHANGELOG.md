@@ -241,6 +241,14 @@ Covers the work against the initial import (merge base `9980aee`,
   whole multi-GB package to list members, making it the most expensive
   pre-staging check, while a staging-space shortfall is the more common
   field failure and now fails fast.
+- **Rootfs partition headroom raised 20% → 50%.** `OTA_ROOTFS_SIZE` now
+  defaults to `(rootfs + EXTRA_ROOTFS_MIB_SIZE) × 1.5` (reversing the earlier
+  leaner-sizing cut of 2026-10). Combined with the device capacity gate's
+  110% extract margin, devices flashed with these images accept OTA payloads
+  up to ~36% larger than their flashed rootfs (previously ~9%). Cost: the
+  delta is taken from the userdata partition (doubled on A/B, which sizes
+  two slots); existing devices keep their flashed partition sizes and gain
+  nothing — the gate still protects them.
 - **A/B staging moved off the live rootfs, with a space gate.** `ab_start_ota`
   now opens and mounts the reserved `userdata` partition for the duration of
   the transaction (LUKS-unlocked with the same security-flow passphrase as the
