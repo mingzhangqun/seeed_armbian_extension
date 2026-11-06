@@ -329,6 +329,39 @@ jobs:
           fi
           echo "rotated — $(rclone lsf "$base/stable" --recursive --files-only | wc -l) files in stable/"
 
+      - name: Rotate loaders slots (server-side)
+        # Same three-slot rotation for armbian/loaders/ (board u-boot
+        # production artifacts: spl_loader_maskrom.bin + rkspi_loader.img
+        # per board, plain/ and secure/ split). Runs AFTER the images
+        # rotation so a loaders failure never leaves images half-rotated.
+        # Unlike images/, a missing loaders/pre-release/ is NORMAL (the
+        # promoted build pre-dates the loaders pipeline) — slots stay
+        # untouched instead of failing the promote.
+        if: steps.rel.outputs.mode == 'promote'
+        run: |
+          set -euo pipefail
+          lbase="seeed-storage:armbian/loaders"
+          snap="$(mktemp)"
+          rclone lsf "$lbase" --dirs-only --contimeout 15s > "$snap" \
+            || { echo "::error::rclone lsf failed on $lbase — OneDrive unreachable?"; exit 1; }
+          has() { grep -qx "$1/" "$snap"; }
+          if ! has pre-release; then
+            echo "no loaders pre-release/ — loaders slots left untouched"
+            exit 0
+          fi
+          if has previous; then
+            rclone purge "$lbase/previous"
+          else
+            echo "no loaders previous/ — nothing to purge"
+          fi
+          if has stable; then
+            rclone moveto "$lbase/stable" "$lbase/previous"
+          else
+            echo "no loaders stable/ (first promote with loaders)"
+          fi
+          rclone moveto "$lbase/pre-release" "$lbase/stable"
+          echo "loaders rotated — $(rclone lsf "$lbase/stable" --recursive --files-only | wc -l) files in stable/"
+
       - name: Clean up superseded pre-releases
         # Older pre-releases carry no assets at all (the binaries live in
         # the OneDrive slots; the slot's tag file is the build signature)

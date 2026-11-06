@@ -9,8 +9,9 @@
 #     for new SPI flash vendor support (sfc.c unaligned access fix + vendor configs)
 #   - idbloader.img generation via mkimage (RK3588, whose INI lacks CREATE_IDB)
 #   - maskrom spl_loader always saved as spl_loader_maskrom.bin in the U-Boot
-#     source dir, picked up by board_uboot_spi_image_after_build and shipped in
-#     the u-boot deb under /usr/lib/linux-u-boot-<branch>-<board>/. Uses the
+#     source dir and shipped in the u-boot deb under
+#     /usr/lib/linux-u-boot-<branch>-<board>/ for every board (target_files is
+#     appended gate-free in the spl-blobs hooks). Uses the
 #     rkbin-tools usbplug blob by default; RK_COMPILE_USBPLUG=yes swaps in a
 #     usbplug recompiled from patched U-Boot source for new SPI flash vendor
 #     support.
@@ -135,12 +136,18 @@ _seeed_rk3576_spl_loader() {
 	run_host_x86_binary_logged $RKBIN_DIR/tools/boot_merger $rkboot_ini
 	rm -f $rkboot_ini
 
-	# Always save spl_loader under a stable name so the
-	# board_uboot_spi_image_after_build hook can pick it up and ship it in
-	# the u-boot deb. Uses rkbin blob usbplug by default; compiled usbplug
-	# (if RK_COMPILE_USBPLUG=yes) was already substituted into usbplug_path above.
+	# Always save spl_loader under a stable name and ship it in the u-boot
+	# deb for EVERY board. Packaging used to happen only in the SPI-gated
+	# board_uboot_spi_image_after_build hook, so non-BOOT_SUPPORT_SPI boards
+	# (industrial / module-devkit) generated the loader and silently dropped
+	# it; appending target_files here is gate-free. Uses rkbin blob usbplug
+	# by default; compiled usbplug (if RK_COMPILE_USBPLUG=yes) was already
+	# substituted into usbplug_path above.
 	cp rk3576_spl_loader_*.bin spl_loader_maskrom.bin 2>/dev/null && {
 		display_alert "maskrom spl_loader ready for deb packaging" \
+			"$(du -h spl_loader_maskrom.bin | cut -f1)" "info"
+		target_files+=" spl_loader_maskrom.bin"
+		display_alert "maskrom spl_loader added to u-boot deb" \
 			"$(du -h spl_loader_maskrom.bin | cut -f1)" "info"
 	}
 }
@@ -211,24 +218,77 @@ RK3588EOF
 	run_host_command_logged tools/mkimage -n "${BOOT_SOC_MKIMAGE}" -T rksd \
 		-d "${spl_bin_path}:spl/u-boot-spl.bin" idbloader.img
 
-	# Always save spl_loader under a stable name so the
-	# board_uboot_spi_image_after_build hook can pick it up and ship it in
-	# the u-boot deb. Uses rkbin blob usbplug by default; compiled usbplug
-	# (if RK_COMPILE_USBPLUG=yes) was already substituted into usbplug_path above.
+	# Always save spl_loader under a stable name and ship it in the u-boot
+	# deb for EVERY board — same gate-free target_files append as the RK3576
+	# path above (see the comment there for why the SPI hook alone was not
+	# enough).
 	cp rk3588_spl_loader*.bin spl_loader_maskrom.bin 2>/dev/null && {
 		display_alert "maskrom spl_loader ready for deb packaging" \
+			"$(du -h spl_loader_maskrom.bin | cut -f1)" "info"
+		target_files+=" spl_loader_maskrom.bin"
+		display_alert "maskrom spl_loader added to u-boot deb" \
 			"$(du -h spl_loader_maskrom.bin | cut -f1)" "info"
 	}
 }
 
 # Hook invoked from rockchip64_common.inc::uboot_custom_postprocess() after
 # rkspi_loader.img has been assembled (BOOT_SUPPORT_SPI=yes &&
-# BOOT_SPI_RKSPI_LOADER=yes). Adds the Maskrom loader produced above to the
-# U-Boot package.
+# BOOT_SPI_RKSPI_LOADER=yes). Packaging of the Maskrom loader moved to the
+# spl-blobs hooks above (gate-free); this is only an idempotent backstop for
+# any path that produced spl_loader_maskrom.bin outside them.
 board_uboot_spi_image_after_build() {
+	[[ " ${target_files} " != *" spl_loader_maskrom.bin "* ]] || return 0
 	if [[ -f spl_loader_maskrom.bin ]]; then
 		target_files+=" spl_loader_maskrom.bin"
 		display_alert "maskrom spl_loader added to u-boot deb" \
 			"$(du -h spl_loader_maskrom.bin | cut -f1)" "info"
 	fi
+}
+
+# Export the board's u-boot production loaders from the u-boot deb installed
+# in the final image to ${DEST}/images/loaders/<BOARD>/<plain|secure>/:
+#   - spl_loader_maskrom.bin  (maskrom flashing loader; every board)
+#   - rkspi_loader.img        (SPI NOR image; only layouts that build one —
+#                              boards without BOOT_SUPPORT_SPI never have it)
+# CI mirrors that tree to the OneDrive armbian/loaders/ slot layout. plain
+# and secure never share a directory: secure-boot legs rebuild both files
+# with the signed FIT / rk_sign_tool-signed loader.
+function pre_umount_final_image__902_export_production_loaders() {
+	local uboot_dir="" candidate f sec out_dir exported=""
+	for candidate in "${MOUNT}"/usr/lib/linux-u-boot-*; do
+		[[ -d "${candidate}" ]] && uboot_dir="${candidate}"
+	done
+	if [[ -z "${uboot_dir}" ]]; then
+		display_alert "Production loaders" \
+			"no linux-u-boot-* payload dir in the image — nothing to export" "warn"
+		return 0
+	fi
+
+	if [[ "${RK_SECURE_UBOOT_ENABLE:-no}" == "yes" || "${RK_OPTEE_BOOT_ENABLE:-no}" == "yes" ]]; then
+		sec="secure"
+	else
+		sec="plain"
+	fi
+
+	out_dir="${DEST}/images/loaders/${BOARD}/${sec}"
+	mkdir -p "${out_dir}"
+
+	for f in spl_loader_maskrom.bin rkspi_loader.img; do
+		[[ -f "${uboot_dir}/${f}" ]] || continue
+		xz -T0 -c "${uboot_dir}/${f}" > "${out_dir}/${f}.xz" ||
+			exit_with_error "Production loaders" "failed to compress ${uboot_dir}/${f}"
+		(
+			cd "${out_dir}" && sha256sum "${f}.xz" > "${f}.xz.sha256"
+		) || exit_with_error "Production loaders" "failed to checksum ${out_dir}/${f}.xz"
+		exported+=" ${f}.xz"
+	done
+
+	if [[ -z "${exported}" ]]; then
+		display_alert "Production loaders" \
+			"neither loader found in the u-boot deb — nothing exported" "warn"
+		return 0
+	fi
+	display_alert "Production loaders" \
+		"exported${exported} -> images/loaders/${BOARD}/${sec}" "info"
+	return 0
 }
