@@ -4,7 +4,115 @@ ota_source_library "${OTA_RUNTIME_DIR}/ab/env.sh" "A/B U-Boot environment helper
 ota_source_library "${OTA_RUNTIME_DIR}/ab/target.sh" "A/B target update helper" || return 1
 
 ab_require_tools() {
-    ota_require_runtime fw_printenv fw_setenv blkid mount umount mountpoint tar findmnt sed grep awk reboot dd od tr blockdev
+    ota_require_runtime fw_printenv fw_setenv blkid mount umount mountpoint tar findmnt sed grep awk reboot dd od tr blockdev df stat
+}
+
+# ===== staging store: userdata, not the running rootfs ========================
+# A package plus its extracted members is GB-scale; staging it in the default
+# OTA_WORK_DIR (/ota_work, on the ACTIVE slot's root filesystem) risks filling
+# -- and wedging -- the live system. The userdata partition is reserved on A/B
+# layouts but not mounted at runtime, so open it for the duration of the
+# transaction (encrypted layouts carry it inside LUKS, unlocked with the same
+# security-flow passphrase as the root slots: one CRYPTROOT_PASSPHRASE per
+# build). Any failure here only downgrades staging back to /ota_work with a
+# warning -- the space gate then keeps that fallback from filling the rootfs.
+AB_USERDATA_MNT="/mnt/ota-userdata"
+AB_USERDATA_MAPPER="armbian-ota-userdata"
+AB_USERDATA_OPENED=0
+AB_USERDATA_MOUNTED=0
+
+ab_userdata_part() {
+    local disk
+
+    disk="$(ab_boot_disk 2>/dev/null || true)"
+    [ -n "${disk}" ] || return 1
+    ab_blkid_first_on_disk "PARTLABEL=userdata" "${disk}" 2>/dev/null || true
+}
+
+# Idempotent teardown of anything a previous (possibly failed) run left behind.
+ab_close_userdata() {
+    if [ "${AB_USERDATA_MOUNTED}" = "1" ] || mountpoint -q "${AB_USERDATA_MNT}" 2>/dev/null; then
+        umount "${AB_USERDATA_MNT}" 2>/dev/null || log_warn "Failed to unmount ${AB_USERDATA_MNT}"
+    fi
+    AB_USERDATA_MOUNTED=0
+    if [ -e "/dev/mapper/${AB_USERDATA_MAPPER}" ]; then
+        cryptsetup luksClose "${AB_USERDATA_MAPPER}" >/dev/null 2>&1 ||
+            log_warn "Failed to close mapper ${AB_USERDATA_MAPPER}"
+    fi
+    AB_USERDATA_OPENED=0
+}
+
+ab_open_userdata() {
+    local dev fstype key_file
+
+    mkdir -p "${AB_USERDATA_MNT}" 2>/dev/null || true
+
+    dev="$(ab_userdata_part)"
+    if [ -z "${dev}" ]; then
+        log_warn "userdata partition not found on the boot disk; staging falls back to ${OTA_WORK_DIR}"
+        return 1
+    fi
+
+    fstype="$(ab_get_fstype_by_dev "${dev}")"
+    if [ "${fstype}" = "crypto_LUKS" ]; then
+        command -v cryptsetup >/dev/null 2>&1 || {
+            log_warn "encrypted userdata present but cryptsetup is missing; staging falls back to ${OTA_WORK_DIR}"
+            return 1
+        }
+        key_file="$(make_ota_temp_file "ab-userdata-key")"
+        if ! ab_get_security_passphrase_file "${key_file}"; then
+            rm -f "${key_file}" 2>/dev/null || true
+            log_warn "failed to obtain the userdata passphrase from the security flow; staging falls back to ${OTA_WORK_DIR}"
+            return 1
+        fi
+        if ! cryptsetup luksOpen "${dev}" "${AB_USERDATA_MAPPER}" --key-file "${key_file}" >/dev/null 2>&1; then
+            rm -f "${key_file}" 2>/dev/null || true
+            log_warn "failed to unlock encrypted userdata ${dev}; staging falls back to ${OTA_WORK_DIR}"
+            return 1
+        fi
+        rm -f "${key_file}" 2>/dev/null || true
+        AB_USERDATA_OPENED=1
+        dev="/dev/mapper/${AB_USERDATA_MAPPER}"
+        log_info "Staging store: encrypted userdata unlocked as ${dev}"
+    fi
+
+    if ! mount "${dev}" "${AB_USERDATA_MNT}"; then
+        ab_close_userdata
+        log_warn "failed to mount userdata at ${AB_USERDATA_MNT}; staging falls back to ${OTA_WORK_DIR}"
+        return 1
+    fi
+    AB_USERDATA_MOUNTED=1
+    OTA_WORK_DIR="${AB_USERDATA_MNT}/ota_work"
+    mkdir -p "${OTA_WORK_DIR}"
+    # sweep aborted runs' staging dirs: the CLI lock rules out concurrent
+    # users, so anything matching the prefix here is dead weight
+    rm -rf "${OTA_WORK_DIR}"/ab-package.* 2>/dev/null || true
+    log_info "Staging store: userdata mounted, OTA work dir is ${OTA_WORK_DIR}"
+}
+
+# Staging space gate (A/B twin of recovery_check_space): the package plus its
+# extracted members need ~2x the package size on the staging filesystem, plus
+# the shared margin. On the userdata store this is cheap headroom; on the
+# /ota_work fallback it is what keeps a package from filling the live rootfs.
+ab_check_space() {
+    local package_path="$1"
+    local avail need pkg_size margin
+
+    # on the /ota_work fallback the dir may not exist yet; df would fail and
+    # silently skip the gate
+    mkdir -p "${OTA_WORK_DIR}" 2>/dev/null || true
+    avail="$(df -B1 --output=avail "${OTA_WORK_DIR}" 2>/dev/null | tail -n1)"
+    [ -n "${avail}" ] || { log_warn "cannot read staging free space; skipping space gate"; return 0; }
+
+    # a failed stat must not silently collapse need to 0 (gate bypass)
+    pkg_size="$(stat -c%s "${package_path}" 2>/dev/null)" ||
+        error_exit "Cannot determine OTA package size: ${package_path}"
+    need=$((pkg_size * 2))   # outer package + extracted payload members
+    margin=$((OTA_SPACE_MARGIN_MB * 1024 * 1024))
+    if [ "${avail}" -lt $((need + margin)) ]; then
+        error_exit "Insufficient staging space on ${OTA_WORK_DIR}: avail=${avail}, need=${need} + margin=${margin} (payload=${pkg_size})"
+    fi
+    log_info "Space gate: staging ${OTA_WORK_DIR} avail=${avail} need=${need} (margin=${margin})"
 }
 
 ab_ensure_slot_boot_env() {
@@ -65,6 +173,25 @@ ab_get_target_slot() {
     ab_other_slot "$(ab_get_current_slot)"
 }
 
+# Capacity gate: the payload must fit the TARGET slot partitions before any
+# write. Encrypted targets are probed closed at start time, so the LUKS2
+# header + keyslots area (16 MiB by default; reserved at 32 MiB) is
+# subtracted as an allowance instead of measured.
+ab_check_capacity() {
+    local root_label="$1" boot_label="$2"
+    local root_dev boot_dev root_allowance=0
+
+    root_dev="$(ab_get_part_by_label "${root_label}")"
+    boot_dev="$(ab_get_part_by_label "${boot_label}")"
+    [ -n "${root_dev}" ] || error_exit "Capacity gate: cannot find target root partition ${root_label}"
+    [ -n "${boot_dev}" ] || error_exit "Capacity gate: cannot find target boot partition ${boot_label}"
+
+    if [ "$(blkid -o value -s TYPE "${root_dev}" 2>/dev/null)" = "crypto_LUKS" ]; then
+        root_allowance=$((32 * 1024 * 1024))
+    fi
+    ota_check_payload_capacity "${root_dev}" "${boot_dev}" "${root_allowance}" 0
+}
+
 # Public A/B OTA commands
 ab_start_ota() {
     local package_path="$1"
@@ -74,18 +201,30 @@ ab_start_ota() {
     [ -f "${package_path}" ] || error_exit "OTA package not found: ${package_path}"
     ab_require_tools
     assert_package_mode_matches "${package_path}" "ab"
+
+    # Cheapest, most-likely rejection first: one fw_printenv read beats every
+    # probe below, and a pending boot verification vetoes any new transaction.
+    if [ "$(ab_env_get ota_in_progress)" = "1" ]; then
+        error_exit "Another AB OTA boot verification is still in progress"
+    fi
+
     ab_validate_environment
 
     current_slot="$(ab_get_current_slot)"
     target_slot="$(ab_get_target_slot)"
     target_boot_label="$(ab_get_slot_boot_label "${target_slot}")"
     target_root_label="$(ab_get_slot_root_label "${target_slot}")"
-
-    if [ "$(ab_env_get ota_in_progress)" = "1" ]; then
-        error_exit "Another AB OTA boot verification is still in progress"
-    fi
-
+    ab_check_capacity "${target_root_label}" "${target_boot_label}"
+    # Pure package-shape check before the userdata side effects below: a
+    # malformed package must not leave a mapper/mount behind (even though the
+    # next run's teardown would sweep it).
     ota_assert_dual_payload "${package_path}"
+
+    # Stage on userdata (falls back to /ota_work with a warning); the space
+    # gate then bounds whatever the staging filesystem is.
+    ab_close_userdata   # clear residue from a previously failed run
+    ab_open_userdata || true
+    ab_check_space "${package_path}"
 
     temp_work="$(make_ota_work_dir "ab-package")"
     extract_ota_package "${package_path}" "${temp_work}"
@@ -98,6 +237,7 @@ ab_start_ota() {
 
     ab_update_target_partition "${temp_work}" "${target_root_label}" "${target_boot_label}" "${package_path}" "${current_slot}"
     rm -rf "${temp_work}"
+    ab_close_userdata
 
     state_mark_prepared "ab" "ready_to_boot" "${package_path}" "${current_slot}" "${target_slot}" ||
         error_exit "Failed to mark AB OTA ready to boot"

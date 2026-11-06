@@ -8,6 +8,10 @@ OTA_TMP_DIR="${OTA_TMP_DIR:-/var/run/armbian-ota}"
 OTA_LOCK_FILE="${OTA_LOCK_FILE:-/var/run/armbian-ota.lock}"
 OTA_LOG_DIR="${OTA_LOG_DIR:-/var/log/armbian-ota}"
 OTA_LOG_FILE="${OTA_LOG_FILE:-${OTA_LOG_DIR}/ota.log}"
+# Free-space headroom the staging space gate demands on top of the package
+# itself (outer tar + extracted members ≈ package size × 2). Shared by both
+# backends' space gates.
+OTA_SPACE_MARGIN_MB="${OTA_SPACE_MARGIN_MB:-512}"
 
 # OTA package payload file names shared by A/B and recovery modes.
 # Defaults are the legacy gz names; ota_resolve_payload_names() rebinds them
@@ -190,6 +194,75 @@ ota_assert_dual_payload() {
     [ "${root_sha:-0}" -ge 1 ] || error_exit "rootfs.sha256 does not cover rootfs.tar.${fmt}"
     boot_sha="$(tar -xOf "${package_path}" "boot.sha256" 2>/dev/null | grep -c "${boot_member}" || true)"
     [ "${boot_sha:-0}" -ge 1 ] || error_exit "boot.sha256 does not cover ${boot_member}"
+}
+
+# ===== partition capacity gate =================================================
+# Payloads are tar trees, not raw images, so nothing at apply time enforces
+# that the extracted content fits the target partition. Without this gate the
+# failure lands mid-extract -- AFTER recovery's mkfs has already destroyed the
+# old rootfs (A/B merely loses the target slot). ROOTFS_BYTES/BOOT_BYTES are
+# stamped by package-create.sh as du --apparent-size of the build staging
+# trees, the same basis as the framework's rootfs_size, so partition sizing
+# and this gate agree on units. The margin covers ext4 metadata (inodes,
+# directory blocks, journal) on top of apparent size. Packages built before
+# the stamps existed skip the gate with a warning: refusing them would strand
+# the already-published fleet.
+OTA_CAPACITY_MARGIN_PCT=110
+
+ota_partition_size_bytes() {
+    blockdev --getsize64 "$1" 2>/dev/null || true
+}
+
+# $1 = human label, $2 = needed bytes (package stamp), $3 = target device,
+# $4 = allowance bytes (e.g. LUKS2 header reserve on closed encrypted targets),
+# $5 = margin percent over the stamp (default OTA_CAPACITY_MARGIN_PCT; raw FIT
+# payloads are dd'd verbatim and take no filesystem overhead, so they use 100).
+ota_require_capacity() {
+    local what="$1" needed="$2" dev="$3" allowance="${4:-0}" margin_pct="${5:-${OTA_CAPACITY_MARGIN_PCT}}"
+    local size need
+
+    case "${needed}" in
+        ''|*[!0-9]*) error_exit "Invalid ${what} size stamp in package.env: ${needed:-<empty>} (expected bytes)" ;;
+    esac
+
+    size="$(ota_partition_size_bytes "${dev}")"
+    [ -n "${size}" ] || {
+        log_warn "Capacity gate: cannot read size of ${dev:-<unresolved>}; skipping ${what} check"
+        return 0
+    }
+    need=$(( needed * margin_pct / 100 + allowance ))
+    if [ "${need}" -gt "${size}" ]; then
+        error_exit "OTA ${what} does not fit ${dev}: payload=${needed}B, need=${need}B (margin ${margin_pct}% + ${allowance}B allowance), partition=${size}B"
+    fi
+    log_info "Capacity gate: ${what} ${needed}B -> ${dev} ${size}B OK (need=${need}B)"
+}
+
+# $1 = rootfs target dev, $2 = boot target dev (empty = unresolvable, checks
+# skip with a warning), $3 = rootfs allowance bytes, $4 = boot allowance bytes.
+ota_check_payload_capacity() {
+    local root_dev="$1" boot_dev="$2" root_allowance="${3:-0}" boot_allowance="${4:-0}"
+    local root_bytes boot_bytes boot_margin
+
+    root_bytes="$(package_env_get_value "ROOTFS_BYTES" || true)"
+    boot_bytes="$(package_env_get_value "BOOT_BYTES" || true)"
+    if [ -z "${root_bytes}" ] && [ -z "${boot_bytes}" ]; then
+        log_warn "OTA package predates ROOTFS_BYTES/BOOT_BYTES stamps; skipping capacity gate"
+        return 0
+    fi
+
+    # BOOT_KIND=itb means the boot payload is a raw FIT dd'd verbatim -- no
+    # extract overhead -- so it is compared 1:1 against the partition instead
+    # of with the extract margin (stamped by package-create.sh; absent falls
+    # back to the conservative extract margin).
+    boot_margin="${OTA_CAPACITY_MARGIN_PCT}"
+    if [ "$(package_env_get_value "BOOT_KIND" || true)" = "itb" ]; then
+        boot_margin=100
+    fi
+
+    # A present stamp must be numeric; a stamp omitted by a failed build-side
+    # measurement just skips that one check.
+    [ -z "${root_bytes}" ] || ota_require_capacity "rootfs payload" "${root_bytes}" "${root_dev}" "${root_allowance}"
+    [ -z "${boot_bytes}" ] || ota_require_capacity "boot payload" "${boot_bytes}" "${boot_dev}" "${boot_allowance}" "${boot_margin}"
 }
 
 # Runtime identity and capability declaration. OTA_RUNTIME_VERSION tracks the

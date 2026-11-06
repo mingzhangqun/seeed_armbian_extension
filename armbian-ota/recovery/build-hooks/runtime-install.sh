@@ -24,8 +24,15 @@ function ota_install_recovery_runtime_to_rootfs() {
 # al.; uboot-envtools lacks an arm64 candidate), so we install the Debian
 # bookworm libubootenv debs directly -- glibc 2.36 binaries run fine on
 # noble's 2.39. Standard download-or-cached pattern into cache/download.
-OTA_FW_ENV_DEB_MIRROR="${OTA_FW_ENV_DEB_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian/pool/main/libu/libubootenv}"
+# Primary is tuna (fast from CN runners); fallbacks cover the cases where a
+# mirror transiently 403s a GitHub Actions egress IP. First mirror to return
+# the file wins; failure of all of them is fatal.
 OTA_FW_ENV_DEB_VERSION="${OTA_FW_ENV_DEB_VERSION:-0.3.2-1}"
+OTA_FW_ENV_DEB_MIRRORS="${OTA_FW_ENV_DEB_MIRRORS:-https://mirrors.tuna.tsinghua.edu.cn/debian/pool/main/libu/libubootenv https://deb.debian.org/debian/pool/main/libu/libubootenv https://mirrors.ustc.edu.cn/debian/pool/main/libu/libubootenv}"
+# Backwards-compat: honour the singular override by prepending it.
+if [[ -n "${OTA_FW_ENV_DEB_MIRROR:-}" ]]; then
+    OTA_FW_ENV_DEB_MIRRORS="${OTA_FW_ENV_DEB_MIRROR} ${OTA_FW_ENV_DEB_MIRRORS}"
+fi
 
 function ota_install_recovery_fw_env_tools() {
     local root_dir="$1"
@@ -37,15 +44,22 @@ function ota_install_recovery_fw_env_tools() {
     local cache_dir="${SRC}/cache/download/libubootenv"
     mkdir -p "${cache_dir}"
 
+    local mirror downloaded
     for deb in "${debs[@]}"; do
         if [[ ! -f "${cache_dir}/${deb}" ]]; then
-            display_alert "Recovery OTA fw_env" "downloading ${deb}" "info"
-            curl -fsSL --retry 3 -o "${cache_dir}/${deb}.dl" \
-                "${OTA_FW_ENV_DEB_MIRROR}/${deb}" ||
-                {
-                    rm -f "${cache_dir}/${deb}.dl"
-                    exit_with_error "Recovery OTA fw_env" "failed to download ${deb}"
-                }
+            downloaded=""
+            for mirror in ${OTA_FW_ENV_DEB_MIRRORS}; do
+                display_alert "Recovery OTA fw_env" "downloading ${deb} from ${mirror}" "info"
+                if curl -fsSL --retry 3 --retry-all-errors -o "${cache_dir}/${deb}.dl" \
+                    "${mirror}/${deb}"; then
+                    downloaded="${mirror}"
+                    break
+                fi
+                rm -f "${cache_dir}/${deb}.dl"
+                display_alert "Recovery OTA fw_env" "mirror ${mirror} failed for ${deb}, trying next" "warn"
+            done
+            [[ -n "${downloaded}" ]] ||
+                exit_with_error "Recovery OTA fw_env" "failed to download ${deb} from all mirrors"
             mv "${cache_dir}/${deb}.dl" "${cache_dir}/${deb}"
         fi
         cp "${cache_dir}/${deb}" "${root_dir}/tmp/${deb}"

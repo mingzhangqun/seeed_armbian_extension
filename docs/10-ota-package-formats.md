@@ -40,6 +40,17 @@ Phase 1 fails fast with actionable errors instead of dying in the initramfs.
 | `PAYLOAD_FORMAT` | payload compression: `gz`, `xz`, `zstd` | inferred from the suffix actually staged (legacy behavior) |
 | `MIN_RUNTIME_VERSION` | minimum `OTA_RUNTIME_VERSION` required | no check |
 | `OTA_HOOK` | filename of the hook at package root | conventional name `ota-hook.sh` if present, else none (legacy `OTA_APPLY_HOOK`/`ota-apply-hook.sh` accepted) |
+| `ROOTFS_BYTES` | rootfs payload extracted size (`du --apparent-size` of the build staging tree, mirroring the payload tar's excludes) | capacity gate skipped with a warning |
+| `BOOT_BYTES` | boot payload extracted size (staged boot tree, or `boot.itb` on raw-FIT builds) | capacity gate skipped with a warning |
+| `BOOT_KIND` | boot payload shape: `tar` (ext4 tree, extract margin) or `itb` (raw FIT, compared 1:1) | conservative extract margin |
+
+Both backends compare `ROOTFS_BYTES`/`BOOT_BYTES` against the target partition
+(`blockdev --getsize64`) **before** any write -- recovery before mkfs destroys
+the old rootfs, A/B against the inactive slot (encrypted A/B targets reserve
+the LUKS2 header). Recovery probes the running root source (LUKS mapper on
+encrypted builds); A/B probes the slot partitions by PARTLABEL. Extracted
+tar trees get a 110% ext4-metadata margin; a `BOOT_KIND=itb` payload is
+dd'd verbatim and is compared 1:1.
 
 Runtime constants (`common.sh`, mirrored in the initramfs lib):
 

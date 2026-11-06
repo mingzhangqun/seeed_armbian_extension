@@ -184,6 +184,51 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **OTA gate order normalized: cheapest-first, pure checks before side
+  effects.** Three reorders, no logic changes: A/B's `ota_in_progress`
+  guard now runs first in the backend (one `fw_printenv` read beats the
+  PARTLABEL/blockdev probes it used to trail); `ota_assert_dual_payload`
+  moved before `ab_open_userdata` so a malformed package never triggers
+  the userdata mount/LUKS-open side effect; Recovery runs space + capacity
+  before the dual-payload assertion — `tar -tf` must stream-decompress the
+  whole multi-GB package to list members, making it the most expensive
+  pre-staging check, while a staging-space shortfall is the more common
+  field failure and now fails fast.
+- **Rootfs partition headroom raised 20% → 50%.** `OTA_ROOTFS_SIZE` now
+  defaults to `(rootfs + EXTRA_ROOTFS_MIB_SIZE) × 1.5` (reversing the earlier
+  leaner-sizing cut of 2026-10). Combined with the device capacity gate's
+  110% extract margin, devices flashed with these images accept OTA payloads
+  up to ~36% larger than their flashed rootfs (previously ~9%). Cost: the
+  delta is taken from the userdata partition (doubled on A/B, which sizes
+  two slots); existing devices keep their flashed partition sizes and gain
+  nothing — the gate still protects them.
+- **A/B staging moved off the live rootfs, with a space gate.** `ab_start_ota`
+  now opens and mounts the reserved `userdata` partition for the duration of
+  the transaction (LUKS-unlocked with the same security-flow passphrase as the
+  root slots on encrypted layouts, swept of aborted runs' staging dirs,
+  idempotently torn down afterwards) and stages the package plus its extracted
+  members there. Previously staging went to `/ota_work` on the ACTIVE slot's
+  root filesystem -- a GB-scale write that could fill and wedge the running
+  system. A new `ab_check_space` (twin of recovery's space gate: package × 2
+  + shared 512 MiB margin) bounds whichever filesystem ends up hosting the
+  fallback; a failed `stat` no longer silently collapses `need` to 0 in
+  either mode's space gate. Any userdata open failure only downgrades staging
+  back to `/ota_work` with a warning.
+- **Partition capacity gate on both OTA modes.** `package-create.sh` now
+  stamps `ROOTFS_BYTES`/`BOOT_BYTES` into `package.env` (`du --apparent-size`
+  of the exact trees that get extracted, mirroring the payload tar's excludes
+  -- the same measurement basis as the build framework's `rootfs_size`) plus a
+  `BOOT_KIND=itb|tar` shape stamp. Both backends compare them against the
+  target partition (`blockdev --getsize64`) with a 110% ext4-metadata margin
+  **before** any write: recovery before its mkfs destroys the old rootfs
+  (probing the running root source, i.e. the LUKS mapper on encrypted
+  builds), A/B against the inactive slot partitions by PARTLABEL (encrypted
+  targets additionally reserve the LUKS2 header area). A `BOOT_KIND=itb`
+  payload is dd'd verbatim and is compared 1:1 instead of with the extract
+  margin. Previously an oversized payload failed mid-extract, after
+  recovery's mkfs had already wiped the rootfs. Packages built before the
+  stamps exist skip the gate with a warning so the published fleet stays
+  updatable.
 - **Dual-payload assertion shared by both OTA modes.** The KIND=full
   assertion (both the rootfs archive and a boot member must exist AND be
   covered by their checksum files -- a broken build that drops e.g. boot.tar

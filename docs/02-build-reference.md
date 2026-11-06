@@ -79,7 +79,7 @@ boot and two rootfs partitions).
 |---|---|---|
 | [`OTA_BOOT_SIZE`](../armbian-ota/common/build-hooks/partitions.sh#L31) | 512 | Boot partition(s), MiB |
 | [`OTA_SECURITY_SIZE`](../armbian-ota/common/build-hooks/partitions.sh#L32) | 4 | Security partition (encrypted images), MiB |
-| [`OTA_ROOTFS_SIZE`](../armbian-ota/common/build-hooks/partitions.sh#L34) | computed | Rootfs partition, MiB — `(built rootfs + EXTRA_ROOTFS_MIB_SIZE) + 20%` headroom |
+| [`OTA_ROOTFS_SIZE`](../armbian-ota/common/build-hooks/partitions.sh#L34) | computed | Rootfs partition, MiB — `(built rootfs + EXTRA_ROOTFS_MIB_SIZE) + 50%` headroom |
 | [`OTA_USERDATA_SIZE`](../armbian-ota/common/build-hooks/partitions.sh#L36) | 512 | Userdata partition, MiB — build-time floor, expanded to the full disk on first boot |
 | `EXTRA_ROOTFS_MIB_SIZE` | 0 | Extra rootfs MiB added before headroom |
 

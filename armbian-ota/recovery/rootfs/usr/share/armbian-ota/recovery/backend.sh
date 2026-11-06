@@ -23,14 +23,14 @@ OTA_STATE_FILE="${OTA_STATE_DIR}/ota-state.env"
 # keeps the CPU pass under the eMMC I/O floor, no --long (decompressor window
 # cost outweighs the ratio for a once-per-device archive).
 OTA_BACKUP_ZSTD_LEVEL="${OTA_BACKUP_ZSTD_LEVEL:--3}"
-OTA_SPACE_MARGIN_MB="${OTA_SPACE_MARGIN_MB:-512}"
+# OTA_SPACE_MARGIN_MB lives in common.sh (shared with the A/B space gate).
 OTA_BACKUP_BOOT_EXCLUDES="recovery lost+found"
 
 . /usr/share/armbian-ota/fwenv.sh
 
 recovery_require_tools() {
     ota_require_runtime tar sha256sum mount umount mountpoint sed grep awk \
-        find stat df zstd fw_setenv fw_printenv
+        find stat df zstd fw_setenv fw_printenv findmnt blockdev
 }
 
 recovery_require_transaction_store() {
@@ -115,7 +115,9 @@ recovery_check_space() {
     avail="$(df -B1 --output=avail "${RECOVERY_OVERLAY_BACKING_DIR}" 2>/dev/null | tail -n1)"
     [ -n "${avail}" ] || { log_warn "cannot read userdata free space; skipping space gate"; return 0; }
 
-    pkg_size="$(stat -c%s "${package_path}")"
+    # a failed stat must not silently collapse need to 0 (gate bypass)
+    pkg_size="$(stat -c%s "${package_path}" 2>/dev/null)" ||
+        error_exit "Cannot determine OTA package size: ${package_path}"
     need=$((pkg_size * 2))   # outer package + extracted payload members
 
     if [ "${want_backup}" = "yes" ]; then
@@ -137,6 +139,25 @@ recovery_check_space() {
         error_exit "Insufficient userdata space: avail=${avail}, need=${need} (payload=${pkg_size}, backup_est=${backup_est}, margin=${margin}); use --no-backup to drop the backup term"
     fi
     log_info "Space gate: avail=${avail} need=${need} (backup_est=${backup_est})"
+}
+
+# Capacity gate targets: the rootfs partition this system runs from is the one
+# the initramfs will reflash (recovery_lower_source resolves the LUKS mapper on
+# encrypted builds -- its size IS the usable ext4 capacity, so no header
+# allowance is needed). Boot target is the raw FIT partition on raw-boot
+# layouts, else the /boot partition mount.
+recovery_check_capacity() {
+    local root_dev boot_dev
+
+    root_dev="$(recovery_lower_source)"
+    [ -b "${root_dev}" ] || {
+        log_warn "Capacity gate: rootfs source ${root_dev:-<empty>} is not a block device; skipping"
+        return 0
+    }
+    if ! boot_dev="$(recovery_raw_boot_dev 2>/dev/null)"; then
+        boot_dev="$(findmnt -n -o SOURCE /boot 2>/dev/null || true)"
+    fi
+    ota_check_payload_capacity "${root_dev}" "${boot_dev:-}" 0 0
 }
 
 # ===== staging (15.2 steps 2 and 4) ==========================================
@@ -452,12 +473,17 @@ recovery_start_ota() {
     recovery_require_transaction_store
     assert_package_mode_matches "${package_path}" "recovery"
 
-    # 1) cheap checks
+    # 1) cheap checks, cheapest first: space (df + a du walk of the live
+    # rootfs) and capacity (blockdev reads) are seconds-cheap, while the
+    # dual-payload assertion must stream-decompress the whole multi-GB
+    # package to list its members -- it runs last so a device-side
+    # shortfall (the more common field failure) fails fast.
     recovery_check_package_metadata "${package_path}" "${force}"
-    ota_assert_dual_payload "${package_path}"
     local want_backup="yes"
     [ -n "${no_backup}" ] && want_backup="no"
     recovery_check_space "${package_path}" "${want_backup}"
+    recovery_check_capacity
+    ota_assert_dual_payload "${package_path}"
 
     # 2) full verification into staging (fail-fast, zero side effects)
     recovery_stage_payload "${package_path}"
