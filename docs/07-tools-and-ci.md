@@ -87,6 +87,22 @@ binaries are uploaded to the OneDrive mirror's slot-first tree
 armbian/images/<slot>/<board>/<profile>[-secure-boot]/{*.img.xz,*.sha256,ota/}
 ```
 
+Board u-boot **production loaders** mirror alongside, in their own tree:
+
+```
+armbian/loaders/<slot>/<board>/<plain|secure>/{spl_loader_maskrom.bin.xz+.sha256[,rkspi_loader.img.xz+.sha256]}
+```
+
+`spl_loader_maskrom.bin` (maskrom flashing loader) exists for every board;
+`rkspi_loader.img` (SPI NOR image) only for layouts that build one
+(`BOOT_SUPPORT_SPI` boards — devkit today). `secure/` holds the signed
+rebuilds (signed FIT, `rk_sign_tool`-signed loader) and never shares a
+directory with `plain/`. Only the reference leg (cli/trixie/recovery)
+uploads — the u-boot payload is identical across the other legs of the same
+board+security. Promote rotates the loaders slots together with the images;
+a missing loaders `pre-release/` (builds predating the pipeline) leaves the
+loaders slots untouched.
+
 where `<slot>` is `pre-release`, `stable` or `previous`, and the release
 carries **no assets at all** — the slot's `tag` file is the build
 signature. The promote workflow validates that the tag file names the

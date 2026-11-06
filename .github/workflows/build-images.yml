@@ -284,12 +284,15 @@ jobs:
         # Purge the WHOLE slot once here — matrix entries share pre-release/,
         # purging inside would race parallel uploads. Filenames change
         # every build, so stale files must go. Slot-first layout: one
-        # purge clears every board's subtree at once.
+        # purge clears every board's subtree at once. The loaders/ mirror
+        # (board u-boot production artifacts) uses the same slot semantics.
         if: ${{ env.HAS_RCLONE == 'true' }}
         run: |
           set -euo pipefail
           rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
             || echo "armbian/images/pre-release did not exist (first run) — nothing to purge"
+          rclone purge "seeed-storage:armbian/loaders/pre-release" --contimeout 15s 2>/dev/null \
+            || echo "armbian/loaders/pre-release did not exist (first run) — nothing to purge"
 
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
@@ -631,6 +634,37 @@ jobs:
             rclone copy "output/images/$BOARD/ota/" "$dest/ota" \
               --transfers 4 --stats-one-line --stats 30s
           fi
+
+      - name: Upload production loaders to OneDrive pre-release
+        # Board u-boot production artifacts (spl_loader_maskrom.bin and, for
+        # layouts that build one, rkspi_loader.img), exported by the
+        # extension's pre_umount_final_image__902 hook into
+        # output/images/loaders/<board>/<plain|secure>/. The u-boot payload
+        # is identical across tiers and OTA profiles of the same
+        # board+security, so ONLY the reference leg (cli/trixie/recovery)
+        # uploads — parallel legs would race the same dest paths with
+        # differently-timestamped binaries. Missing rkspi_loader.img for
+        # boards without BOOT_SUPPORT_SPI is expected, not an error.
+        if: ${{ env.HAS_RCLONE == 'true' && matrix.tier == 'cli' && matrix.release == 'trixie' && (matrix.profile || 'recovery') == 'recovery' }}
+        working-directory: armbian-build
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dirs=(output/images/loaders/*/*)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "::error::no loaders found under output/images/loaders/ — did pre_umount_final_image__902_export_production_loaders run?"
+            exit 1
+          fi
+          for d in "${dirs[@]}"; do
+            board="$(basename "$(dirname "$d")")"
+            sec="$(basename "$d")"
+            dest="seeed-storage:armbian/loaders/pre-release/$board/$sec"
+            echo "Uploading loaders to $dest"
+            rclone mkdir "$dest" 2>/dev/null || true
+            rclone copy "$d/" "$dest" \
+              --include "*.xz" --include "*.xz.sha256" \
+              --transfers 4 --stats-one-line --stats 30s
+          done
 
       - name: Upload images/OTA to draft release (GitHub-assets mode)
         # Fork path: >2 GiB files fail loudly (GitHub asset cap).

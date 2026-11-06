@@ -12,6 +12,31 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Added
 
+#### Production loaders (maskrom / SPI flash)
+
+- **Board u-boot production artifacts exported to the OneDrive
+  `armbian/loaders/` mirror slots.** Every build now ships
+  `spl_loader_maskrom.bin` (maskrom flashing loader) in the u-boot deb for
+  **every board** — the RK3576/RK3588 spl-blobs hooks append it to
+  `target_files` gate-free, fixing industrial / module-devkit builds that
+  generated the loader and silently dropped it (their only packaging path
+  was the `BOOT_SUPPORT_SPI`-gated `board_uboot_spi_image_after_build`
+  hook, now an idempotent backstop). Boards whose layout builds one also
+  ship `rkspi_loader.img` (SPI NOR image; devkit boards today — boards
+  without `BOOT_SUPPORT_SPI` never generate it, by design). A new
+  `pre_umount_final_image__902_export_production_loaders` hook exports
+  both from the installed u-boot deb into
+  `output/images/loaders/<board>/<plain|secure>/` (xz + `.sha256`); plain
+  and secure never share a directory (secure legs rebuild both files
+  signed). CI mirrors the tree to `armbian/loaders/<slot>/<board>/<sec>/`
+  from the reference leg only (cli/trixie/recovery — the u-boot payload is
+  identical across tiers and OTA profiles of the same board+security, so
+  parallel legs would race identical paths with differently-timestamped
+  binaries), and promote rotates the loaders slots in lockstep with the
+  images (`previous ⟵ stable ⟵ pre-release`; a missing loaders
+  pre-release — builds predating the pipeline — leaves the slots
+  untouched instead of failing the promote).
+
 #### Recovery OTA
 
 - **Secure-boot rescue: dedicated `recovery` raw FIT partition.** Secure
