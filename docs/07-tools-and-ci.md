@@ -87,22 +87,6 @@ binaries are uploaded to the OneDrive mirror's slot-first tree
 armbian/images/<slot>/<board>/<profile>[-secure-boot]/{*.img.xz,*.sha256,ota/}
 ```
 
-Board u-boot **production loaders** mirror alongside, in their own tree:
-
-```
-armbian/loaders/<slot>/<board>/<plain|secure>/{spl_loader_maskrom.bin.xz+.sha256[,rkspi_loader.img.xz+.sha256]}
-```
-
-`spl_loader_maskrom.bin` (maskrom flashing loader) exists for every board;
-`rkspi_loader.img` (SPI NOR image) only for layouts that build one
-(`BOOT_SUPPORT_SPI` boards — devkit today). `secure/` holds the signed
-rebuilds (signed FIT, `rk_sign_tool`-signed loader) and never shares a
-directory with `plain/`. Only the reference leg (cli/trixie/recovery)
-uploads — the u-boot payload is identical across the other legs of the same
-board+security. Promote rotates the loaders slots together with the images;
-a missing loaders `pre-release/` (builds predating the pipeline) leaves the
-loaders slots untouched.
-
 where `<slot>` is `pre-release`, `stable` or `previous`, and the release
 carries **no assets at all** — the slot's `tag` file is the build
 signature. The promote workflow validates that the tag file names the
@@ -122,6 +106,28 @@ download page. Promoting cleans up superseded asset-less pre-releases
 `Pages - Refresh` (`refresh-pages.yml`) is a dispatch-only re-render of
 the page against the live mirror — reach for it after manual OneDrive
 cleanup.
+
+Board u-boot **production loaders** mirror alongside, in their own tree:
+
+```
+armbian/loaders/<slot>/<board>/<plain|secure>/{spl_loader_maskrom.bin.xz+.sha256[,rkspi_loader.img.xz+.sha256]}
+```
+
+`spl_loader_maskrom.bin` (maskrom flashing loader) exists for every board;
+`rkspi_loader.img` (SPI NOR image) only for layouts that build one
+(`BOOT_SUPPORT_SPI` boards — devkit today). `secure/` holds the signed
+rebuilds (signed FIT, `rk_sign_tool`-signed loader) and never shares a
+directory with `plain/`. Only the reference leg (cli/trixie/recovery)
+uploads — the u-boot payload is identical across the other legs of the same
+board+security. Promote rotates the loaders slots together with the images;
+a missing loaders `pre-release/` (builds predating the pipeline) leaves the
+loaders slots untouched.
+
+The download page renders them per board as a first-class **Loader** mode
+box (chip icon, teal/orange buttons) at the top of each security group
+(green PLAIN / red SECURE frames with inverted corner labels); the pages
+walk covers the loaders tree into the same LINKS map under a `loaders/`
+key prefix, so Loader boxes appear only when a slot actually holds them.
 
 Everything CI does is the documented local flow — the wrapper staging step,
 profiles, and secrets map 1:1 to [02-build-reference.md](02-build-reference.md).
