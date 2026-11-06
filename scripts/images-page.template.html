@@ -408,11 +408,14 @@ function slotLoaders(slotDir) {
     const kind = file === "spl_loader_maskrom.bin.xz" ? "maskrom"
                : file === "rkspi_loader.img.xz" ? "spi" : null;
     if (!kind) continue;
-    const b = out.get(parts[2]) || {};
+    // Board keys must match parse()'s BOARD_PAT capture ("rk3576-devkit"),
+    // not the manifest's full dir name ("recomputer-rk3576-devkit").
+    const board = parts[2].replace(/^recomputer-/, "");
+    const b = out.get(board) || {};
     const s = b[parts[3]] || {};
     s[kind] = path;
     b[parts[3]] = s;
-    out.set(parts[2], b);
+    out.set(board, b);
   }
   return out;
 }
