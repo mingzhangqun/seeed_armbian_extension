@@ -1,5 +1,5 @@
 name: "Deploy images page"
-description: "Walk OneDrive for share links, render the images page, and deploy it"
+description: "Bundle the mirror manifest into data.json, stage the static page, and deploy"
 
 inputs:
   tag:
@@ -62,163 +62,108 @@ runs:
       with:
         rclone_config: ${{ inputs.rclone_config }}
 
-    - name: List the mirror
+    - name: Read the mirror manifest
+      # The page's data source, assembled for data.json:
+      #   slots.json              {slot → tag} pointer file (promote flips
+      #                          it; trees never move)
+      #   trees/<tag>/manifest.json   immutable per-build
+      #                          {relpath → share URL}, written once by
+      #                          the build's release job — lives INSIDE
+      #                          the tree, so one purge drops a tag's
+      #                          payload and its index atomically
+      # This step validates (signed manifests, non-empty images, sane
+      # history) and writes data-core.json; the render step merges in
+      # the release list and emits the single data.json the page
+      # fetches. A manifest that won't fetch after one retry is a hard
+      # error — deploying anyway would strip that slot's links off a
+      # good page (same stance as the old "no share links at all"
+      # refusal).
       if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
       shell: bash
       run: |
         set -euo pipefail
-        # One recursive listing covers the whole mirror — the slot-first
-        # layout needs no board list, the page discovers boards from the
-        # walk itself. Item IDs ride along: they survive the promote
-        # rotation's server-side moves, which is what makes the share-link
-        # cache in the next steps work.
-        python3 - > tree.json <<'PY'
-        import json, subprocess, sys
-
-        base = "seeed-storage:armbian/images"
-        r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", base],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            # The mirror is unreachable. Rendering anyway would deploy a
-            # page with LINKS={} and strip every link for no reason.
-            print(f"::error::lsjson failed for {base}: {r.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-        files = json.loads(r.stdout or "[]")
-
-        # Slot-first layout: paths are "<slot>/<board>/<sub>/[ota/]<file>"
-        # plus the per-slot identity files "<slot>/tag" — read for CONTENT
-        # (the tag names the build the slot holds), never share-linked.
-        # Files outside the three slot dirs (stale layouts, foreign trees)
-        # are skipped: linking them wastes minutes per deploy and they
-        # never render on the page anyway.
-        SLOT_DIRS = ("pre-release", "stable", "previous")
-        tag_slots, payload = [], []
-        skipped = 0
-        for it in files:
-            p = it["Path"]
-            parts = p.split("/")
-            if len(parts) == 2 and parts[1] == "tag" and parts[0] in SLOT_DIRS:
-                tag_slots.append(parts[0])
-            elif parts[0] in SLOT_DIRS:
-                payload.append({"path": p, "id": it.get("ID", "")})
-            else:
-                skipped += 1
-        if skipped:
-            print(f"::warning::{skipped} files sit outside the three slot dirs (stale layout on the mirror?) — not linked, not rendered", file=sys.stderr)
-
-        slots = {}
-        for slot in tag_slots:
-            c = subprocess.run(["rclone", "cat", f"{base}/{slot}/tag"],
-                               capture_output=True, text=True)
-            if c.returncode == 0 and c.stdout.strip():
-                slots[slot] = c.stdout.strip()
-            else:
-                print(f"::warning::could not read {slot}/tag — slot renders untagged", file=sys.stderr)
-
-        print(json.dumps({"payload": payload, "slots": slots}))
-        PY
         python3 - <<'PY'
-        import json
-        d = json.load(open("tree.json"))
-        json.dump(d["slots"], open("slots.json", "w"))
-        print(f"mirror: {len(d['payload'])} payload files, slot tags {d['slots']}")
-        PY
+        import json, subprocess, sys, time
 
-    - name: Restore share-link cache
-      # Links are cached by OneDrive item ID and survive rotations; see
-      # the collect step. run_id in the key always saves a fresh entry,
-      # restore-keys falls back to the newest older one.
-      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
-      uses: actions/cache/restore@v4
-      with:
-        path: linkcache
-        key: onedrive-links-v1-${{ github.run_id }}
-        restore-keys: |
-          onedrive-links-v1-
+        IBASE = "seeed-storage:armbian/images"
 
-    - name: Collect share links
-      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        python3 - > links.json <<'PY'
-        import json, os, subprocess, sys
-        from concurrent.futures import ThreadPoolExecutor
-
-        base = "seeed-storage:armbian/images"
-        payload = json.load(open("tree.json"))["payload"]
-
-        cached = {}
-        try:
-            cached = json.load(open("linkcache/links-by-id.json"))
-        except FileNotFoundError:
-            pass
-
-        # Share links are keyed by the OneDrive item ID: IDs survive the
-        # promote rotation (server-side moves), so a rotated slot is a
-        # full cache hit and only genuinely new files pay the ~2-4 s
-        # rclone link call (serial per-file linking blew a 10-minute job
-        # on a full matrix). Bounded parallelism covers the misses.
-        need = [e for e in payload if e["id"] and e["id"] not in cached]
-
-        def make_link(e):
-            lr = subprocess.run(["rclone", "link", "--timeout", "60s", f"{base}/{e['path']}"],
-                                capture_output=True, text=True)
-            ok = lr.returncode == 0
-            return e["id"], ok, lr.stdout.strip() if ok else lr.stderr.strip()
-
-        fresh, failures = {}, 0
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            for i, (iid, ok, out) in enumerate(ex.map(make_link, need), 1):
-                if ok:
-                    fresh[iid] = out
-                else:
-                    failures += 1
-                    print(f"::warning::link failed: {out}", file=sys.stderr)
-                if i % 25 == 0:
-                    print(f"  … {i}/{len(need)} links", file=sys.stderr)
-
-        merged = {**cached, **fresh}
-        # Template-facing map stays path → URL (schema unchanged).
-        links = {e["path"]: merged[e["id"]] for e in payload
-                 if e["id"] and e["id"] in merged}
-        if payload and not links:
-            # lsjson worked but no link could be had — systematic
-            # (throttling/auth), not per-file noise. Deploying would strip
-            # every link from the page.
-            print(f"::error::no share links at all (cache empty, {failures}/{len(need)} fresh calls failed) — OneDrive throttled? Refusing to deploy a stripped page.", file=sys.stderr)
+        def rcat(path, retries=1):
+            r = None
+            for attempt in range(retries + 1):
+                r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
+                                   capture_output=True, text=True)
+                if r.returncode == 0:
+                    return r.stdout
+                if attempt < retries:
+                    time.sleep(5)
+            print(f"::error::rclone cat failed for {path}: {r.stderr.strip()}", file=sys.stderr)
             sys.exit(1)
-        for e in payload:
-            if not e["id"] or e["id"] not in merged:
-                print(f"::warning::no share link for {e['path']}", file=sys.stderr)
 
-        # Re-cache, pruned to the ids on the mirror RIGHT NOW (drops
-        # entries from slots that were rotated away or purged).
-        live_ids = {e["id"] for e in payload if e["id"]}
-        os.makedirs("linkcache", exist_ok=True)
-        json.dump({k: v for k, v in merged.items() if k in live_ids},
-                  open("linkcache/links-by-id.json", "w"))
-        print(f"links: {len(links)}/{len(payload)} "
-              f"({len(fresh)} freshly linked, {len(links) - len(fresh)} cached, {failures} failed)",
-              file=sys.stderr)
-        print(json.dumps(links))
+        # The pointer file is the mirror's state: absent means it was
+        # lost (hand-delete / accident) — refuse and point at the remedy.
+        try:
+            slots_in = json.loads(rcat(f"{IBASE}/slots.json"))
+        except json.JSONDecodeError as e:
+            print(f"::error::slots.json is not valid JSON ({e}) — fix by hand on OneDrive", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(slots_in, dict):
+            print(f"::error::slots.json must be a JSON object, got {type(slots_in).__name__}", file=sys.stderr)
+            sys.exit(1)
+
+        manifests, page_slots = {}, {}
+
+        def take(tag):
+            try:
+                m = json.loads(rcat(f"{IBASE}/trees/{tag}/manifest.json"))
+            except json.JSONDecodeError as e:
+                print(f"::error::trees/{tag}/manifest.json is not valid JSON ({e})", file=sys.stderr)
+                sys.exit(1)
+            if m.get("tag") != tag:
+                print(f"::error::trees/{tag}/manifest.json is signed {m.get('tag')!r} — mismatch", file=sys.stderr)
+                sys.exit(1)
+            if not (m.get("images") or {}):
+                print(f"::error::trees/{tag}/manifest.json has an empty images section — a referenced tree must carry files", file=sys.stderr)
+                sys.exit(1)
+            manifests[tag] = m
+
+        # primary slots (scalar)
+        for slot in ("pre-release", "stable"):
+            tag = slots_in.get(slot)
+            if not tag:
+                continue    # absent/null → slot hidden, like an untagged slot dir
+            take(tag)
+            page_slots[slot] = tag
+
+        # history array (older stables, newest-first). Tolerate a legacy
+        # scalar "previous" key from a pre-history-array slots.json.
+        hist = slots_in.get("history")
+        if not isinstance(hist, list):
+            hist = [slots_in["previous"]] if slots_in.get("previous") else []
+        seen = set()
+        for tag in hist:
+            if not isinstance(tag, str) or not tag or tag in seen \
+               or tag in (slots_in.get("stable"), slots_in.get("pre-release")):
+                print(f"::error::slots.json history holds an invalid entry {tag!r} — fix by hand on OneDrive", file=sys.stderr)
+                sys.exit(1)
+            seen.add(tag)
+            take(tag)
+        if hist:
+            page_slots["history"] = hist
+
+        json.dump({"slots": page_slots, "manifests": manifests},
+                  open("data-core.json", "w"))
+        n_links = sum(len(m.get("images") or {}) + len(m.get("loaders") or {})
+                      for m in manifests.values())
+        print(f"manifest: {len(page_slots)} slot keys, history={len(hist)}, "
+              f"{len(manifests)} manifests, {n_links} links total", file=sys.stderr)
         PY
-        echo "links collected: $(python3 -c 'import json; print(len(json.load(open("links.json"))))')"
 
-    - name: Save share-link cache
-      # Cache key includes run_id so each run saves a fresh entry; restore-keys
-      # falls back to the newest older one. Prune strategy: the cache is
-      # keyed by OneDrive item ID and entries are pruned to live ids on each
-      # collect step (see above), so the cache stays bounded by the current
-      # mirror size. No time-based expiry — a stale cache entry is harmless
-      # (just a miss on next walk).
-      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
-      uses: actions/cache/save@v4
-      with:
-        path: linkcache
-        key: onedrive-links-v1-${{ github.run_id }}
-
-    - name: Render the page
+    - name: Stage the page + data.json
+      # The template is fully static — no substitutions. This step only
+      # merges data-core.json (mirror state) with the release list into
+      # the ONE data.json the page fetches; index.html is a verbatim
+      # copy of the template. One bundled file = one fetch = every CDN
+      # cache window internally consistent.
       if: steps.gate.outputs.skip != 'true'
       shell: bash
       env:
@@ -231,18 +176,16 @@ runs:
         [ -n "$PAGE_REPO" ] \
           || { echo "::error::PAGE_REPO empty"; exit 1; }
 
-        if [ "${HAS_RCLONE:-}" = "true" ] && [ -f links.json ]; then
-          :   # links.json/slots.json come from the walk step
+        if [ "${HAS_RCLONE:-}" = "true" ] && [ -f data-core.json ]; then
+          :   # data-core.json comes from the manifest step
         else
-          echo '{}' > links.json
-          echo '{}' > slots.json
+          echo '{"slots": {}, "manifests": {}}' > data-core.json
         fi
 
-        # Fetch release list at build time and embed it — eliminates the
-        # runtime GitHub API call (60 req/hr/IP limit for unauthenticated
-        # clients) and makes the page load instantly. The API throws
-        # occasional 504s (2026-11-03 refresh run) — retry instead of
-        # killing an otherwise-good deploy.
+        # Fetch the release list at deploy time — the page itself makes
+        # zero runtime API calls (60 req/hr/IP limit for unauthenticated
+        # clients). The API throws occasional 504s (2026-11-03 refresh
+        # run) — retry instead of killing an otherwise-good deploy.
         ok=""
         for attempt in 1 2 3; do
           if gh release list --repo "$PAGE_REPO" --limit 30 \
@@ -257,55 +200,44 @@ runs:
         jq '[.[] | {tag_name: .tagName, prerelease: .isPrerelease, published_at: .publishedAt}]' \
           < releases.raw > releases.json
 
-        # Substitute the placeholders from FILES, never environment
-        # variables: the share-link map grows with the mirror and blew
-        # past the kernel's 128 KiB per-argv/env-string limit, which made
-        # every exec in this step (cat/gh/jq) fail with "Argument list
-        # too long" (2026-11-02, 414-file walk).
+        cp scripts/images-page.template.html images.html
+
+        # Assemble via FILES, never command lines — the manifest map
+        # blows past the kernel's 128 KiB per-argv limit (2026-11-02,
+        # "Argument list too long").
         python3 - <<'PY'
         import json, os
 
-        def load(p):
-            try:
-                return open(p).read().strip() or "{}"
-            except FileNotFoundError:
-                return "{}"
-
-        vals = {
-            "PAGE_REPO": os.environ["PAGE_REPO"],
-            "PAGE_LINKS": load("links.json"),
-            "PAGE_RELEASES": load("releases.json"),
-            "PAGE_SLOTS": load("slots.json"),
+        core = json.load(open("data-core.json"))
+        releases = json.load(open("releases.json"))
+        data = {
+            "repo": os.environ["PAGE_REPO"],
+            "slots": core["slots"],
+            "manifests": core["manifests"],
+            "releases": releases,
         }
-        for k, v in vals.items():
-            if k != "PAGE_REPO":
-                json.loads(v)  # each must be a valid JSON document
-
-        html = open("scripts/images-page.template.html").read()
-        for k, v in vals.items():
-            html = html.replace("$" + k, v)
-        leftover = [k for k in vals if ("$" + k) in html]
-        if leftover:
-            raise SystemExit(f"::error::placeholders not substituted: {leftover}")
-        open("images.html", "w").write(html)
+        json.dump(data, open("data.json", "w"), separators=(",", ":"))
+        print(f"data.json: repo={data['repo']} slots={list(data['slots'])} "
+              f"{len(data['manifests'])} manifests, {len(releases)} releases")
         PY
-        grep -q "const CFG = Object.freeze({ repo: \"$PAGE_REPO\" });" images.html \
-          || { echo "::error::repo not baked into the page"; exit 1; }
-        # LINKS/SLOTS must bake into syntactically valid JS object literals —
-        # catches stray stdout polluting links.json/slots.json upstream.
-        grep -qE '^const LINKS = \{.*\};$' images.html \
-          || { echo "::error::LINKS did not render as a JSON object — links.json is malformed?"; exit 1; }
-        grep -qE '^const SLOTS = \{.*\};$' images.html \
-          || { echo "::error::SLOTS did not render as a JSON object — slots.json is malformed?"; exit 1; }
-        echo "=== page $(wc -c < images.html) bytes ==="
+
+        # Tripwires: the template must carry no placeholders, and the
+        # page must actually load the data bundle.
+        if grep -q '\$PAGE_' images.html; then
+          echo "::error::template still holds \$PAGE_ placeholders"
+          exit 1
+        fi
+        grep -q 'fetch("data.json"' images.html \
+          || { echo "::error::page does not fetch data.json — template mismatch?"; exit 1; }
+        python3 -c 'import json; d = json.load(open("data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
+        echo "=== index.html $(wc -c < images.html) bytes + data.json $(wc -c < data.json) bytes ==="
 
     # ── actions mode: deploy through the run's Pages deployment ──
 
     - name: Clear stale github-pages artifacts (actions mode)
       # deploy-pages@v4 refuses when the run already holds a github-pages
-      # artifact — and a run CAN legitimately deploy twice (build-images:
-      # post-purge sync + post-release deploy). Drop this run's earlier
-      # artifact before uploading a fresh one.
+      # artifact — and a run CAN legitimately deploy twice. Drop this
+      # run's earlier artifact before uploading a fresh one.
       if: steps.gate.outputs.mode == 'actions'
       shell: bash
       env:
@@ -334,7 +266,8 @@ runs:
         set -euo pipefail
         mkdir -p site/images
         cp images.html site/images/index.html
-        echo "staged images/index.html ($(wc -c < images.html) bytes)"
+        cp data.json site/images/data.json
+        echo "staged images/index.html + images/data.json ($(wc -c < data.json) bytes data)"
 
     - name: Upload pages artifact (actions mode)
       if: steps.gate.outputs.mode == 'actions'
@@ -357,10 +290,10 @@ runs:
         TAG: ${{ inputs.tag }}
       run: |
         set -euo pipefail
-        # images.html embeds the full link map (hundreds of KB) — pass the
-        # JSON body via stdin, never the command line: a big page blew the
-        # kernel's 128 KiB per-arg limit and killed gh with "Argument list
-        # too long" (exit 126) before any API call.
+        # data.json can reach hundreds of KB — pass the JSON body via
+        # stdin, never the command line: a big payload blew the kernel's
+        # 128 KiB per-arg limit and killed gh with "Argument list too
+        # long" (exit 126) before any API call.
         python3 - "$REPO" "$TAG" <<'PYEOF'
         import base64, json, subprocess, sys
 
@@ -374,16 +307,23 @@ runs:
                 sys.exit(1)
             return r.stdout.strip()
 
-        html = base64.b64encode(open("images.html", "rb").read()).decode()
-        blob = gh("--method", "POST", f"repos/{repo}/git/blobs", "--input", "-",
-                  "--jq", ".sha",
-                  input=json.dumps({"content": html, "encoding": "base64"}))
-        print(f"blob: {blob}")
+        def put_blob(local, path):
+            content = base64.b64encode(open(local, "rb").read()).decode()
+            sha = gh("--method", "POST", f"repos/{repo}/git/blobs", "--input", "-",
+                     "--jq", ".sha",
+                     input=json.dumps({"content": content, "encoding": "base64"}))
+            print(f"blob {path}: {sha}")
+            return sha
+
+        # Two files: the static shell + the data bundle it fetches.
+        entries = [{"path": "images/index.html", "mode": "100644", "type": "blob",
+                    "sha": put_blob("images.html", "images/index.html")},
+                   {"path": "images/data.json", "mode": "100644", "type": "blob",
+                    "sha": put_blob("data.json", "images/data.json")}]
 
         tree = gh("--method", "POST", f"repos/{repo}/git/trees", "--input", "-",
                   "--jq", ".sha",
-                  input=json.dumps({"tree": [{"path": "images/index.html", "mode": "100644",
-                                               "type": "blob", "sha": blob}]}))
+                  input=json.dumps({"tree": entries}))
         print(f"tree: {tree}")
 
         # gh api prints the raw error body to stdout on failure, so a 404

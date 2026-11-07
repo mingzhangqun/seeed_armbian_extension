@@ -36,6 +36,20 @@ Covers the work against the initial import (merge base `9980aee`,
   images (`previous ⟵ stable ⟵ pre-release`; a missing loaders
   pre-release — builds predating the pipeline — leaves the slots
   untouched instead of failing the promote).
+- **Images page: Loader boxes + security-group frames.** The download
+  page now renders each board's downloads as two security groups (green
+  PLAIN / red SECURE frames with solid inverted corner labels, replacing
+  the per-box Secure badge), each opening with a first-class **Loader**
+  mode box (chip icon; teal plain / orange secure buttons — a third color
+  tier so factory artifacts never read as OS images). Rows retitle
+  CLI→Minimal / keep Desktop, with terminal/monitor icons; all buttons
+  are equal-width pills and button groups never split mid-pair (a narrow
+  row wraps the whole group). Every board photo gains an "Armbian
+  Images" button (armbian-orange, embedded 32px logo data-URI, links to
+  the board's armbian.com page). The pages walk covers the
+  armbian/loaders/ tree into the same LINKS map under a `loaders/` key
+  prefix — Loader boxes appear only when a slot actually holds them, and
+  boards without a SPI image simply show the Maskrom pair.
 
 #### Recovery OTA
 

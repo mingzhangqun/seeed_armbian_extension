@@ -1,16 +1,17 @@
 name: "Pages - Refresh"
 
-# Re-render and re-push the images page against the CURRENT state of the
-# OneDrive mirror and the release list — e.g. after manual cleanup on
-# OneDrive. Deploy-only: touches nothing but the gh-pages branch.
-# Hard-fails if the mirror is unreachable — a refresh must never strip the
-# links off a good page over a transient OneDrive outage.
+# Re-render and re-push the images page against the CURRENT manifest
+# state of the OneDrive mirror and the release list — e.g. after manual
+# cleanup on OneDrive. Deploy-only: touches nothing but the gh-pages
+# branch. Hard-fails if the manifest is unreadable — a refresh must
+# never strip the links off a good page over a transient OneDrive
+# outage.
 
 on:
   workflow_dispatch:
 
-# Serialize with builds and promotes: the walk must not sample a tree
-# that a build is filling or a promote is rotating.
+# Serialize with builds and promotes: the manifest read must not race a
+# slots.json flip.
 concurrency:
   group: images-mirror
   cancel-in-progress: false
@@ -18,7 +19,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The manifest read (≤4 rclone cats) replaced the share-link walk
+    # that needed 45 minutes on a cold cache.
+    timeout-minutes: 10
     # pages/id-token: deploy-pages actions-mode deployment.
     permissions:
       contents: read
@@ -46,7 +49,7 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
-      - name: Check the mirror is reachable
+      - name: Check the manifest is readable
         id: mirror
         run: |
           set -euo pipefail
@@ -55,16 +58,14 @@ jobs:
           release_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
           echo "release_repo=$release_repo" >> "$GITHUB_OUTPUT"
           echo "release repo: $release_repo"
-          # "lsd failed" and "lsd came back empty" are different situations:
-          # the first means OneDrive is unreachable and a refresh would
-          # strip every link off the page for no reason (hard fail); the
-          # second is a legitimately emptied mirror and still deploys an
-          # empty page. Boards need no discovery — the slot-first walk
-          # lists the whole images/ tree in one go.
-          if ! rclone lsd seeed-storage:armbian/images --contimeout 15s > /dev/null 2> lsd.err; then
-            echo "::error::rclone lsd failed — OneDrive unreachable? $(tr '\n' ' ' < lsd.err)"
+          # The pointer file is the page's whole data source now —
+          # readable means the page is buildable. (slots.json absent =
+          # mirror state lost: restore the pointer file by hand.)
+          if ! rclone cat seeed-storage:armbian/images/slots.json --contimeout 15s > /dev/null 2> cat.err; then
+            echo "::error::slots.json unreadable — OneDrive unreachable, or the mirror's pointer file is gone. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve. $(tr '\n' ' ' < cat.err)"
             exit 1
           fi
+          echo "slots.json OK"
 
       - name: Deploy images page
         uses: ./.github/actions/deploy-pages

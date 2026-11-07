@@ -2,7 +2,8 @@ name: setup-onedrive
 description: >
   Install rclone + configure the seeed-storage OneDrive remote. Single
   place to bump the pinned rclone version for every job that touches
-  OneDrive. Files land under armbian/images/<slot>/<board>/<profile>[-secure-boot]/.
+  OneDrive. Files land under armbian/images/trees/<tag>/<board>/<profile>[-secure-boot]/
+  (tag-addressed; slots.json + manifests/<tag>.json index them).
 
 inputs:
   rclone_config:

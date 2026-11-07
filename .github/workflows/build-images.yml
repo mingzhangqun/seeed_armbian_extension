@@ -67,9 +67,11 @@ env:
   DOCKER_IMAGE: "ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest"
 
 # Serialize every run that touches the images mirror (this group is shared
-# with promote/refresh/test): init-release purges pre-release/ while the
-# matrix fills it, promote rotates the slots, the page walk samples the
-# tree — none of those may overlap.
+# with promote/refresh): init-release resets this run's tree while
+# the matrix fills it, promote flips slots.json, the page reads the
+# manifest — none of those may overlap. NOTE: GitHub keeps only ONE
+# pending run per group — a later dispatch evicts a queued one, so verify
+# a dispatched run actually started (dispatch is not delivery).
 concurrency:
   group: images-mirror
   cancel-in-progress: false
@@ -260,12 +262,12 @@ jobs:
           echo "armbian-build: ${{ steps.gen.outputs.ab_repo }}"
 
   # Creates the single draft release all entries upload into, and resets
-  # the OneDrive pre-release staging dir.
+  # this run's tag-addressed staging tree on the OneDrive mirror.
   init-release:
     name: Init draft release
     needs: [probe-secrets, plan]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
@@ -280,19 +282,79 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
-      - name: Reset OneDrive pre-release staging
-        # Purge the WHOLE slot once here — matrix entries share pre-release/,
-        # purging inside would race parallel uploads. Filenames change
-        # every build, so stale files must go. Slot-first layout: one
-        # purge clears every board's subtree at once. The loaders/ mirror
-        # (board u-boot production artifacts) uses the same slot semantics.
+      - name: Reset staging + garbage-collect unreferenced trees
+        # Tag-addressed layout: staging is trees/<tag>/ (not a shared
+        # slot), so the reset is scoped to THIS run's tag — same-minute
+        # re-runs start fresh without touching the slots a page render
+        # depends on. The GC replaces the old "purge the whole
+        # pre-release slot" janitor: promote runs manually, sometimes
+        # several builds apart, and every build leaves a full tree
+        # (~70-90 files, tens of GB) behind — unreferenced trees must be
+        # purged here or the mirror grows without bound between promotes.
         if: ${{ env.HAS_RCLONE == 'true' }}
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
-            || echo "armbian/images/pre-release did not exist (first run) — nothing to purge"
-          rclone purge "seeed-storage:armbian/loaders/pre-release" --contimeout 15s 2>/dev/null \
-            || echo "armbian/loaders/pre-release did not exist (first run) — nothing to purge"
+          # slots.json doubles as the migration marker: absent means the
+          # mirror still runs the legacy slot layout and every new-code
+          # path (upload/pointer/page) would misfire — refuse instead.
+          if ! rclone cat "seeed-storage:armbian/images/slots.json" --contimeout 15s >/dev/null 2>&1; then
+            echo "::error::armbian/images/slots.json not found — the mirror's pointer file is missing. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve."
+            exit 1
+          fi
+
+          rclone purge "seeed-storage:armbian/images/trees/$TAG" --contimeout 15s 2>/dev/null \
+            || echo "armbian/images/trees/$TAG did not exist (fresh tag) — nothing to purge"
+          rclone purge "seeed-storage:armbian/loaders/trees/$TAG" --contimeout 15s 2>/dev/null \
+            || echo "armbian/loaders/trees/$TAG did not exist — nothing to purge"
+          # The manifest lives inside trees/<tag>/ — the purge above took it.
+
+          python3 <<'PY'
+          import json, os, subprocess, sys
+
+          tag = os.environ["TAG"]
+          IBASE = "seeed-storage:armbian/images"
+          LBASE = "seeed-storage:armbian/loaders"
+
+          def rcat(path):
+              r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f"::error::rclone cat failed for {path}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+              return r.stdout
+
+          def lsdirs(path):
+              r = subprocess.run(["rclone", "lsjson", "--dirs-only", path],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  if "not found" in r.stderr.lower():
+                      return []    # trees/ not created yet — nothing to GC
+                  print(f"::error::lsjson failed for {path}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+              return [it["Path"] for it in json.loads(r.stdout or "[]")]
+
+          slots = json.loads(rcat(f"{IBASE}/slots.json"))
+          # referenced = primary slots + the history array (tolerate the
+          # legacy scalar "previous")
+          hist = slots.get("history")
+          if not isinstance(hist, list):
+              hist = [slots["previous"]] if slots.get("previous") else []
+          referenced = {t for t in (slots.get("stable"), slots.get("pre-release"),
+                                    *hist) if t}
+
+          # The manifest rides inside trees/<tag>/, so purging an
+          # unreferenced tree drops its payload AND its index in one op —
+          # no half-deleted states to reconcile.
+          for base in (IBASE, LBASE):
+              for t in lsdirs(f"{base}/trees"):
+                  if t == tag or t in referenced:
+                      continue
+                  print(f"::notice::purging unreferenced tree {t} on {base}")
+                  subprocess.run(["rclone", "purge", f"{base}/trees/{t}"], check=True)
+          print(f"GC done: referenced tags {sorted(referenced) or 'none'}, this run's tag {tag}")
+          PY
 
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
@@ -316,8 +378,9 @@ jobs:
             target_args=(--target "$GITHUB_SHA")
           fi
           # Self-describing title derived from the tag (YYMMDD-HHMM UTC).
-          # No build-info asset: the slot's tag file is the build signature
-          # (promote verifies it), the release itself carries no metadata.
+          # No build-info asset: the tree's manifest.json (its "tag"
+          # field is the build signature, promote verifies it) is the
+          # only metadata; the release itself carries none.
           boards_n="$(jq length <<<"$BOARDS")"
           images_n="$(jq '.include | length' <<<"$MATRIX")"
           title="Images 20${TAG:0:2}-${TAG:2:2}-${TAG:4:2} ${TAG:7:2}:${TAG:9:2} UTC · ${boards_n} boards · ${images_n} images"
@@ -329,39 +392,11 @@ jobs:
             "${target_args[@]}" \
             --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
-  # The purge in init-release deleted the mirror's pre-release/ slot; the
-  # deployed page still advertises it (with dead links) for the whole
-  # build window. Catch it up immediately: stable/previous are full
-  # cache hits in the walk, so this costs under a minute. OneDrive mode
-  # only — without the mirror there is no purge and nothing to sync.
-  pages-purge:
-    name: Deploy images page (post-purge sync)
-    needs: [probe-secrets, plan, init-release]
-    if: ${{ !cancelled() && needs.init-release.result == 'success' && needs.probe-secrets.outputs.has_rclone == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-      actions: write
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Deploy images page
-        uses: ./.github/actions/deploy-pages
-        with:
-          tag: ${{ needs.plan.outputs.tag }}
-          # The page always lives on the build-source repo (armbian-build),
-          # pushed cross-repo to its gh-pages via the API (needs
-          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
-          repo: ${{ needs.plan.outputs.release_repo }}
-          release_repo: ${{ needs.plan.outputs.release_repo }}
-          has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
-          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+  # NOTE: no post-purge page sync anymore. The tag-addressed layout never
+  # touches slots.json during the build window, so the deployed page stays
+  # valid (the previous pre-release remains visible until THIS build
+  # flips the pointer in the release job) — better than the old slot
+  # purge, which wiped the pre-release box off the page for hours.
 
   build:
     needs: [probe-secrets, plan, init-release]
@@ -600,12 +635,12 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
-      - name: Upload images to OneDrive pre-release (OneDrive mode)
-        # dest = armbian/images/pre-release/<board>/<sub>[/ota]/ (slot-first
-        # layout) where <sub> = "<profile>" or "<profile>-secure-boot".
-        # No manifests: promote-images.yml validates slot shape (the tag
-        # file must name the release being promoted; every <board>/<sub>/
-        # must be complete).
+      - name: Upload images to this tag's tree (OneDrive mode)
+        # dest = armbian/images/trees/<tag>/<board>/<sub>[/ota]/ (tag-
+        # addressed: the tree never moves; promote only flips slots.json).
+        # <sub> = "<profile>" or "<profile>-secure-boot". The release job
+        # links these files into trees/<tag>/manifest.json after the matrix
+        # lands; promote validates the tree shape then.
         if: ${{ env.HAS_RCLONE == 'true' }}
         working-directory: armbian-build
         env:
@@ -623,7 +658,7 @@ jobs:
 
           sub="$PROFILE"
           [ -n "$SECURITY" ] && sub="$sub-$SECURITY"
-          dest="seeed-storage:armbian/images/pre-release/$BOARD/$sub"
+          dest="seeed-storage:armbian/images/trees/$TAG/$BOARD/$sub"
           echo "Uploading to $dest"
           rclone mkdir "$dest" 2>/dev/null || true
           rclone copy output/images/ "$dest" \
@@ -635,7 +670,7 @@ jobs:
               --transfers 4 --stats-one-line --stats 30s
           fi
 
-      - name: Upload production loaders to OneDrive pre-release
+      - name: Upload production loaders to this tag's tree
         # Board u-boot production artifacts (spl_loader_maskrom.bin and, for
         # layouts that build one, rkspi_loader.img), exported by the
         # extension's pre_umount_final_image__902 hook into
@@ -645,6 +680,8 @@ jobs:
         # uploads — parallel legs would race the same dest paths with
         # differently-timestamped binaries. Missing rkspi_loader.img for
         # boards without BOOT_SUPPORT_SPI is expected, not an error.
+        # Tag-addressed dest: trees/<tag>/<board>/<sec>/ (link-manifested
+        # by the release job; rotates with images via slots.json).
         if: ${{ env.HAS_RCLONE == 'true' && matrix.tier == 'cli' && matrix.release == 'trixie' && (matrix.profile || 'recovery') == 'recovery' }}
         working-directory: armbian-build
         run: |
@@ -658,7 +695,7 @@ jobs:
           for d in "${dirs[@]}"; do
             board="$(basename "$(dirname "$d")")"
             sec="$(basename "$d")"
-            dest="seeed-storage:armbian/loaders/pre-release/$board/$sec"
+            dest="seeed-storage:armbian/loaders/trees/$TAG/$board/$sec"
             echo "Uploading loaders to $dest"
             rclone mkdir "$dest" 2>/dev/null || true
             rclone copy "$d/" "$dest" \
@@ -713,11 +750,15 @@ jobs:
 
   release:
     needs: [probe-secrets, plan, build]
-    # Flips the draft release to pre-release after all entries upload.
+    # Finalizes the tag's tree after all entries upload: share links →
+    # manifest → slot pointer → THEN flips the draft release visible.
     # Promotion to Stable is promote-images.yml (separate dispatch).
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The per-file rclone link calls (~70-90 files, OneDrive throttling
+    # seen at scale) sit between a multi-hour matrix success and the
+    # publish — give them room.
+    timeout-minutes: 45
     permissions:
       contents: write
     env:
@@ -735,26 +776,121 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
+      - name: Link the tree, write manifest + slot pointer
+        # Ordering is the crash contract (same principle as the old
+        # <slot>/tag write): manifest and pointer land BEFORE the release
+        # becomes visible, so a publish implies a fully-linked tree. A
+        # crash mid-sequence leaves a draft release — cleanup rolls the
+        # tree, manifest AND pointer back.
+        # The slots.json update is a poor-man's CAS: re-read immediately
+        # before writing and abort if stable/previous changed since the
+        # first read — CI writers are serialized by the images-mirror
+        # group, but a human editing the file via the OneDrive web UI
+        # must not be silently clobbered.
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, os, subprocess, sys, time
+          from concurrent.futures import ThreadPoolExecutor
+          from datetime import datetime, timezone
+
+          tag = os.environ["TAG"]
+          IBASE = "seeed-storage:armbian/images"
+          LBASE = "seeed-storage:armbian/loaders"
+
+          def lsjson_files(path):
+              r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", path],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f"::error::lsjson failed for {path}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+              return [it["Path"] for it in json.loads(r.stdout or "[]")]
+
+          def rcat(path, content):
+              r = subprocess.run(["rclone", "rcat", path], input=content,
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f"::error::rcat failed for {path}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+
+          # Tree-relative keys (no tag prefix): the manifest stays valid
+          # whichever slot later points at it. No root identity files
+          # exist yet at this point (the manifest itself is written
+          # after this walk; the old tag file was folded into its
+          # "tag" field).
+          img_files = lsjson_files(f"{IBASE}/trees/{tag}")
+          ldr_files = lsjson_files(f"{LBASE}/trees/{tag}")
+
+          def make_link(base, rel):
+              dest = f"{base}/trees/{tag}/{rel}"
+              for attempt in (1, 2):
+                  lr = subprocess.run(["rclone", "link", "--timeout", "60s", dest],
+                                      capture_output=True, text=True)
+                  if lr.returncode == 0 and lr.stdout.strip():
+                      return rel, True, lr.stdout.strip()
+                  err = lr.stderr.strip()
+                  if attempt == 1:
+                      time.sleep(3)
+              return rel, False, err
+
+          def link_all(base, rels):
+              out, failures = {}, []
+              with ThreadPoolExecutor(max_workers=4) as ex:
+                  for i, (rel, ok, res) in enumerate(ex.map(lambda r: make_link(base, r), rels), 1):
+                      if ok:
+                          out[rel] = res
+                      else:
+                          failures.append(rel)
+                          print(f"::warning::link failed: {rel}: {res}", file=sys.stderr)
+                      if i % 25 == 0:
+                          print(f"  … {i}/{len(rels)} links ({base.rsplit(':', 1)[-1]})", file=sys.stderr)
+              return out, failures
+
+          images, ifail = link_all(IBASE, img_files)
+          loaders, lfail = link_all(LBASE, ldr_files)
+          if not images:
+              print(f"::error::no image links created ({len(ifail)}/{len(img_files)} failed) — OneDrive throttled? Refusing to publish an unlinkable tree.", file=sys.stderr)
+              sys.exit(1)
+
+          manifest = {
+              "tag": tag,
+              "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "images": images,
+              "loaders": loaders,
+          }
+          rcat(f"{IBASE}/trees/{tag}/manifest.json", json.dumps(manifest, indent=1, sort_keys=True))
+          print(f"manifest written into trees/{tag}/: {len(images)} image links, {len(loaders)} loader links, {len(ifail) + len(lfail)} failures")
+
+          # slots.json pointer — read-verify-write.
+          r = subprocess.run(["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
+                             capture_output=True, text=True)
+          if r.returncode != 0:
+              print(f"::error::cannot read slots.json: {r.stderr.strip()}", file=sys.stderr)
+              sys.exit(1)
+          slots = json.loads(r.stdout)
+          expected = {k: slots.get(k) for k in ("stable", "previous")}
+          r2 = subprocess.run(["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
+                              capture_output=True, text=True)
+          if r2.returncode != 0 or {k: json.loads(r2.stdout).get(k) for k in ("stable", "previous")} != expected:
+              print("::error::slots.json changed between reads — a concurrent writer (human edit?) is active; aborting", file=sys.stderr)
+              sys.exit(1)
+          slots["pre-release"] = tag
+          rcat(f"{IBASE}/slots.json", json.dumps(slots, indent=1, sort_keys=True) + "\n")
+          print(f"slots.json: pre-release → {tag} (stable/previous untouched)")
+          PY
+
       - name: Publish release
         run: |
           set -euo pipefail
-          # Tag the pre-release slot FIRST, then flip the release visible.
-          # The <slot>/tag file is the page's slot binding (promote carries
-          # it into stable/ on rotation) — an untagged slot stays hidden —
-          # so a tag-write failure must leave the release in draft: this
-          # job fails and gh release edit never runs.
-          if [ "${HAS_RCLONE}" = "true" ]; then
-            printf '%s\n' "$TAG" | rclone rcat "seeed-storage:armbian/images/pre-release/tag"
-            echo "tagged pre-release slot: $TAG"
-          fi
+          # Mirror state is complete (manifest + pointer) — flip visible.
           gh release edit "$TAG" \
             --repo "$TARGET_REPO" \
             --draft=false \
             --prerelease
 
-  # Template/config sync for the images page. Content is rendered
-  # client-side, so new pre-releases appear on the already-deployed page
-  # without a push.
+  # Template/config sync for the images page. The manifest read (≤4
+  # rclone cats) replaced the mirror walk, so this is fast again.
   pages:
     name: Deploy images page (template sync)
     needs: [probe-secrets, plan, release]
@@ -766,8 +902,7 @@ jobs:
       pages: write
       id-token: write
       actions: write
-    # The OneDrive share-link walk alone can take minutes on a full matrix.
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -795,7 +930,7 @@ jobs:
     # On success neither cancelled() nor failure() holds and this skips.
     # Ported from test-build.yml (deleted 2026-11-05) — its cleanup was
     # the only draft sweeper in the repo.
-    needs: [probe-secrets, preflight, plan, init-release, pages-purge, build, release, pages]
+    needs: [probe-secrets, preflight, plan, init-release, build, release, pages]
     if: ${{ always() && (cancelled() || failure()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -816,7 +951,14 @@ jobs:
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
-      - name: Delete orphaned draft + partial slot
+      - name: Delete orphaned draft + partial tree + slot pointer
+        # failure()/cancelled() are workflow-wide — a pages-job flake
+        # after a successful release lands here too, so the isDraft gate
+        # below is what protects a PUBLISHED release's tree from purging.
+        # The pointer reset is the janitor duty the old slot layout got
+        # for free (a purged slot dir vanished from the walk): a dangling
+        # slots.json.pre-release would make every later page deploy hard-
+        # fail on the missing manifest and freeze the deployed page.
         run: |
           set -euo pipefail
           if [ -z "${TAG:-}" ]; then
@@ -828,7 +970,7 @@ jobs:
             exit 0
           fi
           if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
-            echo "::notice::$TAG is already published (the release job ran) — keeping release and slot"
+            echo "::notice::$TAG is already published (the release job ran) — keeping release and tree"
             exit 0
           fi
           # Still a draft: the run died before publishing — roll it back.
@@ -841,10 +983,40 @@ jobs:
           gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
           echo "deleted orphan draft release $TAG"
           if [ "${HAS_RCLONE}" = "true" ]; then
-            # The slot was never tagged (the release job writes <slot>/tag
-            # before publishing), so whatever the matrix uploaded renders
-            # nowhere. Purge it now instead of leaving it for the next
-            # run's init-release.
-            rclone purge "seeed-storage:armbian/images/pre-release" --contimeout 15s 2>/dev/null \
-              || echo "armbian/images/pre-release did not exist — nothing to purge"
+            # The tree never became visible (the release job writes the
+            # manifest + pointer before publishing), so whatever the
+            # matrix uploaded renders nowhere. One purge per root takes
+            # the tree AND its manifest (it lives inside); the pointer
+            # reset below follows.
+            rclone purge "seeed-storage:armbian/images/trees/$TAG" --contimeout 15s 2>/dev/null \
+              || echo "armbian/images/trees/$TAG did not exist — nothing to purge"
+            rclone purge "seeed-storage:armbian/loaders/trees/$TAG" --contimeout 15s 2>/dev/null \
+              || echo "armbian/loaders/trees/$TAG did not exist — nothing to purge"
           fi
+          # Top-level heredoc (a nested one's terminator would never be
+          # recognized). HAS_RCLONE gates inside: no mirror, no pointer.
+          python3 - "$TAG" <<'PY'
+          import json, os, subprocess, sys
+
+          if os.environ.get("HAS_RCLONE") != "true":
+              sys.exit(0)
+          tag = sys.argv[1]
+          path = "seeed-storage:armbian/images/slots.json"
+          r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
+                             capture_output=True, text=True)
+          if r.returncode != 0:
+              print(f"::warning::cannot read slots.json ({r.stderr.strip()}) — pointer left untouched")
+              sys.exit(0)
+          slots = json.loads(r.stdout)
+          if slots.get("pre-release") != tag:
+              print(f"pointer intact (pre-release = {slots.get('pre-release')!r}) — nothing to reset")
+              sys.exit(0)
+          slots["pre-release"] = None
+          w = subprocess.run(["rclone", "rcat", path],
+                             input=json.dumps(slots, indent=1, sort_keys=True) + "\n",
+                             capture_output=True, text=True)
+          if w.returncode != 0:
+              print(f"::error::failed to reset slots.json pre-release pointer ({w.stderr.strip()}) — next page deploy will hard-fail until fixed by hand", file=sys.stderr)
+              sys.exit(1)
+          print("slots.json: pre-release pointer reset to null")
+          PY
