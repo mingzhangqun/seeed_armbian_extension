@@ -288,6 +288,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    outputs:
+      previous_pre_release: ${{ steps.snapshot.outputs.previous_pre_release }}
     env:
       HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
     steps:
@@ -376,6 +378,15 @@ jobs:
               subprocess.run(["rclone", "purge", f"{IBASE}/trees/{t}"], check=True)
           print(f"GC done: referenced tags {sorted(referenced) or 'none'}, this run's tag {tag}")
           PY
+
+      - name: Snapshot the current candidate
+        id: snapshot
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        run: |
+          set -euo pipefail
+          old="$(rclone cat "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/slots.json" --contimeout 15s | jq -r '."pre-release" // empty')"
+          echo "previous_pre_release=$old" >> "$GITHUB_OUTPUT"
+          echo "previous candidate: ${old:-<none>}"
 
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
@@ -752,10 +763,14 @@ jobs:
               --transfers 4 --stats-one-line --stats 30s
           done
 
-      - name: Upload images/OTA to draft release (GitHub-assets mode)
-        # Fork path: >2 GiB files fail loudly (GitHub asset cap).
+      - name: Stage images/OTA for GitHub release (assets mode)
+        # One leg per matrix job; the serialized upload-release job below
+        # assembles every archive. Keep original self-describing names.
         if: ${{ env.HAS_RCLONE != 'true' }}
         working-directory: armbian-build
+        env:
+          PROFILE: ${{ matrix.profile || 'recovery' }}
+          SECURITY: ${{ matrix.security }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -769,26 +784,26 @@ jobs:
             echo "::error::no compressed .img.xz found; refusing an OTA-only partial leg"
             exit 1
           fi
-
-          # Plain and secure filenames are intentionally identical; mark the
-          # profile in the shared GitHub release instead of --clobber races.
-          args=()
-          for f in "${files[@]}" "${ota_files[@]}"; do
+          args=("${files[@]}" "${ota_files[@]}")
+          for f in "${args[@]}"; do
             size=$(stat -c%s "$f")
             if [ "$size" -gt 2147483648 ]; then
               echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — over GitHub's 2 GiB release-asset cap; it needs a OneDrive-mode build (RCLONE_CONFIG) to ship"
               exit 1
             fi
-            suffix="${SECURITY:+secure-}${PROFILE}"
-            named="$(dirname "$f")/${suffix}-$(basename "$f")"
-            mv -- "$f" "$named"
-            args+=("$named")
           done
+          mkdir -p "$GITHUB_WORKSPACE/release-upload"
+          cp -- "${args[@]}" "$GITHUB_WORKSPACE/release-upload/"
 
-          echo "=== uploading ${#args[@]} profile-prefixed assets to ${TAG} @ ${TARGET_REPO} ==="
-          gh release upload "$TAG" "${args[@]}" --repo "$TARGET_REPO"
-          gh release view "$TAG" --repo "$TARGET_REPO" \
-            --json assets --jq '"release now has \(.assets | length) assets"'
+      - name: Stage GitHub release assets
+        if: ${{ env.HAS_RCLONE != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ matrix.profile || 'recovery' }}-${{ matrix.security || 'plain' }}-${{ github.run_id }}
+          path: release-upload/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
       - name: Upload output/images/ as-is
         if: always()
@@ -807,12 +822,44 @@ jobs:
           ccache -s 2>/dev/null || true
           du -sh armbian-build/cache/ccache 2>/dev/null || true
 
+  upload-release:
+    name: Upload release assets (serialized fork path)
+    needs: [probe-secrets, plan, init-release, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.probe-secrets.outputs.has_rclone != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Download every matrix leg's assets
+        uses: actions/download-artifact@v5
+        with:
+          pattern: release-assets-*-${{ github.run_id }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload original filenames without clobbering
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-assets/*)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no staged release assets"; exit 1; }
+          # This one job owns the release asset namespace. A collision is
+          # an error, never a silent last-writer-wins replacement.
+          gh release upload "$TAG" "${files[@]}" --repo "$TARGET_REPO"
+          gh release view "$TAG" --repo "$TARGET_REPO" \
+            --json assets --jq '"release now has \(.assets | length) assets"'
+
   release:
-    needs: [probe-secrets, plan, build]
+    needs: [probe-secrets, plan, init-release, build, upload-release]
     # Finalizes the tag's tree after all entries upload: share links →
     # manifest → slot pointer → THEN flips the draft release visible.
     # Promotion to Stable is promote-images.yml (separate dispatch).
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.upload-release.result == 'success' }}
     runs-on: ubuntu-latest
     # The per-file rclone link calls (~70-90 files, OneDrive throttling
     # seen at scale) sit between a multi-hour matrix success and the
@@ -820,8 +867,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
-    outputs:
-      rollback: ${{ steps.link-tree.outputs.rollback }}
     env:
       HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -853,7 +898,6 @@ jobs:
         # group, but a human editing the file via the OneDrive web UI
         # must not be silently clobbered.
         if: ${{ env.HAS_RCLONE == 'true' }}
-        id: link-tree
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -966,9 +1010,6 @@ jobs:
           slots["pre-release"] = tag
           rcat(f"{IBASE}/slots.json", json.dumps(slots, indent=1, sort_keys=True) + "\n")
           print(f"slots.json: pre-release → {tag} (stable/previous untouched)")
-          # Cleanup restores this exact prior document, not null, if the
-          # release publish below fails or the run is cancelled.
-          print(f"rollback={json.dumps(r.stdout)}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
           PY
 
       - name: Publish release
@@ -978,13 +1019,59 @@ jobs:
           gh release edit "$TAG" \
             --repo "$TARGET_REPO" \
             --draft=false \
-            --prerelease
+            --prerelease \
+            --latest=false
+
+      - name: Retire the replaced pre-release tree
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        continue-on-error: true
+        env:
+          PREVIOUS_PRE_RELEASE: ${{ needs.init-release.outputs.previous_pre_release }}
+        run: |
+          set -euo pipefail
+          python3 - "$TAG" <<'PY'
+          import json, os, re, subprocess, sys
+
+          new_tag = sys.argv[1]
+          repo = os.environ["TARGET_REPO"]
+          old = os.environ.get("PREVIOUS_PRE_RELEASE", "").strip() or None
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
+          subprocess.run(
+              ["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
+              check=True, capture_output=True, text=True)
+          if not old or old == new_tag:
+              print("no replaced pre-release tree")
+              sys.exit(0)
+          # One candidate at a time: once the new candidate is fully
+          # published, its predecessor's mirror payload is no longer kept.
+          # Its GitHub Release remains as historical metadata.
+          subprocess.run(["rclone", "purge", f"{IBASE}/trees/{old}"], check=True)
+          print(f"purged replaced pre-release tree {old}; its Release is retained")
+
+          # Drop only other, unreferenced pre-release Releases owned by
+          # this pipeline. Stable/history Releases are never deleted.
+          rels = json.loads(subprocess.run(
+              ["gh", "release", "list", "--repo", repo, "--limit", "100", "--json",
+               "tagName,isDraft,isPrerelease,assets,body"],
+              check=True, capture_output=True, text=True).stdout)
+          owned = re.compile(rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
+          for rel in rels:
+              tag = rel["tagName"]
+              if not rel["isPrerelease"] or rel["isDraft"] or tag == new_tag:
+                  continue
+              if rel["assets"] or not owned.search(rel.get("body") or ""):
+                  print(f"keeping pre-release {tag} (assets or foreign ownership)")
+                  continue
+              subprocess.run(["gh", "release", "delete", tag, "--repo", repo,
+                              "--yes", "--cleanup-tag"], check=True)
+              print(f"deleted superseded pre-release Release {tag}")
+          PY
 
   # Template/config sync for the images page. The manifest read (≤4
   # rclone cats) replaced the mirror walk, so this is fast again.
   pages:
     name: Deploy images page (template sync)
-    needs: [probe-secrets, plan, release]
+    needs: [probe-secrets, plan, release, upload-release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     # The gh-pages push authenticates with PAGES_TARGET_TOKEN (a PAT);
@@ -1018,10 +1105,10 @@ jobs:
     # On success neither cancelled() nor failure() holds and this skips.
     # Ported from test-build.yml (deleted 2026-11-05) — its cleanup was
     # the only draft sweeper in the repo.
-    needs: [probe-secrets, preflight, plan, init-release, build, release, pages]
+    needs: [probe-secrets, preflight, plan, init-release, build, upload-release, release, pages]
     if: ${{ always() && (cancelled() || failure()) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
@@ -1029,7 +1116,8 @@ jobs:
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
-      ROLLBACK: ${{ needs.release.outputs.rollback }}
+      PUBLISHED: ${{ needs.release.result == 'success' }}
+    steps:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1041,6 +1129,7 @@ jobs:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
       - name: Delete orphaned draft + partial tree + slot pointer
+        id: cleanup-pointer
         # failure()/cancelled() are workflow-wide — a pages-job flake
         # after a successful release lands here too, so the isDraft gate
         # below is what protects a PUBLISHED release's tree from purging.
@@ -1055,23 +1144,17 @@ jobs:
             exit 0
           fi
           if ! gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            echo "release $TAG does not exist — init-release never finished; nothing to clean"
-            exit 0
+            echo "::notice::release $TAG does not exist — cleaning only this run's mirror/pointer state"
+          elif [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::notice::$TAG is already published — keeping release and tree; only the page needs recovery"
+          else
+            # Still a draft: discard this run only. Do not resurrect the
+            # previous candidate; there is at most one pre-release.
+            gh release delete "$TAG" --repo "$TARGET_REPO" --yes
+            gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+            echo "deleted orphan draft release $TAG"
           fi
-          if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
-            echo "::notice::$TAG is already published (the release job ran) — keeping release and tree"
-            exit 0
-          fi
-          # Still a draft: the run died before publishing — roll it back.
-          # No --cleanup-tag: a draft's tag ref only materializes on
-          # publish, so deleting it 422s with "Reference does not exist"
-          # (observed 2026-11-03). Plain delete drops the pending tag
-          # with the release; the ref delete below only matters when the
-          # tag name collided with an older published release's tag.
-          gh release delete "$TAG" --repo "$TARGET_REPO" --yes
-          gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
-          echo "deleted orphan draft release $TAG"
-          if [ "${HAS_RCLONE}" = "true" ]; then
+          if [ "${HAS_RCLONE}" = "true" ] && [ "${PUBLISHED}" != "true" ]; then
             # The tree never became visible (the release job writes the
             # manifest + pointer before publishing), so whatever the
             # matrix uploaded renders nowhere. One purge per root takes
@@ -1088,7 +1171,7 @@ jobs:
           if os.environ.get("HAS_RCLONE") != "true":
               sys.exit(0)
           tag = sys.argv[1]
-          rollback = os.environ.get("ROLLBACK", "").strip()
+          published = os.environ.get("PUBLISHED") == "true"
           path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
           r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
                              capture_output=True, text=True)
@@ -1097,21 +1180,30 @@ jobs:
               sys.exit(1)
           slots = json.loads(r.stdout)
           if slots.get("pre-release") != tag:
-              print(f"pointer intact (pre-release = {slots.get('pre-release')!r}) — nothing to restore")
+              print(f"pointer intact (pre-release = {slots.get('pre-release')!r}) — nothing to clear")
               sys.exit(0)
-          if not rollback:
-              print("::error::this run flipped pre-release but saved no rollback document; refusing to discard the previous slot", file=sys.stderr)
-              sys.exit(1)
-          restored = json.loads(rollback)
-          if restored.get("pre-release") == tag:
-              print("::error::rollback document unexpectedly names this run's tag; refusing", file=sys.stderr)
-              sys.exit(1)
-          slots = restored
+          if published:
+              print("published candidate retains its pointer; refresh will expose it")
+              sys.exit(0)
+          slots["pre-release"] = None
           w = subprocess.run(["rclone", "rcat", path],
                              input=json.dumps(slots, indent=1, sort_keys=True) + "\n",
                              capture_output=True, text=True)
           if w.returncode != 0:
-              print(f"::error::failed to restore slots.json ({w.stderr.strip()}) — next page deploy will hard-fail until fixed by hand", file=sys.stderr)
+              print(f"::error::failed to clear this run's pre-release pointer ({w.stderr.strip()})", file=sys.stderr)
               sys.exit(1)
-          print(f"slots.json: restored previous pre-release {slots.get('pre-release')!r}")
+          print("slots.json: pre-release cleared for unpublished candidate")
+          print("cleared=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
           PY
+
+      - name: Refresh the page after failure cleanup
+        if: ${{ env.HAS_RCLONE == 'true' && env.PUBLISHED != 'true' && steps.cleanup-pointer.outputs.cleared == 'true' }}
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: cleanup-${{ needs.plan.outputs.tag }}
+          repo: ${{ needs.plan.outputs.release_repo }}
+          release_repo: ${{ needs.plan.outputs.release_repo }}
+          has_rclone: "true"
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}

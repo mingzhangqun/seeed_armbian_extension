@@ -1,44 +1,25 @@
 name: "Images - Release"
 
-# Promote a pre-release to Stable (tag-addressed mirror layout):
-#   1. pick the pre-release — newest by default, or the explicit `tag`
-#      input (use it when a newer build landed after the on-device
-#      verification you actually ran)
-#   2. GUARD: slots.json pre-release must name the same tag — the
-#      manifest index and the release list must agree before anything
-#      moves
-#   3. VALIDATE the tag's tree: every <board>/<sec>/<kind>/ (sec =
-#      plain|secure, kind = recovery|ab|loaders) holds >=1 *.img.xz
-#      with a .sha256 sibling and a non-empty ota/, no strays, and the
-#      tree's manifest.json is signed with the tag and covers every
-#      file both ways
-#   4. PUBLISH the GitHub release (prerelease → released)
-#   5. FLIP slots.json: history ⟵ [stable] + history[:N-1] capped at
-#      HISTORY_DEPTH (default 1), stable ⟵ TAG, pre-release ⟶ null —
-#      one small pointer write; loaders ride along (they live INSIDE
-#      the tag's tree — one build, one purge unit)
-#   6. GC unreferenced trees (payload + in-tree manifest drop in one
-#      purge; history tags stay referenced), and any legacy slot dirs
-#      an old-code build left behind
-#   7. clean up superseded pre-releases; push the images page
+# slots.json is the desired mirror state; this workflow reconciles it:
+#   1. a pre-release candidate must have a complete tree/manifest before
+#      stable -> history, candidate -> stable, pre-release -> null;
+#   2. a confirmed-missing candidate tree clears the dangling pointer and
+#      its owned asset-less pre-release Release (transport errors abort);
+#   3. no candidate means retain slots.stable, never infer one from the
+#      newest GitHub Release;
+#   4. history is newest-first and capped at HISTORY_DEPTH (0 allowed);
+#   5. expired mirror trees are purged, but their stable GitHub Releases
+#      and immutable tags are retained and marked "retention exceeded";
+#   6. GitHub's Latest marker follows stable, but the tag stays immutable;
+#   7. validate all referenced trees, reconcile Releases, then update Pages.
 #
-# IDEMPOTENT RECOVERY — "no pre-release found" can mean three things:
-#   heal         slots.pre-release names the newest STABLE release →
-#                a previous run died between publishing and the flip
-#                (in that window the pointer is the tag, NOT null) →
-#                complete the flip, GC, cleanup, pages (mode=heal)
-#   recover-page slots.pre-release is null and slots.stable already
-#                names the newest stable → a previous run died after
-#                the flip but before pages → redeploy the page only
-#   anything else is a real failure and aborts.
-#
-# OneDrive-only: without RCLONE_CONFIG there is nothing to promote.
+# OneDrive-only: without RCLONE_CONFIG there is nothing to reconcile.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to promote (default: newest pre-release)"
+        description: "Optional candidate tag; must match slots.json pre-release"
         required: false
         type: string
 
@@ -53,10 +34,10 @@ jobs:
     permissions:
       contents: write
     outputs:
-      tag: ${{ steps.rel.outputs.tag }}
+      tag: ${{ steps.reconcile.outputs.tag }}
       target_repo: ${{ steps.rel.outputs.target_repo }}
       has_rclone: ${{ steps.probe.outputs.has_rclone }}
-      mode: ${{ steps.rel.outputs.mode }}
+      mode: ${{ steps.reconcile.outputs.mode }}
     steps:
       - name: Probe secrets
         id: probe
@@ -114,94 +95,163 @@ jobs:
           stable_ptr="$(jq -r '.stable // empty' <<<"$slots_raw")"
           echo "slots.json: pre-release=${pre_ptr:-<null>} stable=${stable_ptr:-<null>}"
 
-          tag_pat='^[0-9]{6}-[0-9]{4}(-r[0-9]+)?$'
+          if [ -n "$pre_ptr" ]; then
+            echo "::notice::candidate $pre_ptr found in slots.json; validate its tree before reconciliation"
+            echo "tag=$pre_ptr" >> "$GITHUB_OUTPUT"
+          fi
           target_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
-
-          # Tags start with the build stamp YYMMDD-HHMM; the run id
-          # suffix prevents immutable-tag collisions. A hand-made
-          # release with a free-form tag would win the lexicographic sort
-          # otherwise and then fail the mirror guard below anyway.
           if [ -n "${TAG_IN:-}" ]; then
-            # Explicit tag: the operator decides WHICH build ships (e.g.
-            # the one verified on hardware while a newer build landed).
-            # The mirror must agree — this is an intent check, not just
-            # consistency.
-            tag="$TAG_IN"
-            state="$(gh release view "$tag" --repo "$target_repo" \
-                      --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
-            [ "$state" = "false true" ] \
-              || { echo "::error::$tag is not a published pre-release (state: $state)"; exit 1; }
-            [ "$pre_ptr" = "$tag" ] \
-              || { echo "::error::slots.json pre-release is '${pre_ptr:-<null>}' but '$tag' was requested — the mirror names a different build; refusing"; exit 1; }
+            # Explicit tag narrows the slots.json candidate; it never
+            # chooses a different Release behind the mirror's back.
+            [ "$pre_ptr" = "$TAG_IN" ] \
+              || { echo "::error::slots.json pre-release is '${pre_ptr:-<null>}' but '$TAG_IN' was requested; refusing"; exit 1; }
+          fi
+          tag="$pre_ptr"
+          if [ -n "$tag" ]; then
+            # slots.json is authoritative. Reconcile even when the Release
+            # is already stable (a previous run may have died after its
+            # publish step but before the pointer flip).
             echo "mode=promote" >> "$GITHUB_OUTPUT"
             echo "tag=$tag" >> "$GITHUB_OUTPUT"
             echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
-            echo "promoting $tag (explicit input) in $target_repo"
+            echo "candidate from slots.json: $tag"
             exit 0
           fi
 
-          jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by([.publishedAt, .tagName]) | last | .tagName // empty"
-          tag="$(gh release list --repo "$target_repo" \
-                --json tagName,isPrerelease,publishedAt --jq "$jq_pick")"
-
-          # ── no pre-release: heal, recover-page, or real failure.
-          if [ -z "$tag" ]; then
-            jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by([.publishedAt, .tagName]) | last | .tagName // empty"
-            stable="$(gh release list --repo "$target_repo" \
-                --json tagName,isPrerelease,publishedAt --jq "$jq_stable")"
-            [ -n "$stable" ] \
-              || { echo "::error::no pre-release and no stable release found in $target_repo"; exit 1; }
-
-            if [ "$pre_ptr" = "$stable" ] && [ "$stable_ptr" != "$stable" ]; then
-              # The publish already flipped the release stable, but the
-              # pointer still names it as pre-release — a previous run
-              # died between publish and flip. Validate will re-check the
-              # tree+manifest before anything is written.
-              echo "::notice::$stable is published Stable and slots.json still lists it as pre-release — completing the interrupted flip (mode=heal)"
-              echo "mode=heal" >> "$GITHUB_OUTPUT"
-              echo "tag=$stable" >> "$GITHUB_OUTPUT"
-              echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [ -z "$pre_ptr" ] && [ "$stable_ptr" = "$stable" ]; then
-              echo "::notice::no pre-release; slots.json already names $stable as stable — recovering the pages deploy (mode=recover-page)"
-              echo "mode=recover-page" >> "$GITHUB_OUTPUT"
-              echo "tag=$stable" >> "$GITHUB_OUTPUT"
-              echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::no pre-release; slots.json (pre-release='${pre_ptr:-<null>}', stable='${stable_ptr:-<null>}') disagrees with the newest stable '$stable' — inconsistent state, refusing to guess"
-            exit 1
-          fi
-
-          state="$(gh release view "$tag" --repo "$target_repo" \
-                    --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
-          echo "release state (isDraft prerelease): $state"
-          [ "$state" = "false true" ] \
-            || { echo "::error::$tag is not a published pre-release (draft or already stable)"; exit 1; }
-          [ "$pre_ptr" = "$tag" ] \
-            || { echo "::error::newest pre-release is '$tag' but slots.json pre-release is '${pre_ptr:-<null>}' — a pre-migration (old-code) build published a release the manifest index doesn't know. Delete that release, or promote an explicit tag via the 'tag' input."; exit 1; }
-          echo "mode=promote" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # No candidate: retain the current stable and refresh/prune
+          # according to HISTORY_DEPTH. Never guess a new stable from the
+          # most recent GitHub Release.
+          [ -n "$stable_ptr" ] \
+            || { echo "::error::slots.json has neither pre-release nor stable; nothing to reconcile"; exit 1; }
+          echo "::notice::no pre-release; retaining slots.json stable $stable_ptr and reconciling history/pages"
+          echo "mode=reconcile" >> "$GITHUB_OUTPUT"
+          echo "tag=$stable_ptr" >> "$GITHUB_OUTPUT"
           echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
-          echo "promoting $tag in $target_repo"
 
-      - name: Validate the tag's tree
-        # Runs for promote AND heal (heal re-checks before writing).
-        # Skipped in recover-page mode: nothing is about to be written.
-        # Shape + signed manifest, all BEFORE anything is published or
-        # flipped:
-        #   a) every <board>/<sec>/<kind>/ is complete: >=1 *.img.xz, each with
-        #      a .sha256 sibling, non-empty ota/, no stray files
-        #   b) trees/<tag>/manifest.json exists, is signed with the tag
-        #      (the "tag" field is the build's signature — the old root
-        #      tag file was folded into it), and covers the walked files
-        #      BOTH ways — a build that died between upload and manifest
-        #      never flips visible, but a stale or hand-edited manifest
-        #      would render a broken slot
-        if: steps.rel.outputs.mode == 'promote' || steps.rel.outputs.mode == 'heal'
+      - name: Reconcile slots.json with mirror and Releases
+        id: reconcile
         env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
           TAG: ${{ steps.rel.outputs.tag }}
+          MODE: ${{ steps.rel.outputs.mode }}
+          HISTORY_DEPTH: "1"
+        run: |
+          set -euo pipefail
+          python3 - "$TAG" <<'PY'
+          import json, os, re, subprocess, sys
+
+          tag = sys.argv[1]
+          mode = os.environ["MODE"]
+          repo = os.environ["TARGET_REPO"]
+          depth = int(os.environ.get("HISTORY_DEPTH", "1"))
+          if depth < 0:
+              raise SystemExit("HISTORY_DEPTH must be >= 0")
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
+
+          def remote(*args, input=None, missing=False):
+              r = subprocess.run(["rclone", *args], input=input,
+                                 capture_output=True, text=True)
+              if r.returncode:
+                  if missing and "not found" in r.stderr.lower():
+                      return None
+                  print(f"::error::rclone {' '.join(args)}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+              return r.stdout
+
+          def gh(*args, input=None):
+              r = subprocess.run(["gh", *args, "--repo", repo], input=input,
+                                 capture_output=True, text=True)
+              if r.returncode:
+                  print(f"::error::gh {' '.join(args)}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+              return r.stdout
+
+          def write_slots(new):
+              current = remote("cat", f"{IBASE}/slots.json", "--contimeout", "15s")
+              if json.dumps(json.loads(current), sort_keys=True) != old_snapshot:
+                  raise SystemExit("slots.json changed during reconcile; refusing to overwrite a concurrent edit")
+              remote("rcat", f"{IBASE}/slots.json",
+                     input=json.dumps(new, indent=1, sort_keys=True) + "\n")
+
+          old = json.loads(remote("cat", f"{IBASE}/slots.json", "--contimeout", "15s"))
+          hist = old.get("history")
+          if not isinstance(hist, list):
+              hist = [old["previous"]] if old.get("previous") else []
+          old["history"] = hist
+          pre = old.get("pre-release")
+          stable = old.get("stable")
+          changed = False
+          mode_out = mode
+          old_snapshot = json.dumps(old, sort_keys=True)
+
+          if pre and mode == "promote":
+              if pre != tag:
+                  raise SystemExit(f"candidate changed during reconcile: {pre} != {tag}")
+              # Confirm tree existence without treating a transport error
+              # as a missing tree. Manifest validation below is the full
+              # gate; absence is a repairable dangling candidate pointer.
+              raw = remote("cat", f"{IBASE}/trees/{pre}/manifest.json",
+                           "--contimeout", "15s", missing=True)
+              if raw is None:
+                  print(f"::warning::candidate tree {pre} is absent; clearing only the dangling pre-release pointer", file=sys.stderr)
+                  old["pre-release"] = None
+                  write_slots(old)
+                  changed = True
+                  mode_out = "reconcile"
+              else:
+                  manifest = json.loads(raw)
+                  if manifest.get("tag") != pre or not manifest.get("files"):
+                      raise SystemExit(f"candidate {pre} has an invalid/incomplete manifest; refusing promotion")
+                  state = gh("release", "view", pre, "--json", "isDraft,isPrerelease",
+                             "--jq", '"\\(.isDraft) \\(.isPrerelease)"').strip()
+                  if state == "true true":
+                      gh("release", "edit", pre, "--draft=false", "--prerelease")
+                  elif state not in ("false true", "false false"):
+                      raise SystemExit(f"candidate Release {pre} is missing or has invalid state {state}")
+                  # Stable must always exist before rotating it into
+                  # history. A first-ever candidate can become stable
+                  # directly; an existing stable is validated by deploy.
+                  new_hist = ([stable] if stable else []) + [t for t in hist if t != stable]
+                  new_hist = list(dict.fromkeys(t for t in new_hist if t and t != pre))
+                  new = dict(old)
+                  new["stable"], new["history"], new["pre-release"] = pre, new_hist[:depth], None
+                  new.pop("previous", None)
+                  if new != old:
+                      write_slots(new)
+                      old = new
+                      changed = True
+                  gh("release", "edit", pre, "--prerelease=false", "--latest")
+                  print(f"promoted {pre} to stable; history={new['history']}")
+          elif pre:
+              raise SystemExit(f"internal error: unexpected candidate mode {mode}")
+
+          # Retention affects mirror payload only. GitHub Releases are
+          # permanent version history, including stable versions whose
+          # OneDrive tree has exceeded HISTORY_DEPTH.
+          hist = old.get("history") if isinstance(old.get("history"), list) else []
+          refs = [old.get("stable"), old.get("pre-release"), *hist]
+          refs = [t for t in refs if t]
+          ordered = list(dict.fromkeys(refs))
+          if not ordered:
+              print("::warning::no stable or candidate remains after repair; keeping pre-release null and refreshing the empty page")
+              print("tag=", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+              print("mode=reconcile", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+              print("changed=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+              sys.exit(0)
+          new_hist = [t for t in ordered if t not in (old.get("stable"), old.get("pre-release"))][:depth]
+          if new_hist != hist or "previous" in old:
+              old["history"] = new_hist
+              old.pop("previous", None)
+              write_slots(old)
+              changed = True
+
+          print(f"tag={old['stable']}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+          print(f"mode={mode_out}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+          print(f"changed={'true' if changed else 'false'}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+          print(f"reconciled slots: {old}")
+          PY
+      - name: Validate every referenced tree
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -227,6 +277,11 @@ jobs:
                   sys.exit(1)
               return [it["Path"] for it in json.loads(r.stdout or "[]")]
 
+          slots = json.loads(subprocess.run(
+              ["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
+              check=True, capture_output=True, text=True).stdout)
+          referenced = [slots.get("stable"), slots.get("pre-release"), *(slots.get("history") or [])]
+          referenced = [t for t in referenced if t]
           errors = []
 
           # a) shape of the tag's tree. ONE walk; paths are
@@ -234,172 +289,86 @@ jobs:
           # and kind = recovery|ab|loaders. The root-level identity file
           # is the manifest itself — anything else at tree root is a
           # stray, and every board dir must hold plain/ at minimum.
-          files = lsjson_files(f"{IBASE}/trees/{tag_expected}")
-          KINDS = {"recovery", "ab", "loaders"}
-          by_kind, boards = defaultdict(list), set()
-          for p in files:
-              if p == "manifest.json":
-                  continue
-              parts = p.split("/")
-              if len(parts) < 2:
-                  errors.append(f"stray file at trees/{tag_expected}/ root: {p}")
-                  continue
-              board, sec = parts[0], parts[1]
-              if sec not in ("plain", "secure"):
-                  errors.append(f"{board}: '{sec}' is not a security dir (expected plain|secure): {p}")
-                  continue
-              boards.add(board)
-              if len(parts) < 4:
-                  errors.append(f"stray file at trees/{tag_expected}/{board}/{sec}/ root: {p}")
-                  continue
-              if parts[2] not in KINDS:
-                  errors.append(f"{board}/{sec}: unknown kind '{parts[2]}': {p}")
-                  continue
-              by_kind[(board, sec, parts[2])].append("/".join(parts[3:]))
+          for tag_expected in referenced:
+            files = lsjson_files(f"{IBASE}/trees/{tag_expected}")
+            KINDS = {"recovery", "ab", "loaders"}
+            by_kind, boards = defaultdict(list), set()
+            for p in files:
+                if p == "manifest.json":
+                    continue
+                parts = p.split("/")
+                if len(parts) < 2:
+                    errors.append(f"stray file at trees/{tag_expected}/ root: {p}")
+                    continue
+                board, sec = parts[0], parts[1]
+                if sec not in ("plain", "secure"):
+                    errors.append(f"{board}: '{sec}' is not a security dir (expected plain|secure): {p}")
+                    continue
+                boards.add(board)
+                if len(parts) < 4:
+                    errors.append(f"stray file at trees/{tag_expected}/{board}/{sec}/ root: {p}")
+                    continue
+                if parts[2] not in KINDS:
+                    errors.append(f"{board}/{sec}: unknown kind '{parts[2]}': {p}")
+                    continue
+                by_kind[(board, sec, parts[2])].append("/".join(parts[3:]))
 
-          if not any(k[2] in ("recovery", "ab") for k in by_kind):
-              errors.append(f"trees/{tag_expected}/ holds no image content at all")
+            if not any(k[2] in ("recovery", "ab") for k in by_kind):
+                errors.append(f"trees/{tag_expected}/ holds no image content at all")
 
-          for (board, sec, kind), fs in sorted(by_kind.items()):
-              if kind == "loaders":
-                  if not fs:
-                      errors.append(f"{board}/{sec}/loaders/ is empty")
-                  print(f"{board}/{sec}/loaders: {len(fs)} files")
-                  continue
-              xz = sorted(n for n in fs if n.endswith(".img.xz"))
-              if not xz:
-                  errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/ has no *.img.xz")
-              for x in xz:
-                  if x + ".sha256" not in fs:
-                      errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/{x} has no .sha256 sibling")
-              ota = [n for n in fs if n.startswith("ota/")]
-              if not ota:
-                  errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/ota/ is empty or missing")
-              print(f"{board}/{sec}/{kind}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
+            for (board, sec, kind), fs in sorted(by_kind.items()):
+                if kind == "loaders":
+                    if not fs:
+                        errors.append(f"{board}/{sec}/loaders/ is empty")
+                    print(f"{board}/{sec}/loaders: {len(fs)} files")
+                    continue
+                xz = sorted(n for n in fs if n.endswith(".img.xz"))
+                if not xz:
+                    errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/ has no *.img.xz")
+                for x in xz:
+                    if x + ".sha256" not in fs:
+                        errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/{x} has no .sha256 sibling")
+                ota = [n for n in fs if n.startswith("ota/")]
+                if not ota:
+                    errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/ota/ is empty or missing")
+                print(f"{board}/{sec}/{kind}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
 
-          # b) signed manifest, coverage both directions against the ONE
-          # files map.
-          try:
-              m = json.loads(rcat(f"{IBASE}/trees/{tag_expected}/manifest.json"))
-          except json.JSONDecodeError as e:
-              errors.append(f"trees/{tag_expected}/manifest.json is not valid JSON ({e})")
-              m = None
-          if m is not None:
-              if m.get("tag") != tag_expected:
-                  errors.append(f"trees/{tag_expected}/manifest.json is signed {m.get('tag')!r} — wrong or unsigned tree")
-              mf = m.get("files") or {}
-              walked = {p for p in files if p != "manifest.json"}
-              for p in sorted(walked - set(mf)):
-                  errors.append(f"manifest missing entry for {p}")
-              for k in sorted(set(mf) - walked):
-                  errors.append(f"manifest entry {k} not on the mirror")
-              if any(not u for u in mf.values()):
-                  errors.append("manifest holds an empty URL")
-              print(f"manifest: {len(mf)} links")
+            # b) signed manifest, coverage both directions against the ONE
+            # files map.
+            try:
+                m = json.loads(rcat(f"{IBASE}/trees/{tag_expected}/manifest.json"))
+            except json.JSONDecodeError as e:
+                errors.append(f"trees/{tag_expected}/manifest.json is not valid JSON ({e})")
+                m = None
+            if m is not None:
+                if m.get("tag") != tag_expected:
+                    errors.append(f"trees/{tag_expected}/manifest.json is signed {m.get('tag')!r} — wrong or unsigned tree")
+                mf = m.get("files") or {}
+                walked = {p for p in files if p != "manifest.json"}
+                for p in sorted(walked - set(mf)):
+                    errors.append(f"manifest missing entry for {p}")
+                for k in sorted(set(mf) - walked):
+                    errors.append(f"manifest entry {k} not on the mirror")
+                if any(not u for u in mf.values()):
+                    errors.append("manifest holds an empty URL")
+                print(f"manifest: {len(mf)} links")
 
-          if errors:
-              for e in errors:
-                  print(f"::error::{e}")
-              sys.exit(1)
-          print(f"tree OK: tag {tag_expected}, {len(boards)} boards, "
-                f"{len(by_kind)} board/sec/kind dirs, {len(files)} files")
-          PY
-
-      - name: Publish + flip slots.json
-        # The rotation is ONE pointer write: stable ⟵ TAG, history ⟵
-        # [old stable] + old history capped at HISTORY_DEPTH,
-        # pre-release ⟶ null. Trees never move, so there is no
-        # half-rotated mirror state — the failure modes are "release
-        # published but pointer not flipped" (heal on re-run) and
-        # "pointer write failed" (state unchanged, re-run heals).
-        if: steps.rel.outputs.mode == 'promote' || steps.rel.outputs.mode == 'heal'
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
-          TAG: ${{ steps.rel.outputs.tag }}
-          TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
-          MODE: ${{ steps.rel.outputs.mode }}
-          # Retention: how many older stables stay downloadable. Storage
-          # grows ~linearly with this (each tree is a full matrix).
-          HISTORY_DEPTH: "1"
-        run: |
-          set -euo pipefail
-          if [ "$MODE" = "promote" ]; then
-            # Step 1: publish the release (flip prerelease → stable).
-            gh release edit "$TAG" --repo "$TARGET_REPO" --prerelease=false
-            # The note REPLACES the draft's build/run pointer — restate the
-            # download entry point instead of rotation internals. The page
-            # always lives on the build-source repo's Pages (armbian-build).
-            # printf-built: a literal multi-line string would need deeper
-            # indentation than the YAML block scalar, and the extra spaces
-            # would render as a markdown code block.
-            page_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/armbian-build/images/"
-            notes="$(printf 'Promoted to Stable — on-device verification passed.\n\nDownloads: %s\nBinaries live in the OneDrive mirror (tag-addressed trees, indexed by slots.json); this release carries no assets.\n\nslots.json flipped: history ⟵ stable, pre-release ⟶ null.' "$page_url")"
-            gh release edit "$TAG" --repo "$TARGET_REPO" --notes "$notes"
-          else
-            echo "heal mode — release $TAG is already published; flipping the pointer only"
-          fi
-
-          # Step 2: flip the pointer. Read-verify-write: abort if the
-          # file changed since resolve (only a human web-UI edit could —
-          # CI writers are serialized by the images-mirror group).
-          python3 - "$TAG" <<'PY'
-          import json, os, subprocess, sys
-
-          tag = sys.argv[1]
-          depth = max(1, int(os.environ.get("HISTORY_DEPTH", "1")))
-          path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
-
-          def read():
-              r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
-                                 capture_output=True, text=True)
-              if r.returncode != 0:
-                  print(f"::error::cannot read slots.json: {r.stderr.strip()}", file=sys.stderr)
-                  sys.exit(1)
-              return json.loads(r.stdout)
-
-          def history_of(s):
-              # newest-first older stables; tolerate the legacy scalar
-              # "previous" key from a pre-history-array slots.json
-              h = s.get("history")
-              if isinstance(h, list):
-                  return [t for t in h if t]
-              return [s["previous"]] if s.get("previous") else []
-
-          old = read()
-          prior = old.get("stable")
-          # prepend the demoted stable, dedupe, cap at depth
-          new_hist = ([prior] if prior else []) + [t for t in history_of(old) if t != prior]
-          new = dict(old)
-          new["stable"], new["history"], new["pre-release"] = tag, new_hist[:depth], None
-          new.pop("previous", None)    # legacy key retired
-
-          check = read()
-          if check != old:
-              print("::error::slots.json changed since resolve — a concurrent writer (human edit?) is active; aborting before the flip", file=sys.stderr)
-              sys.exit(1)
-          w = subprocess.run(["rclone", "rcat", path],
-                             input=json.dumps(new, indent=1, sort_keys=True) + "\n",
-                             capture_output=True, text=True)
-          if w.returncode != 0:
-              print(f"::error::flip write failed ({w.stderr.strip()}) — mirror state unchanged; a re-run will heal", file=sys.stderr)
-              sys.exit(1)
-          print(f"slots.json flipped: stable={tag} history={new['history']} pre-release=null")
+            if errors:
+                for e in errors:
+                    print(f"::error::{e}")
+                sys.exit(1)
+            print(f"tree OK: tag {tag_expected}, {len(boards)} boards, "
+                  f"{len(by_kind)} board/sec/kind dirs, {len(files)} files")
           PY
 
       - name: GC unreferenced trees + legacy leftovers
-        # After the flip only stable/history (+pre-release when set) are
-        # referenced; everything else is superseded. The manifest AND the
-        # loaders subtree live inside trees/<tag>/, so one purge drops
-        # payload, index and loaders together — no half-deleted states
-        # (the pre-merge second root had exactly that cross-root window).
-        # Only legacy slot dirs inside this owner's namespace are swept.
-        # The global armbian/images and armbian/loaders roots belong to no
-        # single pipeline and must never be purged by routine GC.
-        if: steps.rel.outputs.mode == 'promote' || steps.rel.outputs.mode == 'heal'
+        # Mirror retention is bounded, but GitHub Releases are permanent
+        # historical records. Never delete a Stable Release when its tree
+        # exceeds HISTORY_DEPTH. Only this owner's namespace is swept.
         run: |
           set -euo pipefail
           python3 <<'PY'
-          import json, subprocess, sys
+          import json, os, subprocess, sys
 
           IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
           LEGACY = {"pre-release", "stable", "previous"}
@@ -407,101 +376,101 @@ jobs:
           def rcat(path):
               r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
                                  capture_output=True, text=True)
-              if r.returncode != 0:
+              if r.returncode:
                   print(f"::error::rclone cat failed for {path}: {r.stderr.strip()}", file=sys.stderr)
                   sys.exit(1)
               return r.stdout
 
           def lsdirs(path):
-              args = ["rclone", "lsjson", "--dirs-only", path]
-              r = subprocess.run(args, capture_output=True, text=True)
-              if r.returncode != 0:
+              r = subprocess.run(["rclone", "lsjson", "--dirs-only", path],
+                                 capture_output=True, text=True)
+              if r.returncode:
                   if "not found" in r.stderr.lower():
-                      return []    # trees/ absent — nothing to sweep
+                      return []
                   print(f"::error::lsjson failed for {path}: {r.stderr.strip()}", file=sys.stderr)
                   sys.exit(1)
               return [it["Path"] for it in json.loads(r.stdout or "[]")]
 
           slots = json.loads(rcat(f"{IBASE}/slots.json"))
-          # referenced = primary slots + the history array (tolerate the
-          # legacy scalar "previous")
           hist = slots.get("history")
           if not isinstance(hist, list):
               hist = [slots["previous"]] if slots.get("previous") else []
           referenced = {t for t in (slots.get("stable"), slots.get("pre-release"),
                                     *hist) if t}
           print(f"referenced tags: {sorted(referenced) or 'none'}")
-
           for d in lsdirs(IBASE):
               if d in LEGACY:
-                  print(f"::notice::purging legacy slot dir images/{d}/ (old-code build residue)")
                   subprocess.run(["rclone", "purge", f"{IBASE}/{d}"], check=True)
           for t in lsdirs(f"{IBASE}/trees"):
               if t not in referenced:
-                  print(f"::notice::purging unreferenced tree images/trees/{t}/")
+                  print(f"::notice::purging expired mirror tree {t}; retaining its GitHub Release")
                   subprocess.run(["rclone", "purge", f"{IBASE}/trees/{t}"], check=True)
-          print("GC done")
+          print("GC done — stable/history Releases retained")
           PY
 
-      - name: Clean up superseded releases
-        # Mirror retention and release lifecycle are the same policy:
-        # deleting a rotated-out tree must not leave an empty Stable
-        # release pointing at it. Only non-draft releases with a matching
-        # pipeline run URL and NO uploaded assets are owned by this flow;
-        # foreign/manual releases and forks with real assets stay intact.
-        # Pre-release cleanup shares the same ownership predicate.
-        if: steps.rel.outputs.mode != 'recover-page'
+      - name: Reconcile Releases and expire mirror notes
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
-          HAS_RCLONE: ${{ steps.probe.outputs.has_rclone }}
           TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
-          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
-          python3 - "$TAG" <<'PY'
+          python3 <<'PY'
           import json, os, re, subprocess, sys
 
-          keep_tag = sys.argv[1]
           repo = os.environ["TARGET_REPO"]
-          if os.environ.get("HAS_RCLONE") != "true":
-              print("OneDrive disabled — uploaded-asset releases are never deleted")
-              sys.exit(0)
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
           slots = json.loads(subprocess.run(
-              ["rclone", "cat",
-               f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json",
-               "--contimeout", "15s"], check=True, capture_output=True, text=True).stdout)
-          hist = slots.get("history")
-          if not isinstance(hist, list):
-              hist = [slots["previous"]] if slots.get("previous") else []
+              ["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
+              check=True, capture_output=True, text=True).stdout)
+          hist = slots.get("history") if isinstance(slots.get("history"), list) else []
           referenced = {slots.get("stable"), slots.get("pre-release"), *hist} - {None}
+          expired = []
 
-          def release(*args):
-              r = subprocess.run(["gh", "release", *args, "--repo", repo],
+          def gh(*args):
+              r = subprocess.run(["gh", *args, "--repo", repo],
                                  capture_output=True, text=True)
               if r.returncode:
-                  print(f"::error::gh release {' '.join(args)}: {r.stderr.strip()}", file=sys.stderr)
+                  print(f"::error::gh {' '.join(args)}: {r.stderr.strip()}", file=sys.stderr)
                   sys.exit(1)
               return r.stdout
 
-          owned = re.compile(
-              rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
-          for rel in json.loads(release("list", "--limit", "100", "--json",
-                                       "tagName,isDraft,isPrerelease,assets,body")):
+          # Promote only slots.json's current stable to the GitHub Latest
+          # marker; the immutable version tag never becomes "latest".
+          if slots.get("stable"):
+              gh("release", "edit", slots["stable"], "--prerelease=false", "--latest")
+
+          # A candidate with no tree is repairable; a stable/history tree
+          # was already hard-validated above. Delete only owned asset-less
+          # pre-releases that are no longer the candidate. Never delete a
+          # stable Release just because its mirror payload expired.
+          owned = re.compile(rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
+          for rel in json.loads(gh("release", "list", "--limit", "100", "--json",
+                                   "tagName,isDraft,isPrerelease,assets,body")):
               tag = rel["tagName"]
-              if tag == keep_tag or tag in referenced:
+              if tag not in referenced and not rel["isPrerelease"]:
+                  expired.append(tag)
+              if tag == slots.get("pre-release") or not rel["isPrerelease"]:
                   continue
-              if rel["isDraft"] or rel["assets"]:
-                  print(f"keeping {tag} (draft or uploaded assets)")
+              if rel["isDraft"] or rel["assets"] or not owned.search(rel.get("body") or ""):
                   continue
-              if not owned.search(rel.get("body") or ""):
-                  print(f"keeping {tag} (no pipeline run ownership marker)")
+              r = subprocess.run(["rclone", "cat", f"{IBASE}/trees/{tag}/manifest.json",
+                                  "--contimeout", "15s"], capture_output=True, text=True)
+              if r.returncode and "not found" in r.stderr.lower():
+                  print(f"::warning::deleting dangling candidate Release {tag}")
+                  gh("release", "delete", tag, "--yes", "--cleanup-tag")
+
+          # Preserve expired stable Releases but correct their download
+          # promise. Do not rewrite notes while their tree is downloadable.
+          for tag in expired:
+              body = gh("release", "view", tag, "--json", "body", "--jq", ".body")
+              if "Mirror retention exceeded" in body:
                   continue
-              # A pre-release is superseded once a new pre-release exists
-              # (or after a successful promote); a stable is superseded
-              # only after the slot/history cap drops its reference.
-              kind = "stable rotated out of history" if not rel["isPrerelease"] else "superseded pre-release"
-              print(f"deleting {kind}: {tag}")
-              release("delete", tag, "--yes", "--cleanup-tag")
+              note = ("Mirror retention exceeded: the OneDrive image tree for this "
+                      "release has been removed to save space. This GitHub Release "
+                      "and its immutable version tag are retained as historical metadata; "
+                      "no mirror download is available for this tag.")
+              gh("release", "edit", tag, "--notes", note)
+              print(f"marked expired mirror retention on retained Release {tag}")
           PY
 
   # Static download page push (template sync).
