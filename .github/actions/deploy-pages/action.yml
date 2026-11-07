@@ -18,7 +18,7 @@ inputs:
     description: "RCLONE_CONFIG secret content"
     required: false
   pages_token:
-    description: "PAGES_TARGET_TOKEN secret content (cross-repo mode only)"
+    description: "PAGES_TARGET_TOKEN secret content (drives the gh-pages API push)"
     required: false
   gh_token:
     description: "GH_TOKEN for release/repo API calls (needs contents:read to list releases)"
@@ -27,29 +27,23 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # Same-repo deploys go through GitHub Actions page deployments
-    # (upload-pages-artifact + deploy-pages) — observable as a workflow
-    # run, no dependency on the legacy branch-build pipeline. Cross-repo
-    # targets keep the gh-pages API push; those need PAGES_TARGET_TOKEN.
-    - name: Resolve deploy mode
+    # The page ALWAYS lives on the build-source repo (owner/armbian-build
+    # — the callers pass release_repo as the push target), pushed via the
+    # gh-pages API with PAGES_TARGET_TOKEN. A same-repo actions-mode
+    # deployment path used to exist but was unreachable by construction
+    # (release_repo is an armbian-build repo, never this extension repo)
+    # and was removed 2026-11-07.
+    - name: Resolve deploy gate
       id: gate
       shell: bash
       env:
         TOK: ${{ inputs.pages_token }}
-        TARGET_REPO: ${{ inputs.repo }}
-        CURRENT_REPO: ${{ github.repository }}
       run: |
-        if [ "$TARGET_REPO" = "$CURRENT_REPO" ]; then
-          echo "mode=actions" >> "$GITHUB_OUTPUT"
-          echo "deploy mode: actions (same-repo workflow deployment)"
-          exit 0
-        fi
         if [ -z "$TOK" ]; then
-          echo "::notice::PAGES_TARGET_TOKEN is not set — cross-repo images page push skipped."
+          echo "::notice::PAGES_TARGET_TOKEN is not set — images page push skipped."
           echo "skip=true" >> "$GITHUB_OUTPUT"
         else
-          echo "mode=api" >> "$GITHUB_OUTPUT"
-          echo "deploy mode: api (cross-repo gh-pages push)"
+          echo "deploy: gh-pages API push to the build-source repo"
         fi
 
     - name: Checkout (page generator)
@@ -232,57 +226,8 @@ runs:
         python3 -c 'import json; d = json.load(open("data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
         echo "=== index.html $(wc -c < images.html) bytes + data.json $(wc -c < data.json) bytes ==="
 
-    # ── actions mode: deploy through the run's Pages deployment ──
-
-    - name: Clear stale github-pages artifacts (actions mode)
-      # deploy-pages@v4 refuses when the run already holds a github-pages
-      # artifact — and a run CAN legitimately deploy twice. Drop this
-      # run's earlier artifact before uploading a fresh one.
-      if: steps.gate.outputs.mode == 'actions'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.gh_token }}
-        REPO: ${{ github.repository }}
-        RUN_ID: ${{ github.run_id }}
-      run: |
-        set -euo pipefail
-        gh api "repos/$REPO/actions/artifacts?per_page=100" > artifacts.json
-        ids="$(python3 -c '
-        import json, os
-        arts = json.load(open("artifacts.json")).get("artifacts", [])
-        run_id = int(os.environ["RUN_ID"])
-        print("\n".join(str(a["id"]) for a in arts
-                        if a["name"] == "github-pages"
-                        and (a.get("workflow_run") or {}).get("id") == run_id))')"
-        for id in $ids; do
-          gh api -X DELETE "repos/$REPO/actions/artifacts/$id" \
-            && echo "deleted stale github-pages artifact $id"
-        done
-
-    - name: Stage the site (actions mode)
-      if: steps.gate.outputs.mode == 'actions'
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p site/images
-        cp images.html site/images/index.html
-        cp data.json site/images/data.json
-        echo "staged images/index.html + images/data.json ($(wc -c < data.json) bytes data)"
-
-    - name: Upload pages artifact (actions mode)
-      if: steps.gate.outputs.mode == 'actions'
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: site
-
-    - name: Deploy the site (actions mode)
-      if: steps.gate.outputs.mode == 'actions'
-      uses: actions/deploy-pages@v4
-
-    # ── api mode: push a gh-pages commit to the target repo ──
-
-    - name: Push to the target repo's gh-pages (api mode)
-      if: steps.gate.outputs.mode == 'api'
+    - name: Push to the target repo's gh-pages
+      if: steps.gate.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.pages_token }}
@@ -351,11 +296,11 @@ runs:
         print(f"gh-pages commit pushed: {commit}")
         PYEOF
 
-    - name: Trigger and verify the pages build (api mode)
+    - name: Trigger and verify the pages build
       # The legacy branch pipeline can wedge silently (seen 2026-11-02 on
       # a fork: POST /pages/builds returns "queued" and nothing runs).
       # Fail loudly instead of leaving the site on stale content.
-      if: steps.gate.outputs.mode == 'api'
+      if: steps.gate.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.pages_token }}

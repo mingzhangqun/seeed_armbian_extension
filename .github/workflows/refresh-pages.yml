@@ -22,12 +22,10 @@ jobs:
     # The manifest read (≤4 rclone cats) replaced the share-link walk
     # that needed 45 minutes on a cold cache.
     timeout-minutes: 10
-    # pages/id-token: deploy-pages actions-mode deployment.
+    # The gh-pages push authenticates with PAGES_TARGET_TOKEN (a PAT);
+    # GITHUB_TOKEN only reads the release list.
     permissions:
       contents: read
-      pages: write
-      id-token: write
-      actions: write
     steps:
       - name: Probe secrets
         id: probe
@@ -72,8 +70,7 @@ jobs:
         with:
           tag: refresh
           # The page always lives on the build-source repo (armbian-build),
-          # pushed cross-repo to its gh-pages via the API (needs
-          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
+          # pushed to its gh-pages via the API (needs PAGES_TARGET_TOKEN).
           repo: ${{ steps.mirror.outputs.release_repo }}
           release_repo: ${{ steps.mirror.outputs.release_repo }}
           has_rclone: "true"

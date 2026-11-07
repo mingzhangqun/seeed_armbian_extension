@@ -465,12 +465,10 @@ jobs:
     name: Deploy the images page (build-source repo's Pages)
     needs: promote
     runs-on: ubuntu-latest
-    # pages/id-token: deploy-pages actions-mode deployment.
+    # The gh-pages push authenticates with PAGES_TARGET_TOKEN (a PAT);
+    # GITHUB_TOKEN only reads the release list.
     permissions:
       contents: read
-      pages: write
-      id-token: write
-      actions: write
     # The manifest read (≤4 rclone cats) replaced the share-link walk.
     timeout-minutes: 10
     steps:
@@ -482,8 +480,7 @@ jobs:
         with:
           tag: ${{ needs.promote.outputs.tag }}
           # The page always lives on the build-source repo (armbian-build),
-          # pushed cross-repo to its gh-pages via the API (needs
-          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
+          # pushed to its gh-pages via the API (needs PAGES_TARGET_TOKEN).
           repo: ${{ needs.promote.outputs.target_repo }}
           release_repo: ${{ needs.promote.outputs.target_repo }}
           has_rclone: ${{ needs.promote.outputs.has_rclone }}

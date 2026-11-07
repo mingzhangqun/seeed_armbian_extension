@@ -896,12 +896,10 @@ jobs:
     needs: [probe-secrets, plan, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    # pages/id-token: deploy-pages actions-mode deployment.
+    # The gh-pages push authenticates with PAGES_TARGET_TOKEN (a PAT);
+    # GITHUB_TOKEN only reads the release list.
     permissions:
       contents: read
-      pages: write
-      id-token: write
-      actions: write
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -912,8 +910,7 @@ jobs:
         with:
           tag: ${{ needs.plan.outputs.tag }}
           # The page always lives on the build-source repo (armbian-build),
-          # pushed cross-repo to its gh-pages via the API (needs
-          # PAGES_TARGET_TOKEN); no same-repo actions-mode deploys anymore.
+          # pushed to its gh-pages via the API (needs PAGES_TARGET_TOKEN).
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
