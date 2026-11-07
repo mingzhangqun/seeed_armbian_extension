@@ -142,8 +142,8 @@ jobs:
           set -euo pipefail
 
           # Tag resolved ONCE here so init-release/upload/publish agree.
-          # The run id makes reruns and same-minute dispatches immutable:
-          # a new build must never delete a published same-stamp release/tree.
+          # Rerun deliberately replaces this tag's candidate; it is not a
+          # resume operation. A new dispatch receives a different run id.
           tag="$(date -u +%y%m%d-%H%M)-r${GITHUB_RUN_ID}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -288,9 +288,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-    outputs:
-      previous_pre_release: ${{ steps.snapshot.outputs.previous_pre_release }}
-      referenced: ${{ steps.reset.outputs.referenced }}
     env:
       HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
     steps:
@@ -302,6 +299,31 @@ jobs:
         uses: ./.github/actions/setup-onedrive
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+      - name: Retire the current candidate before building
+        id: retire
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        run: |
+          set -euo pipefail
+          IBASE="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images"
+          old="$(rclone cat "$IBASE/slots.json" --contimeout 15s | jq -r '."pre-release" // empty')"
+          [ -n "$old" ] || { echo "no current candidate to retire"; exit 0; }
+          echo "retiring candidate $old before the new build"
+          rclone cat "$IBASE/slots.json" --contimeout 15s \
+            | jq '."pre-release" = null' | rclone rcat "$IBASE/slots.json"
+          echo "tag=$old" >> "$GITHUB_OUTPUT"
+
+      - name: Hide the retired candidate before deleting its tree
+        if: ${{ env.HAS_RCLONE == 'true' && steps.retire.outputs.tag != '' }}
+        uses: ./.github/actions/deploy-pages
+        with:
+          tag: retire-${{ needs.plan.outputs.tag }}
+          repo: ${{ needs.plan.outputs.release_repo }}
+          release_repo: ${{ needs.plan.outputs.release_repo }}
+          has_rclone: "true"
+          rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
+          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
 
       - name: Reset staging + garbage-collect unreferenced trees
         id: reset
@@ -330,18 +352,14 @@ jobs:
             echo "::error::$MBASE/images/slots.json not found — the mirror's pointer file is missing. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve."
             exit 1
           fi
-          # Never reset a referenced tree on rerun. A published candidate
-          # (or an already-promoted build) must survive page/cleanup flakes;
-          # only an unreferenced partial tree may be rebuilt in place.
-          if rclone cat "$MBASE/images/slots.json" --contimeout 15s | jq -e --arg tag "$TAG" '
-            .stable == $tag or ."pre-release" == $tag or ((.history // []) | index($tag) != null)
-          ' >/dev/null; then
-            echo "::notice::$TAG is referenced by slots.json — preserving its tree; rerun will only repair release/pages"
-            echo "referenced=true" >> "$GITHUB_OUTPUT"
-          else
-            rclone purge "$MBASE/images/trees/$TAG" --contimeout 15s 2>/dev/null \
-              || echo "$MBASE/images/trees/$TAG did not exist (fresh tag) — nothing to purge"
+          # The page no longer exposes the old candidate. Purge its tree
+          # only after that deploy succeeded; Rerun intentionally discards
+          # and rebuilds this tag rather than resuming a published build.
+          if [ -n "${{ steps.retire.outputs.tag }}" ]; then
+            rclone purge "$MBASE/images/trees/${{ steps.retire.outputs.tag }}" --contimeout 15s
           fi
+          rclone purge "$MBASE/images/trees/$TAG" --contimeout 15s 2>/dev/null \
+            || echo "$MBASE/images/trees/$TAG did not exist (fresh tag) — nothing to purge"
 
           python3 <<'PY'
           import json, os, subprocess, sys
@@ -388,14 +406,24 @@ jobs:
           print(f"GC done: referenced tags {sorted(referenced) or 'none'}, this run's tag {tag}")
           PY
 
-      - name: Snapshot the current candidate
-        id: snapshot
-        if: ${{ env.HAS_RCLONE == 'true' }}
+      - name: Remove the retired candidate Release
+        if: ${{ steps.retire.outputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
+          OLD_TAG: ${{ steps.retire.outputs.tag }}
         run: |
           set -euo pipefail
-          old="$(rclone cat "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/slots.json" --contimeout 15s | jq -r '."pre-release" // empty')"
-          echo "previous_pre_release=$old" >> "$GITHUB_OUTPUT"
-          echo "previous candidate: ${old:-<none>}"
+          state="$(gh release view "$OLD_TAG" --repo "$TARGET_REPO" \
+            --json isDraft,isPrerelease,assets,body --jq '[.isDraft,.isPrerelease,(.assets|length),.body]|@json' 2>/dev/null || true)"
+          [ -n "$state" ] || { echo "retired candidate Release $OLD_TAG is already absent"; exit 0; }
+          if [ "$(jq -r '.[0] or (.[1]|not) or (.[2] > 0)' <<<"$state")" = "true" ]; then
+            echo "::error::$OLD_TAG is not an asset-less pre-release; refusing to delete it"
+            exit 1
+          fi
+          jq -r '.[3]' <<<"$state" | grep -qE "${GITHUB_REPOSITORY}/actions/runs/[0-9]+" \
+            || { echo "::error::$OLD_TAG is not owned by this pipeline; refusing to delete it"; exit 1; }
+          gh release delete "$OLD_TAG" --repo "$TARGET_REPO" --yes --cleanup-tag
 
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
@@ -408,18 +436,12 @@ jobs:
           MATRIX: ${{ needs.plan.outputs.matrix }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.reset.outputs.referenced }}" = "true" ]; then
-            echo "::notice::$TAG already owns a referenced mirror tree; not deleting its Release"
-            exit 0
-          fi
-          # Same-run init cleanup may remove its own DRAFT on a retry.
-          # Never delete a published release: its tag may back a live slot.
+          # Rerun discards this tag's candidate and rebuilds it. The old
+          # pre-release has already been hidden and purged above.
           if gh release view "${TAG}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
-              echo "::error::${TAG} is already published; immutable build tags cannot replace it"
-              exit 1
-            fi
-            echo "Deleting this run's previous draft ${TAG} before retry"
+            state="$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
+            [ "$state" = "true true" ] || [ "$state" = "false true" ] \
+              || { echo "::error::${TAG} is not a pre-release (state: $state); refusing to replace it"; exit 1; }
             gh release delete "${TAG}" --repo "$TARGET_REPO" --yes
             gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
           fi
@@ -443,15 +465,11 @@ jobs:
             "${target_args[@]}" \
             --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
-  # NOTE: no post-purge page sync anymore. The tag-addressed layout never
-  # touches slots.json during the build window, so the deployed page stays
-  # valid (the previous pre-release remains visible until THIS build
-  # flips the pointer in the release job) — better than the old slot
-  # purge, which wiped the pre-release box off the page for hours.
+  # A build run discards any previous candidate at init. Rerun rebuilds
+  # this tag; use Pages - Refresh for a page-only failure instead.
 
   build:
     needs: [probe-secrets, plan, init-release]
-    if: ${{ needs.init-release.outputs.referenced != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     permissions:
@@ -873,7 +891,7 @@ jobs:
     # Finalizes the tag's tree after all entries upload: share links →
     # manifest → slot pointer → THEN flips the draft release visible.
     # Promotion to Stable is promote-images.yml (separate dispatch).
-    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.init-release.outputs.referenced == 'true') && (needs.upload-release.result == 'success' || needs.upload-release.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.upload-release.result == 'success' || needs.upload-release.result == 'skipped') }}
     runs-on: ubuntu-latest
     # The per-file rclone link calls (~70-90 files, OneDrive throttling
     # seen at scale) sit between a multi-hour matrix success and the
@@ -881,8 +899,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
-    outputs:
-      current_pre: ${{ steps.pointer.outputs.current_pre }}
     env:
       HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -1038,70 +1054,6 @@ jobs:
             --prerelease \
             --latest=false
 
-      - name: Record the current candidate after publishing
-        id: pointer
-        if: ${{ env.HAS_RCLONE == 'true' }}
-        run: |
-          set -euo pipefail
-          current="$(rclone cat "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/slots.json" --contimeout 15s | jq -r '."pre-release" // empty')"
-          echo "current_pre=$current" >> "$GITHUB_OUTPUT"
-          echo "current candidate: ${current:-<none>}"
-
-      - name: Retire the replaced pre-release tree
-        if: ${{ env.HAS_RCLONE == 'true' }}
-        # New candidate replaces old only after the new Release is fully
-        # published. CURRENT_PRE protects the same candidate on rerun.
-        env:
-          PREVIOUS_PRE_RELEASE: ${{ needs.init-release.outputs.previous_pre_release }}
-          CURRENT_PRE: ${{ steps.pointer.outputs.current_pre }}
-        run: |
-          set -euo pipefail
-          python3 - "$TAG" <<'PY'
-          import json, os, re, subprocess, sys
-
-          new_tag = sys.argv[1]
-          repo = os.environ["TARGET_REPO"]
-          old = os.environ.get("PREVIOUS_PRE_RELEASE", "").strip() or None
-          if old == os.environ.get("CURRENT_PRE"):
-              print("previous candidate is still the current candidate; nothing to purge")
-              sys.exit(0)
-          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
-          subprocess.run(
-              ["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
-              check=True, capture_output=True, text=True)
-          if not old or old == new_tag:
-              print("no replaced pre-release tree")
-              sys.exit(0)
-          # One candidate at a time: once the new candidate is fully
-          # published, its predecessor's mirror payload is no longer kept.
-          # Its GitHub Release remains as historical metadata.
-          subprocess.run(["rclone", "purge", f"{IBASE}/trees/{old}"], check=True)
-          print(f"purged replaced pre-release tree {old}; its Release is retained")
-
-          # Drop only other, unreferenced pre-release Releases owned by
-          # this pipeline. Stable/history Releases are never deleted.
-          rels = json.loads(subprocess.run(
-              ["gh", "release", "list", "--repo", repo, "--limit", "100", "--json",
-               "tagName,isDraft,isPrerelease"],
-              check=True, capture_output=True, text=True).stdout)
-          owned = re.compile(rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
-          for rel in rels:
-              tag = rel["tagName"]
-              if not rel["isPrerelease"] or rel["isDraft"] or tag == new_tag:
-                  continue
-              # assets/body are available on release VIEW, not list.
-              detail = json.loads(subprocess.run(
-                  ["gh", "release", "view", tag, "--repo", repo, "--json", "assets,body"],
-                  check=True, capture_output=True, text=True).stdout)
-              if detail["assets"] or not owned.search(detail.get("body") or ""):
-                  print(f"keeping pre-release {tag} (assets or foreign ownership)")
-                  print(f"keeping pre-release {tag} (assets or foreign ownership)")
-                  continue
-              subprocess.run(["gh", "release", "delete", tag, "--repo", repo,
-                              "--yes", "--cleanup-tag"], check=True)
-              print(f"deleted superseded pre-release Release {tag}")
-          PY
-
   # Template/config sync for the images page. The manifest read (≤4
   # rclone cats) replaced the mirror walk, so this is fast again.
   pages:
@@ -1151,64 +1103,43 @@ jobs:
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
-      PUBLISHED: ${{ needs.release.result == 'success' }}
-      REFERENCED: ${{ needs.init-release.outputs.referenced }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' && env.REFERENCED != 'true' && env.PUBLISHED != 'true' }}
+        if: ${{ env.HAS_RCLONE == 'true' }}
         uses: ./.github/actions/setup-onedrive
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
       - name: Delete orphaned draft + partial tree + slot pointer
         id: cleanup-pointer
-        # failure()/cancelled() are workflow-wide — a pages-job flake
-        # after a successful release lands here too, so the isDraft gate
-        # below is what protects a PUBLISHED release's tree from purging.
-        # The pointer reset is the janitor duty the old slot layout got
-        # for free (a purged slot dir vanished from the walk): a dangling
-        # slots.json.pre-release would make every later page deploy hard-
-        # fail on the missing manifest and freeze the deployed page.
+        # Discard only this attempt's candidate and its pointer; a tag
+        # already promoted to Stable is never cleaned up as a candidate.
         run: |
           set -euo pipefail
           if [ -z "${TAG:-}" ]; then
             echo "plan produced no tag — nothing was created; nothing to clean"
             exit 0
           fi
-          if [ "${HAS_RCLONE}" = "true" ]; then
-            echo "::notice::cleanup validates actual mirror/Release state, not this attempt's job result"
-          fi
-          if [ "${REFERENCED}" = "true" ]; then
-            echo "::notice::$TAG was referenced at init — preserving Release, tree, and pointer"
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          PUBLISHED="$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq 'if .isDraft then "false" else "true" end' 2>/dev/null || echo false)"
-          export PUBLISHED
-          if [ "$PUBLISHED" = "true" ]; then
-            echo "::notice::$TAG is published — keeping Release/tree regardless of this attempt's release result"
-          fi
-          if ! gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            echo "::notice::release $TAG does not exist — cleaning only this run's mirror/pointer state"
-          elif [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
-            echo "::notice::$TAG is already published — keeping release and tree; only the page needs recovery"
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            # Still a draft: discard this run only. Do not resurrect the
-            # previous candidate; there is at most one pre-release.
+          # Every build attempt owns its candidate. A failed/cancelled run
+          # discards that candidate; Rerun starts fresh rather than resuming
+          # a previously published tree.
+          if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            state="$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
+            [ "$state" = "true true" ] || [ "$state" = "false true" ] \
+              || { echo "::error::$TAG is no longer a pre-release (state: $state); refusing cleanup"; exit 1; }
+            gh release view "$TAG" --repo "$TARGET_REPO" --json body --jq .body \
+              | grep -qE "${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}([/[:space:]]|$)" \
+              || { echo "::error::$TAG is not owned by run ${GITHUB_RUN_ID}; refusing cleanup"; exit 1; }
             gh release delete "$TAG" --repo "$TARGET_REPO" --yes
             gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
-            echo "deleted orphan draft release $TAG"
+            echo "deleted this attempt's candidate Release $TAG"
           fi
-          if [ "${HAS_RCLONE}" = "true" ] && [ "${PUBLISHED}" != "true" ]; then
-            # The tree never became visible (the release job writes the
-            # manifest + pointer before publishing), so whatever the
-            # matrix uploaded renders nowhere. One purge per root takes
-            # the tree AND its manifest (it lives inside); the pointer
-            # reset below follows. Loaders ride inside the same tree.
+          if [ "${HAS_RCLONE}" = "true" ]; then
+          # Rerun owns this tag across attempts; always clear its tree,
+          # even when the Release was already published before the failure.
             rclone purge "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG" --contimeout 15s 2>/dev/null \
               || echo "trees/$TAG did not exist — nothing to purge"
           fi
@@ -1220,7 +1151,6 @@ jobs:
           if os.environ.get("HAS_RCLONE") != "true":
               sys.exit(0)
           tag = sys.argv[1]
-          published = os.environ.get("PUBLISHED") == "true"
           path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
           r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
                              capture_output=True, text=True)
@@ -1231,10 +1161,6 @@ jobs:
           if slots.get("pre-release") != tag:
               print(f"pointer intact (pre-release = {slots.get('pre-release')!r}) — nothing to clear")
               sys.exit(0)
-          if published:
-              print("published candidate retains its pointer; refresh will expose it")
-              print("published=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-              sys.exit(0)
           slots["pre-release"] = None
           w = subprocess.run(["rclone", "rcat", path],
                              input=json.dumps(slots, indent=1, sort_keys=True) + "\n",
@@ -1242,21 +1168,9 @@ jobs:
           if w.returncode != 0:
               print(f"::error::failed to clear this run's pre-release pointer ({w.stderr.strip()})", file=sys.stderr)
               sys.exit(1)
-          print("slots.json: pre-release cleared for unpublished candidate")
+          print("slots.json: this attempt's pre-release cleared")
           print("cleared=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
           PY
-
-      - name: Refresh the page after preserving a published candidate
-        if: ${{ env.HAS_RCLONE == 'true' && (env.REFERENCED == 'true' || env.PUBLISHED == 'true' || steps.cleanup-pointer.outputs.published == 'true') }}
-        uses: ./.github/actions/deploy-pages
-        with:
-          tag: recovery-${{ needs.plan.outputs.tag }}
-          repo: ${{ needs.plan.outputs.release_repo }}
-          release_repo: ${{ needs.plan.outputs.release_repo }}
-          has_rclone: "true"
-          rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
-          gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
 
       - name: Refresh the page after failure cleanup
         if: ${{ env.HAS_RCLONE == 'true' && steps.cleanup-pointer.outputs.cleared == 'true' }}
