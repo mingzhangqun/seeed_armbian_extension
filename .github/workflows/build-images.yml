@@ -649,11 +649,12 @@ jobs:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
       - name: Upload images to this tag's tree (OneDrive mode)
-        # dest = armbian/images/trees/<tag>/<board>/<sub>[/ota]/ (tag-
-        # addressed: the tree never moves; promote only flips slots.json).
-        # <sub> = "<profile>" or "<profile>-secure-boot". The release job
-        # links these files into trees/<tag>/manifest.json after the matrix
-        # lands; promote validates the tree shape then.
+        # dest = .../trees/<tag>/<board>/<sec>/<profile>[/ota]/ — security
+        # is a STRUCTURAL directory level (plain|secure), matching the
+        # manifest and the page's security-group rendering; profile is
+        # recovery|ab. The tree never moves; promote only flips slots.json.
+        # The release job links these files into trees/<tag>/manifest.json
+        # after the matrix lands; promote validates the tree shape then.
         if: ${{ env.HAS_RCLONE == 'true' }}
         working-directory: armbian-build
         env:
@@ -669,9 +670,9 @@ jobs:
             exit 1
           fi
 
-          sub="$PROFILE"
-          [ -n "$SECURITY" ] && sub="$sub-$SECURITY"
-          dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/$BOARD/$sub"
+          sec_dir="plain"
+          [ -n "$SECURITY" ] && sec_dir="secure"
+          dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/$BOARD/$sec_dir/$PROFILE"
           echo "Uploading to $dest"
           rclone mkdir "$dest" 2>/dev/null || true
           rclone copy output/images/ "$dest" \
@@ -693,9 +694,9 @@ jobs:
         # uploads — parallel legs would race the same dest paths with
         # differently-timestamped binaries. Missing rkspi_loader.img for
         # boards without BOOT_SUPPORT_SPI is expected, not an error.
-        # Dest: trees/<tag>/loaders/<board>/<sec>/ — loaders live INSIDE
-        # the tag's tree (same build, same purge unit; the manifest's
-        # "loaders" section strips the physical loaders/ prefix).
+        # Dest: trees/<tag>/<board>/<sec>/loaders/ — loaders sit INSIDE
+        # their security level as a kind sibling of recovery|ab (one
+        # build, one purge unit, one manifest map).
         if: ${{ env.HAS_RCLONE == 'true' && matrix.tier == 'cli' && matrix.release == 'trixie' && (matrix.profile || 'recovery') == 'recovery' }}
         working-directory: armbian-build
         run: |
@@ -709,7 +710,7 @@ jobs:
           for d in "${dirs[@]}"; do
             board="$(basename "$(dirname "$d")")"
             sec="$(basename "$d")"
-            dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/loaders/$board/$sec"
+            dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/$board/$sec/loaders"
             echo "Uploading loaders to $dest"
             rclone mkdir "$dest" 2>/dev/null || true
             rclone copy "$d/" "$dest" \
@@ -827,24 +828,18 @@ jobs:
                   print(f"::error::rcat failed for {path}: {r.stderr.strip()}", file=sys.stderr)
                   sys.exit(1)
 
-          # ONE recursive walk of the tag's tree covers images AND the
-          # loaders subtree. Tree-relative keys (no tag prefix): the
-          # manifest stays valid whichever slot later points at it. No
-          # root identity file exists yet at this point (the manifest
-          # itself is written after this walk; the old tag file was
-          # folded into its "tag" field). Loaders keys drop the physical
-          # "loaders/" prefix so the manifest's shape is unchanged from
-          # the two-root era.
-          img_files, ldr_files = [], []
-          for p in lsjson_files(f"{IBASE}/trees/{tag}"):
-              if p.startswith("loaders/"):
-                  ldr_files.append(p[len("loaders/"):])
-              else:
-                  img_files.append(p)
+          # ONE recursive walk of the tag's tree; ONE flat map — keys are
+          # tree-relative paths ("<board>/<sec>/<kind>/[ota/]<file>"), no
+          # tag prefix (the manifest stays valid whichever slot later
+          # points at it) and no per-section splitting: loaders and
+          # images share the map, told apart by the kind segment exactly
+          # like the page does. The manifest itself is written after
+          # this walk, so no root identity file exists yet.
+          rel_files = [p for p in lsjson_files(f"{IBASE}/trees/{tag}")
+                       if p != "manifest.json"]
 
-          def make_link(rel_section, rel):
-              dest = f"{IBASE}/trees/{tag}/{rel_section}/{rel}" if rel_section == "loaders" \
-                  else f"{IBASE}/trees/{tag}/{rel}"
+          def make_link(rel):
+              dest = f"{IBASE}/trees/{tag}/{rel}"
               for attempt in (1, 2):
                   lr = subprocess.run(["rclone", "link", "--timeout", "60s", dest],
                                       capture_output=True, text=True)
@@ -855,33 +850,27 @@ jobs:
                       time.sleep(3)
               return rel, False, err
 
-          def link_all(section, rels):
-              out, failures = {}, []
-              with ThreadPoolExecutor(max_workers=4) as ex:
-                  for i, (rel, ok, res) in enumerate(ex.map(lambda r: make_link(section, r), rels), 1):
-                      if ok:
-                          out[rel] = res
-                      else:
-                          failures.append(rel)
-                          print(f"::warning::link failed: {rel}: {res}", file=sys.stderr)
-                      if i % 25 == 0:
-                          print(f"  … {i}/{len(rels)} links ({section})", file=sys.stderr)
-              return out, failures
-
-          images, ifail = link_all("images", img_files)
-          loaders, lfail = link_all("loaders", ldr_files)
-          if not images:
-              print(f"::error::no image links created ({len(ifail)}/{len(img_files)} failed) — OneDrive throttled? Refusing to publish an unlinkable tree.", file=sys.stderr)
+          files_map, failures = {}, []
+          with ThreadPoolExecutor(max_workers=4) as ex:
+              for i, (rel, ok, res) in enumerate(ex.map(make_link, rel_files), 1):
+                  if ok:
+                      files_map[rel] = res
+                  else:
+                      failures.append(rel)
+                      print(f"::warning::link failed: {rel}: {res}", file=sys.stderr)
+                  if i % 25 == 0:
+                      print(f"  … {i}/{len(rel_files)} links", file=sys.stderr)
+          if not files_map:
+              print(f"::error::no links created ({len(failures)}/{len(rel_files)} failed) — OneDrive throttled? Refusing to publish an unlinkable tree.", file=sys.stderr)
               sys.exit(1)
 
           manifest = {
               "tag": tag,
               "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "images": images,
-              "loaders": loaders,
+              "files": files_map,
           }
           rcat(f"{IBASE}/trees/{tag}/manifest.json", json.dumps(manifest, indent=1, sort_keys=True))
-          print(f"manifest written into trees/{tag}/: {len(images)} image links, {len(loaders)} loader links, {len(ifail) + len(lfail)} failures")
+          print(f"manifest written into trees/{tag}/: {len(files_map)} links, {len(failures)} failures")
 
           # slots.json pointer — read-verify-write.
           r = subprocess.run(["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],

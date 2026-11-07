@@ -17,8 +17,13 @@
     { repo,                         CFG.repo — GitHub release links
       slots:  { "stable": tag?, "pre-release": tag?,
                 "history": [tag, ...] },          (0..N older stables)
-      manifests: { tag: { images: {rel: url}, loaders: {rel: url} } },
+      manifests: { tag: { files: {relpath: url} } },
       releases: [{tag_name, prerelease, published_at}, ...] }
+    where a relpath is "<board>/<sec>/<kind>/[ota/]<file>" — sec is
+    plain|secure, kind is recovery|ab|loaders. ONE namespace: the
+    storage tree, the manifest and the page's rendering hierarchy
+    (board → security group → {Loader, Recovery, A/B}) are the same
+    shape.
 
   Data flow (all client-side at browse time):
     * slot binding: SLOTS = data.json's slots — names the build each
@@ -28,7 +33,7 @@
       release-list inference is only the fallback when no mirror tags
       exist (fork mode: slots={}).
     * LINKS is synthesized from slots + manifests (synthLinks below):
-      "<slot>/<board>/<sub>/..." and "loaders/<slot>/..."; history tags
+      "<slot>/<board>/<sec>/<kind>/..." — one namespace; history tags
       prefix "history/<tag>/". Boards are discovered from the keys.
   Layout: collapsible slot bars (Stable expanded by default, one gray
   History card per older stable), pill anchor nav under the title,
@@ -218,14 +223,14 @@ async function loadData() {
 }
 
 // slots + manifests → the flat path→URL map the page consumes:
-// "<slot>/<board>/..." and "loaders/<slot>/..."; history tags prefix
+// "<slot>/<board>/<sec>/<kind>/..." (ONE namespace — loaders ride the
+// same map, distinguished by the kind segment). History tags prefix
 // "history/<tag>/". Single implementation (was deploy-pages python).
 function synthLinks(slots, manifests) {
   const links = {};
   const emit = (prefix, m) => {
-    const imgs = m.images || {}, lds = m.loaders || {};
-    for (const k in imgs) links[prefix + "/" + k] = imgs[k];
-    for (const k in lds) links["loaders/" + prefix + "/" + k] = lds[k];
+    const files = m.files || {};
+    for (const k in files) links[prefix + "/" + k] = files[k];
   };
   for (const slot of ["pre-release", "stable"])
     if (slots[slot] && manifests[slots[slot]]) emit(slot, manifests[slots[slot]]);
@@ -283,7 +288,7 @@ function parse(name, size, url, secure, lk) {
   // version "26.11.0-trunk" → "26.11.0"; release codename + kernel
   const vm = name.match(VER_PAT);
   const rm = name.match(REL_PAT);
-  // secure comes from the mirror's "<profile>-secure-boot/" dir, not the
+  // secure comes from the mirror's "<sec>/" dir (plain|secure), not the
   // filename — plain and secure builds share identical filenames by design.
   return { board: board, variant: variant, mode: mode, crypt: crypt,
            secure: !!secure, lk: lk,
@@ -393,16 +398,17 @@ function buildModeBox(title, subtitle, entries, opts, slot) {
   return box;
 }
 
-// Loader walk data rides the same LINKS map — the deploy walk covers the
-// armbian/loaders/ mirror too, keys "loaders/<slot>/<board>/<sec>/<file>".
+// Loader rows ride the same LINKS map, keys
+// "<slot>/<board>/<sec>/loaders/<file>" — the kind segment IS the
+// loader marker, so loaders and images share one namespace.
 // Boards whose layout builds no SPI image simply lack the spi entry.
 function slotLoaders(slotDir) {
   const out = new Map();
-  const prefix = "loaders/" + slotDir + "/";
+  const prefix = slotDir + "/";
   for (const path of Object.keys(LINKS)) {
     if (!path.startsWith(prefix)) continue;
-    const parts = path.split("/");
-    if (parts.length !== 5) continue;
+    const parts = path.split("/");   // [slot, board, sec, "loaders", file]
+    if (parts.length !== 5 || parts[3] !== "loaders") continue;
     const file = parts[4];
     if (!file.endsWith(".xz")) continue; // .sha256 siblings resolved on demand
     const kind = file === "spl_loader_maskrom.bin.xz" ? "maskrom"
@@ -410,11 +416,11 @@ function slotLoaders(slotDir) {
     if (!kind) continue;
     // Board keys must match parse()'s BOARD_PAT capture ("rk3576-devkit"),
     // not the manifest's full dir name ("recomputer-rk3576-devkit").
-    const board = parts[2].replace(/^recomputer-/, "");
+    const board = parts[1].replace(/^recomputer-/, "");
     const b = out.get(board) || {};
-    const s = b[parts[3]] || {};
+    const s = b[parts[2]] || {};
     s[kind] = path;
-    b[parts[3]] = s;
+    b[parts[2]] = s;
     out.set(board, b);
   }
   return out;
@@ -499,7 +505,7 @@ function buildSection(board, entries, slot, loaders) {
 
   // downloads: two security groups (green PLAIN / red SECURE frames),
   // each holding mode boxes — Loader first, then Recovery / A/B.
-  // secure = the mirror's -secure-boot profile dir (see slotAssets) — NOT
+  // secure = the mirror's <sec> dir (see slotAssets) — NOT
   // the -crypt filename marker, which is encryption and self-describes.
   const rec  = entries.filter(e => e.mode !== "ab" && !e.secure);
   const ab   = entries.filter(e => e.mode === "ab" && !e.secure);
@@ -581,19 +587,24 @@ function slotsFrom(list) {
 // slot as LINKS — no runtime fetch needed (CORS blocks github.io →
 // github.com asset fetches).
 function slotAssets(slotDir) {
-  // Keys are "<slot>/<board>/<profile>[-secure-boot]/[ota/]<file>".
-  // Scope to this slot's subtree so the three slot sections don't all
-  // render the whole mirror; the -secure-boot profile dir is the ONLY
-  // secure marker (filenames are identical across profiles) — carry it
-  // into `secure` and keep the key on the asset for exact link lookups.
-  // Size is 0 (rclone link doesn't report it).
+  // Keys are "<slot>/<board>/<sec>/<kind>/[ota/]<file>" (kind =
+  // recovery|ab|loaders). Scope to this slot's subtree so the slot
+  // sections don't all render the whole mirror; the sec dir
+  // (plain|secure) is the ONLY secure marker (filenames are identical
+  // across profiles) — carry it into `secure`. Loader rows are not
+  // image assets; slotLoaders() walks them from the same map.
+  // Size is 0 (the manifest carries no sizes).
   return Object.keys(LINKS)
-    .filter(path => path.startsWith(slotDir + "/") && path !== slotDir + "/tag")
+    .filter(path => {
+      if (!path.startsWith(slotDir + "/")) return false;
+      const parts = path.split("/");          // [slot, board, sec, kind, ...]
+      return parts.length >= 5 && parts[3] !== "loaders";
+    })
     .map(path => ({
       name: path.split("/").pop(),
       size: 0,
       browser_download_url: LINKS[path],
-      secure: (path.split("/")[2] || "").endsWith("-secure-boot"),
+      secure: path.split("/")[2] === "secure",
       lk: path,
     }));
 }

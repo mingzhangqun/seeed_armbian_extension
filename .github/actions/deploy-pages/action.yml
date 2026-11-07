@@ -117,8 +117,8 @@ runs:
             if m.get("tag") != tag:
                 print(f"::error::trees/{tag}/manifest.json is signed {m.get('tag')!r} — mismatch", file=sys.stderr)
                 sys.exit(1)
-            if not (m.get("images") or {}):
-                print(f"::error::trees/{tag}/manifest.json has an empty images section — a referenced tree must carry files", file=sys.stderr)
+            if not (m.get("files") or {}):
+                print(f"::error::trees/{tag}/manifest.json has an empty files section — a referenced tree must carry files", file=sys.stderr)
                 sys.exit(1)
             manifests[tag] = m
 
@@ -148,8 +148,7 @@ runs:
 
         json.dump({"slots": page_slots, "manifests": manifests},
                   open("data-core.json", "w"))
-        n_links = sum(len(m.get("images") or {}) + len(m.get("loaders") or {})
-                      for m in manifests.values())
+        n_links = sum(len(m.get("files") or {}) for m in manifests.values())
         print(f"manifest: {len(page_slots)} slot keys, history={len(hist)}, "
               f"{len(manifests)} manifests, {n_links} links total", file=sys.stderr)
         PY

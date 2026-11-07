@@ -7,7 +7,8 @@ name: "Images - Release"
 #   2. GUARD: slots.json pre-release must name the same tag — the
 #      manifest index and the release list must agree before anything
 #      moves
-#   3. VALIDATE the tag's tree: every <board>/<sub>/ holds >=1 *.img.xz
+#   3. VALIDATE the tag's tree: every <board>/<sec>/<kind>/ (sec =
+#      plain|secure, kind = recovery|ab|loaders) holds >=1 *.img.xz
 #      with a .sha256 sibling and a non-empty ota/, no strays, and the
 #      tree's manifest.json is signed with the tag and covers every
 #      file both ways
@@ -189,7 +190,7 @@ jobs:
         # Skipped in recover-page mode: nothing is about to be written.
         # Shape + signed manifest, all BEFORE anything is published or
         # flipped:
-        #   a) every <board>/<sub>/ is complete: >=1 *.img.xz, each with
+        #   a) every <board>/<sec>/<kind>/ is complete: >=1 *.img.xz, each with
         #      a .sha256 sibling, non-empty ota/, no stray files
         #   b) trees/<tag>/manifest.json exists, is signed with the tag
         #      (the "tag" field is the build's signature — the old root
@@ -227,49 +228,56 @@ jobs:
 
           errors = []
 
-          # a) shape of the images tree. ONE walk covers images and the
-          # loaders subtree. The root-level identity file is the manifest
-          # itself — anything else there is a stray. "loaders/<board>/<sec>/"
-          # is its own namespace, exempt from the <board>/<sub>/ rules.
+          # a) shape of the tag's tree. ONE walk; paths are
+          # "<board>/<sec>/<kind>/[ota/]<file>" with sec = plain|secure
+          # and kind = recovery|ab|loaders. The root-level identity file
+          # is the manifest itself — anything else at tree root is a
+          # stray, and every board dir must hold plain/ at minimum.
           files = lsjson_files(f"{IBASE}/trees/{tag_expected}")
-          by_sub, loader_dirs = defaultdict(list), set()
+          KINDS = {"recovery", "ab", "loaders"}
+          by_kind, boards = defaultdict(list), set()
           for p in files:
               if p == "manifest.json":
                   continue
-              if p.startswith("loaders/"):
-                  rest = p.split("/", 2)
-                  if len(rest) < 3 or not rest[2]:
-                      errors.append(f"stray file inside trees/{tag_expected}/loaders/: {p}")
-                  else:
-                      loader_dirs.add((rest[1], rest[2]))
-                  continue
-              parts = p.split("/", 2)
-              if len(parts) == 1:
+              parts = p.split("/")
+              if len(parts) < 2:
                   errors.append(f"stray file at trees/{tag_expected}/ root: {p}")
-              elif len(parts) == 2:
-                  errors.append(f"stray file at trees/{tag_expected}/{parts[0]}/ root: {p}")
-              else:
-                  by_sub[(parts[0], parts[1])].append(parts[2])
+                  continue
+              board, sec = parts[0], parts[1]
+              if sec not in ("plain", "secure"):
+                  errors.append(f"{board}: '{sec}' is not a security dir (expected plain|secure): {p}")
+                  continue
+              boards.add(board)
+              if len(parts) < 4:
+                  errors.append(f"stray file at trees/{tag_expected}/{board}/{sec}/ root: {p}")
+                  continue
+              if parts[2] not in KINDS:
+                  errors.append(f"{board}/{sec}: unknown kind '{parts[2]}': {p}")
+                  continue
+              by_kind[(board, sec, parts[2])].append("/".join(parts[3:]))
 
-          if not by_sub:
-              errors.append(f"trees/{tag_expected}/ holds no <board>/<sub>/ content at all")
+          if not any(k[2] in ("recovery", "ab") for k in by_kind):
+              errors.append(f"trees/{tag_expected}/ holds no image content at all")
 
-          for (board, sub), fs in sorted(by_sub.items()):
+          for (board, sec, kind), fs in sorted(by_kind.items()):
+              if kind == "loaders":
+                  if not fs:
+                      errors.append(f"{board}/{sec}/loaders/ is empty")
+                  print(f"{board}/{sec}/loaders: {len(fs)} files")
+                  continue
               xz = sorted(n for n in fs if n.endswith(".img.xz"))
               if not xz:
-                  errors.append(f"{board}: trees/{tag_expected}/{board}/{sub}/ has no *.img.xz")
+                  errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/ has no *.img.xz")
               for x in xz:
                   if x + ".sha256" not in fs:
-                      errors.append(f"{board}: trees/{tag_expected}/{board}/{sub}/{x} has no .sha256 sibling")
+                      errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/{x} has no .sha256 sibling")
               ota = [n for n in fs if n.startswith("ota/")]
               if not ota:
-                  errors.append(f"{board}: trees/{tag_expected}/{board}/{sub}/ota/ is empty or missing")
-              print(f"{board}/{sub}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
-          if loader_dirs:
-              print(f"loaders: {len(loader_dirs)} board/sec dirs")
+                  errors.append(f"{board}: trees/{tag_expected}/{board}/{sec}/{kind}/ota/ is empty or missing")
+              print(f"{board}/{sec}/{kind}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
 
-          # b) signed manifest, coverage both directions, both sections
-          # (loaders keys carry no physical "loaders/" prefix).
+          # b) signed manifest, coverage both directions against the ONE
+          # files map.
           try:
               m = json.loads(rcat(f"{IBASE}/trees/{tag_expected}/manifest.json"))
           except json.JSONDecodeError as e:
@@ -278,28 +286,22 @@ jobs:
           if m is not None:
               if m.get("tag") != tag_expected:
                   errors.append(f"trees/{tag_expected}/manifest.json is signed {m.get('tag')!r} — wrong or unsigned tree")
-              imgs = m.get("images") or {}
-              lds = m.get("loaders") or {}
-              iwalked = {p for p in files if p != "manifest.json" and not p.startswith("loaders/")}
-              lwalked = {p[len("loaders/"):] for p in files if p.startswith("loaders/")}
-              for p in sorted(iwalked - set(imgs)):
-                  errors.append(f"manifest missing images entry for {p}")
-              for k in sorted(set(imgs) - iwalked):
-                  errors.append(f"manifest images entry {k} not on the mirror")
-              if any(not u for u in imgs.values()):
-                  errors.append("manifest images holds an empty URL")
-              for p in sorted(lwalked - set(lds)):
-                  errors.append(f"manifest missing loaders entry for {p}")
-              for k in sorted(set(lds) - lwalked):
-                  errors.append(f"manifest loaders entry {k} not on the mirror")
-              print(f"manifest: {len(imgs)} image links, {len(lds)} loader links")
+              mf = m.get("files") or {}
+              walked = {p for p in files if p != "manifest.json"}
+              for p in sorted(walked - set(mf)):
+                  errors.append(f"manifest missing entry for {p}")
+              for k in sorted(set(mf) - walked):
+                  errors.append(f"manifest entry {k} not on the mirror")
+              if any(not u for u in mf.values()):
+                  errors.append("manifest holds an empty URL")
+              print(f"manifest: {len(mf)} links")
 
           if errors:
               for e in errors:
                   print(f"::error::{e}")
               sys.exit(1)
-          print(f"tree OK: tag {tag_expected}, {len({b for b, _ in by_sub})} boards, "
-                f"{len(by_sub)} board/sub dirs, {len(files)} files")
+          print(f"tree OK: tag {tag_expected}, {len(boards)} boards, "
+                f"{len(by_kind)} board/sec/kind dirs, {len(files)} files")
           PY
 
       - name: Publish + flip slots.json
