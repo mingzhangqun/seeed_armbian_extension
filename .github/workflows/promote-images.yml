@@ -251,6 +251,7 @@ jobs:
           print(f"changed={'true' if changed else 'false'}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
           print(f"reconciled slots: {old}")
           PY
+
       - name: Validate every referenced tree
         run: |
           set -euo pipefail
@@ -258,7 +259,6 @@ jobs:
           import json, os, subprocess, sys
           from collections import defaultdict
 
-          tag_expected = os.environ["TAG"].strip()
           IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
 
           def rcat(path):
