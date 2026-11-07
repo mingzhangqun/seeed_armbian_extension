@@ -11,12 +11,9 @@ inputs:
   release_repo:
     description: "Repo where the release lives (owner/repo)"
     required: true
-  has_rclone:
-    description: "Whether RCLONE_CONFIG is available (true/false)"
-    required: true
   rclone_config:
-    description: "RCLONE_CONFIG secret content"
-    required: false
+    description: "RCLONE_CONFIG secret content (required for the mirror manifest)"
+    required: true
   pages_token:
     description: "PAGES_TARGET_TOKEN secret content (drives the gh-pages API push)"
     required: false
@@ -38,12 +35,7 @@ runs:
       shell: bash
       env:
         TOK: ${{ inputs.pages_token }}
-        HAS_RCLONE: ${{ inputs.has_rclone }}
       run: |
-        if [ "$HAS_RCLONE" != "true" ]; then
-          echo "::error::images page deployment requires the OneDrive manifest; refusing to replace live data with an empty release-only bundle"
-          exit 1
-        fi
         if [ -z "$TOK" ]; then
           echo "::notice::PAGES_TARGET_TOKEN is not set — images page push skipped."
           echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -56,7 +48,7 @@ runs:
       uses: actions/checkout@v4
 
     - name: Setup rclone (seeed-storage OneDrive remote)
-      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      if: steps.gate.outputs.skip != 'true'
       uses: ./.github/actions/setup-onedrive
       with:
         rclone_config: ${{ inputs.rclone_config }}
@@ -77,7 +69,7 @@ runs:
       # error — deploying anyway would strip that slot's links off a
       # good page (same stance as the old "no share links at all"
       # refusal).
-      if: steps.gate.outputs.skip != 'true' && inputs.has_rclone == 'true'
+      if: steps.gate.outputs.skip != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -170,18 +162,13 @@ runs:
         GH_TOKEN: ${{ inputs.gh_token }}
         PAGE_REPO: ${{ inputs.release_repo }}
         TAG: ${{ inputs.tag }}
-        HAS_RCLONE: ${{ inputs.has_rclone }}
       run: |
         set -euo pipefail
         [ -n "$PAGE_REPO" ] \
           || { echo "::error::PAGE_REPO empty"; exit 1; }
 
-        if [ "${HAS_RCLONE:-}" = "true" ] && [ -f data-core.json ]; then
-          :   # data-core.json comes from the manifest step
-        else
-          echo "::error::missing mirror data-core.json — refusing to deploy an empty page"
-          exit 1
-        fi
+        [ -f data-core.json ] \
+          || { echo "::error::missing mirror data-core.json — refusing to deploy an empty page"; exit 1; }
 
         # Fetch the release list at deploy time — the page itself makes
         # zero runtime API calls (60 req/hr/IP limit for unauthenticated

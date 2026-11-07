@@ -30,8 +30,7 @@
       slot holds; a slot without a tag stays hidden, so after promotion
       the pre slot vanishes with no tag-ordering heuristic.
     * RELEASES joins in per-tag metadata (publish date, GitHub link);
-      release-list inference is only the fallback when no mirror tags
-      exist (fork mode: slots={}; assets supply the download links).
+      all download links come from the OneDrive manifests.
     * LINKS is synthesized from slots + manifests (synthLinks below):
       "<slot>/<board>/<sec>/<kind>/..." — one namespace; history tags
       prefix "history/<tag>/". Boards are discovered from the keys.
@@ -573,23 +572,8 @@ function historyTags() {
   return Array.isArray(SLOTS && SLOTS.history) ? SLOTS.history.filter(Boolean) : [];
 }
 
-// Fallback (fork mode — SLOTS={} because the mirror walk never ran):
-// infer the slots from the /releases list alone. One "previous" card
-// (parity with the old scalar previous slot).
-function slotsFrom(list) {
-  const fulls = [], pres = [];
-  for (const r of list || []) (r.prerelease ? pres : fulls).push(r);
-  const latest = fulls[0] || null;      // list is newest-first
-  let pre = pres[0] || null;
-  // tags are YYMMDD-HHMM → lexicographic compare = chronological.
-  // A prerelease older than latest means "already promoted" → hide it.
-  if (pre && latest && String(pre.tag_name) <= String(latest.tag_name)) pre = null;
-  return { latest: latest, history: fulls.slice(1, 2), pre: pre };
-}
-
-// OneDrive-mode: the build-time rclone walk embeds every file under every
-// slot as LINKS — no runtime fetch needed (CORS blocks github.io →
-// github.com asset fetches).
+// OneDrive: the build-time per-file share links are embedded in each
+// manifest — no runtime cross-origin fetches.
 function slotAssets(slotDir) {
   // Keys are "<slot>/<board>/<sec>/<kind>/[ota/]<file>" (kind =
   // recovery|ab|loaders). Scope to this slot's subtree so the slot
@@ -686,14 +670,9 @@ async function boot() {
     // calls, no cross-origin fetches (the loading banner covers the
     // async gap).
     await loadData();
-    // slots.json binds the slots when present (OneDrive mode);
-    // release-list inference is the fallback (fork mode: SLOTS={}).
-    const hasMirror = !!(SLOTS && (SLOTS.stable || SLOTS["pre-release"] || historyTags().length));
-    const s = hasMirror
-      ? { latest: mirrorSlot("latest"), pre: mirrorSlot("pre"),
-          history: historyTags().map(t => relFor(t, false)) }
-      : slotsFrom(RELEASES);
-    if (!s.latest && !s.pre) throw new Error("no releases yet");
+    const s = { latest: mirrorSlot("latest"), pre: mirrorSlot("pre"),
+                history: historyTags().map(t => relFor(t, false)) };
+    if (!s.latest && !s.pre) throw new Error("no published image trees");
 
     boards.hidden = true;  // all slot cards render as collapsible bars below
     const slots = document.getElementById("slots");

@@ -6,13 +6,9 @@ inputs:
     required: false
     type: string
     default: "false"
-  has_rclone:
-    description: "Whether RCLONE_CONFIG is available (true/false)"
-    required: true
-    type: string
   rclone_config:
-    description: "RCLONE_CONFIG secret content"
-    required: false
+    description: "RCLONE_CONFIG secret content (required for image publication)"
+    required: true
     type: string
   private_key_pem:
     description: "PRIVATE_KEY_PEM secret content"
@@ -31,16 +27,18 @@ runs:
   using: "composite"
   steps:
     - name: Setup rclone (seeed-storage OneDrive remote)
-      if: inputs.has_rclone == 'true'
       uses: ./.github/actions/setup-onedrive
       with:
         rclone_config: ${{ inputs.rclone_config }}
 
-    - name: Check OneDrive mirror availability (hard gate)
-      if: inputs.has_rclone == 'true'
+    - name: Require and check the OneDrive mirror
       shell: bash
+      env:
+        RCLONE_CONFIG: ${{ inputs.rclone_config }}
       run: |
         set -euo pipefail
+        [ -n "$RCLONE_CONFIG" ] \
+          || { echo "::error::RCLONE_CONFIG is required — images are published only to OneDrive; no GitHub Release asset fallback exists."; exit 1; }
         # Reachability gate only — the per-owner namespace
         # (armbian/<owner>/images) may not exist yet on a fresh mirror;
         # the build's uploads create it.
@@ -50,12 +48,6 @@ runs:
         fi
         echo "OneDrive remote OK. Quota:"
         rclone about seeed-storage: 2>/dev/null | grep -E 'Total:|Free:|Trashed:' || true
-
-    - name: OneDrive mode notice (no secret)
-      if: inputs.has_rclone != 'true'
-      shell: bash
-      run: |
-        echo "::notice::RCLONE_CONFIG is not set — GitHub-assets mode (fork): binaries are attached to the release; OneDrive upload and image-promote are skipped."
 
     - name: Validate secure-boot secrets
       if: inputs.secure_boot == 'true'

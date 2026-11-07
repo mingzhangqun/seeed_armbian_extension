@@ -36,20 +36,8 @@ jobs:
     outputs:
       tag: ${{ steps.reconcile.outputs.tag }}
       target_repo: ${{ steps.rel.outputs.target_repo }}
-      has_rclone: ${{ steps.probe.outputs.has_rclone }}
       mode: ${{ steps.reconcile.outputs.mode }}
     steps:
-      - name: Probe secrets
-        id: probe
-        env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
-        run: |
-          if [ -n "$RCLONE_CONFIG" ]; then
-            echo "has_rclone=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_rclone=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -74,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$RCLONE_CONFIG" ]; then
-            echo "::error::RCLONE_CONFIG is not set — promotion requires the OneDrive mirror. GitHub-assets-mode (fork) releases are promoted by hand in the UI."
+            echo "::error::RCLONE_CONFIG is not set — promotion requires the OneDrive mirror."
             exit 1
           fi
           # RCLONE_CONFIG env can't hold the secret (secrets.* is not allowed
@@ -527,7 +515,6 @@ jobs:
           # pushed to its gh-pages via the API (needs PAGES_TARGET_TOKEN).
           repo: ${{ needs.promote.outputs.target_repo }}
           release_repo: ${{ needs.promote.outputs.target_repo }}
-          has_rclone: ${{ needs.promote.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}

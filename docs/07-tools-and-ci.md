@@ -77,41 +77,31 @@ needs **before** the multi-hour build starts:
 | `DEV_CRT` | matching signing certificate (`dev.crt`); preflight checks it matches the private key | `secure-boot` |
 | `CRYPTROOT_PASSPHRASE` | LUKS rootfs passphrase, exactly 64 *hex* characters ([05](05-encryption.md)); preflight checks length only | `secure-boot` |
 | `RELEASE_GH_TOKEN` | GitHub token for publishing the Release to a different `release_repo`; falls back to the workflow's own token | cross-repo `release_repo` |
-| `RCLONE_CONFIG` | rclone remote config for the OneDrive upload; without it the run falls back to GitHub-release assets (fork mode) | OneDrive mode |
+| `RCLONE_CONFIG` | rclone remote config for OneDrive image publication | always |
 
 Every run creates a draft pre-release in `release_repo` (a same-tag release
-from a re-run is deleted first). With `RCLONE_CONFIG` set, image/OTA
-binaries are uploaded to the OneDrive mirror's slot-first tree
+from a re-run is deleted first). **Image/OTA binaries upload only to
+OneDrive; GitHub Release assets are not supported.** The Release remains
+version metadata, a pre-release/stable marker, and a link to the build run.
+The immutable mirror layout is tag-addressed:
 
 ```
-armbian/images/<slot>/<board>/<profile>[-secure-boot]/{*.img.xz,*.sha256,ota/}
+armbian/<owner>/images/trees/<tag>/<board>/<plain|secure>/<recovery|ab|loaders>/
 ```
 
-where `<slot>` is `pre-release`, `stable` or `previous`, and the release
-carries **no assets at all** — the slot's `tag` file is the build
-signature. The promote workflow validates that the tag file names the
-release being promoted and that every `<board>/<sub>/` on the mirror is
-complete (≥1 image with `.sha256` siblings, non-empty `ota/`, no
-strays). Once every matrix entry has uploaded, the release
-job stamps the build's tag into `pre-release/tag` — that file is the
-page's slot binding — and flips the release visible. Promoting rotates
-the whole slot tree with one server-side move per slot
-(`previous ⟵ stable ⟵ pre-release`, all boards together) and carries the
-`tag` file into `stable/`/`previous/` with it. Without `RCLONE_CONFIG`
-(fork mode), the binaries are attached to the release itself — a file
-over GitHub's 2 GiB asset cap fails the upload and needs an OneDrive-mode
-run to ship. Download tables for the published slots live on the Pages
-download page. Promoting cleans up superseded asset-less pre-releases
-(binaries in slots, no release assets), keeping the releases page clean.
-`Pages - Refresh` (`refresh-pages.yml`) is a dispatch-only re-render of
-the page against the live mirror — reach for it after manual OneDrive
-cleanup.
+`slots.json` identifies the current pre-release, stable and history tags.
+After all matrix entries upload, the release job creates a per-file share
+link and writes them to `trees/<tag>/manifest.json`, then points
+`slots.json.pre-release` at the tag and flips the Release visible.
+Promotion validates the complete referenced trees, updates the pointers
+(`stable ⟵ pre-release`, previous stable joins the bounded history), and
+moves no image files. The OneDrive tree for an expired stable may be
+purged, but its GitHub Release is retained as historical metadata.
+`Pages - Refresh` (`refresh-pages.yml`) re-renders the page from the live
+manifest state, for example after manual OneDrive cleanup.
 
-Board u-boot **production loaders** mirror alongside, in their own tree:
-
-```
-armbian/loaders/<slot>/<board>/<plain|secure>/{spl_loader_maskrom.bin.xz+.sha256[,rkspi_loader.img.xz+.sha256]}
-```
+Board u-boot **production loaders** live inside the same tag tree, at
+`<board>/<plain|secure>/loaders/`.
 
 `spl_loader_maskrom.bin` (maskrom flashing loader) exists for every board;
 `rkspi_loader.img` (SPI NOR image) only for layouts that build one
@@ -119,15 +109,13 @@ armbian/loaders/<slot>/<board>/<plain|secure>/{spl_loader_maskrom.bin.xz+.sha256
 rebuilds (signed FIT, `rk_sign_tool`-signed loader) and never shares a
 directory with `plain/`. Only the reference leg (cli/trixie/recovery)
 uploads — the u-boot payload is identical across the other legs of the same
-board+security. Promote rotates the loaders slots together with the images;
-a missing loaders `pre-release/` (builds predating the pipeline) leaves the
-loaders slots untouched.
+`board+security`. Promote only flips the tag pointers; loader files stay
+inside their tag tree.
 
 The download page renders them per board as a first-class **Loader** mode
 box (chip icon, teal/orange buttons) at the top of each security group
-(green PLAIN / red SECURE frames with inverted corner labels); the pages
-walk covers the loaders tree into the same LINKS map under a `loaders/`
-key prefix, so Loader boxes appear only when a slot actually holds them.
+(green PLAIN / red SECURE frames with inverted corner labels). All image
+and loader links come from the tag's OneDrive manifest.
 
 Everything CI does is the documented local flow — the wrapper staging step,
 profiles, and secrets map 1:1 to [02-build-reference.md](02-build-reference.md).

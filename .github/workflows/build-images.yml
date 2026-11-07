@@ -1,5 +1,8 @@
 name: "Images - Build & Pre-release"
 
+# Binaries go directly from each matrix runner to OneDrive. GitHub Releases
+# carry only version/status metadata; no image assets are uploaded there.
+
 on:
   workflow_dispatch:
     inputs:
@@ -77,37 +80,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # secrets.* not allowed in step-level if:, so probe it once here.
-  probe-secrets:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      contents: read
-    outputs:
-      has_rclone: ${{ steps.p.outputs.has_rclone }}
-    steps:
-      - id: p
-        env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
-        run: |
-          if [ -n "$RCLONE_CONFIG" ]; then
-            echo "has_rclone=true"  >> "$GITHUB_OUTPUT"
-          else
-            echo "has_rclone=false" >> "$GITHUB_OUTPUT"
-          fi
-
   preflight:
-    # Fail fast on malformed secrets BEFORE the multi-hour build.
+    # Fail fast on missing/malformed secrets BEFORE the multi-hour build.
     # Note: board_exists in plan job queries public repos by default;
     # if armbian_build_repo points to a private repo, plan needs
     # contents: read on that repo (token scope) — currently assumed public.
-    needs: probe-secrets
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-    env:
-      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -116,14 +97,13 @@ jobs:
         uses: ./.github/actions/preflight-checks
         with:
           secure_boot: ${{ inputs.secure_boot }}
-          has_rclone: ${{ env.HAS_RCLONE }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           private_key_pem: ${{ secrets.PRIVATE_KEY_PEM }}
           dev_crt: ${{ secrets.DEV_CRT }}
           cryptroot_passphrase: ${{ secrets.CRYPTROOT_PASSPHRASE }}
 
   plan:
-    needs: [probe-secrets, preflight]
+    needs: [preflight]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -283,26 +263,22 @@ jobs:
   # this run's tag-addressed staging tree on the OneDrive mirror.
   init-release:
     name: Init draft release
-    needs: [probe-secrets, plan]
+    needs: [plan]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
-    env:
-      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' }}
         uses: ./.github/actions/setup-onedrive
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
       - name: Retire the current candidate before building
         id: retire
-        if: ${{ env.HAS_RCLONE == 'true' }}
         run: |
           set -euo pipefail
           IBASE="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images"
@@ -318,13 +294,12 @@ jobs:
           echo "tag=$old" >> "$GITHUB_OUTPUT"
 
       - name: Hide the retired candidate before deleting its tree
-        if: ${{ env.HAS_RCLONE == 'true' && steps.retire.outputs.tag != '' }}
+        if: ${{ steps.retire.outputs.tag != '' }}
         uses: ./.github/actions/deploy-pages
         with:
           tag: retire-${{ needs.plan.outputs.tag }}
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
-          has_rclone: "true"
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -339,7 +314,6 @@ jobs:
         # several builds apart, and every build leaves a full tree
         # (~70-90 files, tens of GB) behind — unreferenced trees must be
         # purged here or the mirror grows without bound between promotes.
-        if: ${{ env.HAS_RCLONE == 'true' }}
         env:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
@@ -467,26 +441,22 @@ jobs:
             --prerelease \
             --title "$title" \
             "${target_args[@]}" \
-            --notes "Binaries live in the OneDrive mirror slots (or attached here on forks); the download page carries the tables. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --notes "Binaries are published only in the OneDrive mirror; this Release carries version metadata. Downloads are on the images page. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # A build run discards any previous candidate at init. Rerun rebuilds
   # this tag; use Pages - Refresh for a page-only failure instead.
 
   build:
-    needs: [probe-secrets, plan, init-release]
+    needs: [plan, init-release]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     permissions:
-      # gh release upload against the draft release
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     env:
-      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
-      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
-      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
       EXTENSION_SHA: ${{ github.sha }}
       BUILD_SOURCE_REPO: ${{ needs.plan.outputs.release_repo }}
@@ -728,7 +698,6 @@ jobs:
           ls -lh output/images/
 
       - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' }}
         uses: ./.github/actions/setup-onedrive
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
@@ -740,7 +709,6 @@ jobs:
         # recovery|ab. The tree never moves; promote only flips slots.json.
         # The release job links these files into trees/<tag>/manifest.json
         # after the matrix lands; promote validates the tree shape then.
-        if: ${{ env.HAS_RCLONE == 'true' }}
         working-directory: armbian-build
         env:
           PROFILE: ${{ matrix.profile || 'recovery' }}
@@ -786,7 +754,7 @@ jobs:
         # Dest: trees/<tag>/<board>/<sec>/loaders/ — loaders sit INSIDE
         # their security level as a kind sibling of recovery|ab (one
         # build, one purge unit, one manifest map).
-        if: ${{ env.HAS_RCLONE == 'true' && matrix.tier == 'cli' && matrix.release == 'trixie' && (matrix.profile || 'recovery') == 'recovery' }}
+        if: ${{ matrix.tier == 'cli' && matrix.release == 'trixie' && (matrix.profile || 'recovery') == 'recovery' }}
         working-directory: armbian-build
         run: |
           set -euo pipefail
@@ -807,62 +775,6 @@ jobs:
               --transfers 4 --stats-one-line --stats 30s
           done
 
-      - name: Stage images/OTA for GitHub release (assets mode)
-        # One leg per matrix job; the serialized upload-release job below
-        # assembles every archive. Keep original self-describing names.
-        if: ${{ env.HAS_RCLONE != 'true' }}
-        working-directory: armbian-build
-        env:
-          PROFILE: ${{ matrix.profile || 'recovery' }}
-          SECURITY: ${{ matrix.security }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(output/images/*.img.xz output/images/*.sha256 output/images/*.sha output/images/*.img.txt)
-          ota_files=(output/images/$BOARD/ota/*)
-          if [ ${#files[@]} -eq 0 ] || [ ${#ota_files[@]} -eq 0 ]; then
-            echo "::error::incomplete matrix output: ${#files[@]} image metadata file(s), ${#ota_files[@]} OTA file(s)"
-            exit 1
-          fi
-          if ! compgen -G 'output/images/*.img.xz' > /dev/null; then
-            echo "::error::no compressed .img.xz found; refusing an OTA-only partial leg"
-            exit 1
-          fi
-          args=("${files[@]}" "${ota_files[@]}")
-          for f in "${args[@]}"; do
-            size=$(stat -c%s "$f")
-            if [ "$size" -gt 2147483648 ]; then
-              echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — over GitHub's 2 GiB release-asset cap; it needs a OneDrive-mode build (RCLONE_CONFIG) to ship"
-              exit 1
-            fi
-          done
-          mkdir -p "$GITHUB_WORKSPACE/release-upload"
-          cp -- "${args[@]}" "$GITHUB_WORKSPACE/release-upload/"
-          # Filenames are self-describing, but secure/plain can share them.
-          # Never merge different bytes under one release asset name.
-          ( cd "$GITHUB_WORKSPACE/release-upload" && sha256sum -- * ) \
-            > "$GITHUB_WORKSPACE/release-upload.sha256"
-
-      - name: Stage GitHub release assets
-        if: ${{ env.HAS_RCLONE != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets-${{ matrix.board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ matrix.profile || 'recovery' }}-${{ matrix.security || 'plain' }}-${{ github.run_id }}
-          path: release-upload/
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-      - name: Stage GitHub release asset checksums
-        if: ${{ env.HAS_RCLONE != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-hashes-${{ matrix.board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ matrix.profile || 'recovery' }}-${{ matrix.security || 'plain' }}-${{ github.run_id }}
-          path: release-upload.sha256
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
       - name: Upload output/images/ as-is
         if: always()
         uses: actions/upload-artifact@v4
@@ -880,82 +792,12 @@ jobs:
           ccache -s 2>/dev/null || true
           du -sh armbian-build/cache/ccache 2>/dev/null || true
 
-  upload-release:
-    name: Upload release assets (serialized fork path)
-    needs: [probe-secrets, plan, init-release, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.probe-secrets.outputs.has_rclone != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
-      TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
-      TAG: ${{ needs.plan.outputs.tag }}
-    steps:
-      - name: Download every matrix leg's assets
-        uses: actions/download-artifact@v5
-        with:
-          pattern: release-assets-*-${{ github.run_id }}
-          path: release-assets
-          merge-multiple: true
-
-      - name: Download asset hashes for conflict checks
-        uses: actions/download-artifact@v5
-        with:
-          pattern: release-hashes-*-${{ github.run_id }}
-          path: release-hashes
-          merge-multiple: true
-
-      - name: Verify shared release asset names are not conflicting
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(release-assets/*)
-          hashes=(release-hashes/*)
-          [ ${#files[@]} -gt 0 ] && [ ${#hashes[@]} -gt 0 ] \
-            || { echo "::error::staged release assets or hashes missing"; exit 1; }
-          python3 - <<'PY'
-          from collections import defaultdict
-          from hashlib import sha256
-          from pathlib import Path
-
-          expected = defaultdict(set)
-          for f in Path("release-hashes").iterdir():
-              for line in f.read_text().splitlines():
-                  digest, name = line.split(maxsplit=1)
-                  expected[name.lstrip("*")].add(digest)
-          conflicts = {name: values for name, values in expected.items() if len(values) != 1}
-          if conflicts:
-              raise SystemExit(f"same-named release assets differ between matrix legs: {conflicts}")
-          actual = {}
-          for f in Path("release-assets").iterdir():
-              if not f.is_file():
-                  raise SystemExit(f"unexpected release asset directory: {f}")
-              actual[f.name] = sha256(f.read_bytes()).hexdigest()
-          if actual != {name: next(iter(values)) for name, values in expected.items()}:
-              raise SystemExit("merged release assets do not match per-leg hashes")
-          print(f"verified {len(actual)} shared asset names; all duplicate names have identical bytes")
-          PY
-
-      - name: Upload original filenames without clobbering
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(release-assets/*)
-          [ ${#files[@]} -gt 0 ] || { echo "::error::no staged release assets"; exit 1; }
-          # This one job owns the release asset namespace. A collision is
-          # an error, never a silent last-writer-wins replacement.
-          gh release upload "$TAG" "${files[@]}" --repo "$TARGET_REPO"
-          gh release view "$TAG" --repo "$TARGET_REPO" \
-            --json assets --jq '"release now has \(.assets | length) assets"'
-
   release:
-    needs: [probe-secrets, plan, init-release, build, upload-release]
+    needs: [plan, init-release, build]
     # Finalizes the tag's tree after all entries upload: share links →
     # manifest → slot pointer → THEN flips the draft release visible.
     # Promotion to Stable is promote-images.yml (separate dispatch).
-    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.upload-release.result == 'success' || needs.upload-release.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     # The per-file rclone link calls (~70-90 files, OneDrive throttling
     # seen at scale) sit between a multi-hour matrix success and the
@@ -964,7 +806,6 @@ jobs:
     permissions:
       contents: write
     env:
-      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -977,7 +818,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' }}
         uses: ./.github/actions/setup-onedrive
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
@@ -993,7 +833,6 @@ jobs:
         # first read — CI writers are serialized by the images-mirror
         # group, but a human editing the file via the OneDrive web UI
         # must not be silently clobbered.
-        if: ${{ env.HAS_RCLONE == 'true' }}
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -1122,7 +961,7 @@ jobs:
   # rclone cats) replaced the mirror walk, so this is fast again.
   pages:
     name: Deploy images page (template sync)
-    needs: [probe-secrets, plan, release, upload-release]
+    needs: [plan, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     # The gh-pages push authenticates with PAGES_TARGET_TOKEN (a PAT);
@@ -1142,7 +981,6 @@ jobs:
           # pushed to its gh-pages via the API (needs PAGES_TARGET_TOKEN).
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
-          has_rclone: ${{ needs.probe-secrets.outputs.has_rclone }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -1156,14 +994,13 @@ jobs:
     # On success neither cancelled() nor failure() holds and this skips.
     # Ported from test-build.yml (deleted 2026-11-05) — its cleanup was
     # the only draft sweeper in the repo.
-    needs: [probe-secrets, preflight, plan, init-release, build, upload-release, release, pages]
+    needs: [preflight, plan, init-release, build, release, pages]
     if: ${{ always() && (cancelled() || failure()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     env:
-      HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -1172,7 +1009,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup rclone (seeed-storage OneDrive remote)
-        if: ${{ env.HAS_RCLONE == 'true' }}
         uses: ./.github/actions/setup-onedrive
         with:
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
@@ -1201,19 +1037,13 @@ jobs:
             gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
             echo "deleted this attempt's candidate Release $TAG"
           fi
-          if [ "${HAS_RCLONE}" = "true" ]; then
           # Rerun owns this tag across attempts; always clear its tree,
           # even when the Release was already published before the failure.
-            rclone purge "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG" --contimeout 15s 2>/dev/null \
-              || echo "trees/$TAG did not exist — nothing to purge"
-          fi
-          # Top-level heredoc (a nested one's terminator would never be
-          # recognized). HAS_RCLONE gates inside: no mirror, no pointer.
+          rclone purge "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG" --contimeout 15s 2>/dev/null \
+            || echo "trees/$TAG did not exist — nothing to purge"
           python3 - "$TAG" <<'PY'
           import json, os, subprocess, sys
 
-          if os.environ.get("HAS_RCLONE") != "true":
-              sys.exit(0)
           tag = sys.argv[1]
           path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
           r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
@@ -1237,13 +1067,12 @@ jobs:
           PY
 
       - name: Refresh the page after failure cleanup
-        if: ${{ env.HAS_RCLONE == 'true' && steps.cleanup-pointer.outputs.cleared == 'true' }}
+        if: ${{ steps.cleanup-pointer.outputs.cleared == 'true' }}
         uses: ./.github/actions/deploy-pages
         with:
           tag: cleanup-${{ needs.plan.outputs.tag }}
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
-          has_rclone: "true"
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
