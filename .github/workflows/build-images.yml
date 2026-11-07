@@ -296,16 +296,21 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          # slots.json doubles as the migration marker: absent means the
-          # mirror still runs the legacy slot layout and every new-code
-          # path (upload/pointer/page) would misfire — refuse instead.
-          if ! rclone cat "seeed-storage:armbian/images/slots.json" --contimeout 15s >/dev/null 2>&1; then
-            echo "::error::armbian/images/slots.json not found — the mirror's pointer file is missing. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve."
+          # The mirror is namespaced per pipeline owner (the fork and
+          # upstream would otherwise fight over one global slots.json):
+          # armbian/<owner>/images.
+          MBASE="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}"
+          # slots.json doubles as the namespace's state file: absent means
+          # the mirror was never initialized (or the pointer was lost) —
+          # every new-code path (upload/pointer/page) would misfire,
+          # refuse instead.
+          if ! rclone cat "$MBASE/images/slots.json" --contimeout 15s >/dev/null 2>&1; then
+            echo "::error::$MBASE/images/slots.json not found — the mirror's pointer file is missing. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve."
             exit 1
           fi
 
-          rclone purge "seeed-storage:armbian/images/trees/$TAG" --contimeout 15s 2>/dev/null \
-            || echo "armbian/images/trees/$TAG did not exist (fresh tag) — nothing to purge"
+          rclone purge "$MBASE/images/trees/$TAG" --contimeout 15s 2>/dev/null \
+            || echo "$MBASE/images/trees/$TAG did not exist (fresh tag) — nothing to purge"
           # The manifest AND the loaders subtree live inside trees/<tag>/ —
           # the purge above took both.
 
@@ -313,7 +318,7 @@ jobs:
           import json, os, subprocess, sys
 
           tag = os.environ["TAG"]
-          IBASE = "seeed-storage:armbian/images"
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
 
           def rcat(path):
               r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
@@ -346,8 +351,9 @@ jobs:
           # so purging an unreferenced tree drops payload, index and
           # loaders in one op — no half-deleted states to reconcile (the
           # pre-merge second root had exactly that cross-root window).
-          # Also sweep the legacy standalone armbian/loaders/ root an
-          # old-code build may still write.
+          # Also sweep the pre-namespace global roots (armbian/images,
+          # armbian/loaders) a straggler pre-namespacing build may
+          # recreate — this namespace owns everything under <owner>/.
           for t in lsdirs(f"{IBASE}/trees"):
               if t == tag or t in referenced:
                   continue
@@ -355,9 +361,11 @@ jobs:
               subprocess.run(["rclone", "purge", f"{IBASE}/trees/{t}"], check=True)
           r = subprocess.run(["rclone", "lsf", "seeed-storage:armbian", "--dirs-only",
                               "--contimeout", "15s"], capture_output=True, text=True)
-          if r.returncode == 0 and any(l.strip() == "loaders/" for l in r.stdout.splitlines()):
-              print("::notice::purging legacy standalone armbian/loaders/ root (loaders live inside images/trees/<tag>/loaders/ now)")
-              subprocess.run(["rclone", "purge", "seeed-storage:armbian/loaders"], check=True)
+          if r.returncode == 0:
+              for legacy in ("loaders/", "images/"):
+                  if any(l.strip() == legacy for l in r.stdout.splitlines()):
+                      print(f"::notice::purging pre-namespace global armbian/{legacy} (this pipeline owns armbian/<owner>/ only)")
+                      subprocess.run(["rclone", "purge", f"seeed-storage:armbian/{legacy.rstrip('/')}"], check=True)
           print(f"GC done: referenced tags {sorted(referenced) or 'none'}, this run's tag {tag}")
           PY
 
@@ -663,7 +671,7 @@ jobs:
 
           sub="$PROFILE"
           [ -n "$SECURITY" ] && sub="$sub-$SECURITY"
-          dest="seeed-storage:armbian/images/trees/$TAG/$BOARD/$sub"
+          dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/$BOARD/$sub"
           echo "Uploading to $dest"
           rclone mkdir "$dest" 2>/dev/null || true
           rclone copy output/images/ "$dest" \
@@ -701,7 +709,7 @@ jobs:
           for d in "${dirs[@]}"; do
             board="$(basename "$(dirname "$d")")"
             sec="$(basename "$d")"
-            dest="seeed-storage:armbian/images/trees/$TAG/loaders/$board/$sec"
+            dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/loaders/$board/$sec"
             echo "Uploading loaders to $dest"
             rclone mkdir "$dest" 2>/dev/null || true
             rclone copy "$d/" "$dest" \
@@ -802,7 +810,7 @@ jobs:
           from datetime import datetime, timezone
 
           tag = os.environ["TAG"]
-          IBASE = "seeed-storage:armbian/images"
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
 
           def lsjson_files(path):
               r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", path],
@@ -998,8 +1006,8 @@ jobs:
             # matrix uploaded renders nowhere. One purge per root takes
             # the tree AND its manifest (it lives inside); the pointer
             # reset below follows. Loaders ride inside the same tree.
-            rclone purge "seeed-storage:armbian/images/trees/$TAG" --contimeout 15s 2>/dev/null \
-              || echo "armbian/images/trees/$TAG did not exist — nothing to purge"
+            rclone purge "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG" --contimeout 15s 2>/dev/null \
+              || echo "trees/$TAG did not exist — nothing to purge"
           fi
           # Top-level heredoc (a nested one's terminator would never be
           # recognized). HAS_RCLONE gates inside: no mirror, no pointer.
@@ -1009,7 +1017,7 @@ jobs:
           if os.environ.get("HAS_RCLONE") != "true":
               sys.exit(0)
           tag = sys.argv[1]
-          path = "seeed-storage:armbian/images/slots.json"
+          path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
           r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
                              capture_output=True, text=True)
           if r.returncode != 0:

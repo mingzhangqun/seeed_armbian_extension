@@ -77,9 +77,11 @@ runs:
       run: |
         set -euo pipefail
         python3 - <<'PY'
-        import json, subprocess, sys, time
+        import json, os, subprocess, sys, time
 
-        IBASE = "seeed-storage:armbian/images"
+        # Namespaced per pipeline owner (fork and upstream each own
+        # armbian/<owner>/images).
+        IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
 
         def rcat(path, retries=1):
             r = None

@@ -58,8 +58,9 @@ jobs:
           echo "release repo: $release_repo"
           # The pointer file is the page's whole data source now —
           # readable means the page is buildable. (slots.json absent =
-          # mirror state lost: restore the pointer file by hand.)
-          if ! rclone cat seeed-storage:armbian/images/slots.json --contimeout 15s > /dev/null 2> cat.err; then
+          # namespace never initialized or pointer lost: restore by
+          # hand.) The mirror is namespaced per pipeline owner.
+          if ! rclone cat "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/slots.json" --contimeout 15s > /dev/null 2> cat.err; then
             echo "::error::slots.json unreadable — OneDrive unreachable, or the mirror's pointer file is gone. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve. $(tr '\n' ' ' < cat.err)"
             exit 1
           fi

@@ -103,7 +103,9 @@ jobs:
           # slots.json is both the mirror state and the migration marker:
           # unreadable means the mirror is down or still on the legacy
           # slot layout — either way there is nothing to promote.
-          if ! slots_raw="$(rclone cat "seeed-storage:armbian/images/slots.json" --contimeout 15s)"; then
+          # The mirror is namespaced per pipeline owner (fork and
+          # upstream each own armbian/<owner>/images).
+          if ! slots_raw="$(rclone cat "seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/slots.json" --contimeout 15s)"; then
             echo "::error::slots.json unreadable — OneDrive unreachable, or the mirror's pointer file is gone. Restore it by hand: list trees/, then write {stable, pre-release, history} with the tags each slot should serve."
             exit 1
           fi
@@ -205,7 +207,7 @@ jobs:
           from collections import defaultdict
 
           tag_expected = os.environ["TAG"].strip()
-          IBASE = "seeed-storage:armbian/images"
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
 
           def rcat(path):
               r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
@@ -342,7 +344,7 @@ jobs:
 
           tag = sys.argv[1]
           depth = max(1, int(os.environ.get("HISTORY_DEPTH", "1")))
-          path = "seeed-storage:armbian/images/slots.json"
+          path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
 
           def read():
               r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
@@ -397,7 +399,7 @@ jobs:
           python3 <<'PY'
           import json, subprocess, sys
 
-          IBASE = "seeed-storage:armbian/images"
+          IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
           ABASE = "seeed-storage:armbian"
           LEGACY = {"pre-release", "stable", "previous"}
 
@@ -433,9 +435,13 @@ jobs:
               if d in LEGACY:
                   print(f"::notice::purging legacy slot dir images/{d}/ (old-code build residue)")
                   subprocess.run(["rclone", "purge", f"{IBASE}/{d}"], check=True)
-          if "loaders" in lsdirs(ABASE):
-              print("::notice::purging legacy standalone armbian/loaders/ root (loaders live inside images/trees/<tag>/loaders/ now)")
-              subprocess.run(["rclone", "purge", f"{ABASE}/loaders"], check=True)
+          # Pre-namespace global roots a straggler old-code build may
+          # recreate — this pipeline owns armbian/<owner>/ only. Owner
+          # namespace dirs never match these names.
+          for legacy in ("loaders", "images"):
+              if legacy in lsdirs(ABASE):
+                  print(f"::notice::purging pre-namespace global armbian/{legacy}/ root")
+                  subprocess.run(["rclone", "purge", f"{ABASE}/{legacy}"], check=True)
           for t in lsdirs(f"{IBASE}/trees"):
               if t not in referenced:
                   print(f"::notice::purging unreferenced tree images/trees/{t}/")
