@@ -14,8 +14,8 @@ name: "Images - Release"
 #   4. PUBLISH the GitHub release (prerelease → released)
 #   5. FLIP slots.json: history ⟵ [stable] + history[:N-1] capped at
 #      HISTORY_DEPTH (default 1), stable ⟵ TAG, pre-release ⟶ null —
-#      one small pointer write; the loaders mirror rides the same
-#      pointer (its trees rotate in lockstep by construction)
+#      one small pointer write; loaders ride along (they live INSIDE
+#      the tag's tree — one build, one purge unit)
 #   6. GC unreferenced trees (payload + in-tree manifest drop in one
 #      purge; history tags stay referenced), and any legacy slot dirs
 #      an old-code build left behind
@@ -206,7 +206,6 @@ jobs:
 
           tag_expected = os.environ["TAG"].strip()
           IBASE = "seeed-storage:armbian/images"
-          LBASE = "seeed-storage:armbian/loaders"
 
           def rcat(path):
               r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
@@ -226,12 +225,21 @@ jobs:
 
           errors = []
 
-          # a) shape of the images tree. The root-level identity file is
-          # the manifest itself — anything else there is a stray.
+          # a) shape of the images tree. ONE walk covers images and the
+          # loaders subtree. The root-level identity file is the manifest
+          # itself — anything else there is a stray. "loaders/<board>/<sec>/"
+          # is its own namespace, exempt from the <board>/<sub>/ rules.
           files = lsjson_files(f"{IBASE}/trees/{tag_expected}")
-          by_sub = defaultdict(list)
+          by_sub, loader_dirs = defaultdict(list), set()
           for p in files:
               if p == "manifest.json":
+                  continue
+              if p.startswith("loaders/"):
+                  rest = p.split("/", 2)
+                  if len(rest) < 3 or not rest[2]:
+                      errors.append(f"stray file inside trees/{tag_expected}/loaders/: {p}")
+                  else:
+                      loader_dirs.add((rest[1], rest[2]))
                   continue
               parts = p.split("/", 2)
               if len(parts) == 1:
@@ -255,8 +263,11 @@ jobs:
               if not ota:
                   errors.append(f"{board}: trees/{tag_expected}/{board}/{sub}/ota/ is empty or missing")
               print(f"{board}/{sub}: {len(fs)} files, {len(xz)} image(s), {len(ota)} ota file(s)")
+          if loader_dirs:
+              print(f"loaders: {len(loader_dirs)} board/sec dirs")
 
-          # b) signed manifest, coverage both directions, both roots.
+          # b) signed manifest, coverage both directions, both sections
+          # (loaders keys carry no physical "loaders/" prefix).
           try:
               m = json.loads(rcat(f"{IBASE}/trees/{tag_expected}/manifest.json"))
           except json.JSONDecodeError as e:
@@ -267,14 +278,14 @@ jobs:
                   errors.append(f"trees/{tag_expected}/manifest.json is signed {m.get('tag')!r} — wrong or unsigned tree")
               imgs = m.get("images") or {}
               lds = m.get("loaders") or {}
-              walked = {p for p in files if p != "manifest.json"}
-              for p in sorted(walked - set(imgs)):
+              iwalked = {p for p in files if p != "manifest.json" and not p.startswith("loaders/")}
+              lwalked = {p[len("loaders/"):] for p in files if p.startswith("loaders/")}
+              for p in sorted(iwalked - set(imgs)):
                   errors.append(f"manifest missing images entry for {p}")
-              for k in sorted(set(imgs) - walked):
+              for k in sorted(set(imgs) - iwalked):
                   errors.append(f"manifest images entry {k} not on the mirror")
               if any(not u for u in imgs.values()):
                   errors.append("manifest images holds an empty URL")
-              lwalked = set(lsjson_files(f"{LBASE}/trees/{tag_expected}"))
               for p in sorted(lwalked - set(lds)):
                   errors.append(f"manifest missing loaders entry for {p}")
               for k in sorted(set(lds) - lwalked):
@@ -370,13 +381,15 @@ jobs:
           print(f"slots.json flipped: stable={tag} history={new['history']} pre-release=null")
           PY
 
-      - name: GC unreferenced trees + legacy slot dirs
-        # After the flip only stable/previous (+pre-release when set) are
-        # referenced; everything else is superseded. The manifest lives
-        # inside trees/<tag>/, so one purge drops payload and index
-        # together — no half-deleted states. Also sweeps legacy slot
-        # dirs (pre-release/ etc.) that an old-code in-flight build
-        # wrote back after the migration — the pointer file never names
+      - name: GC unreferenced trees + legacy leftovers
+        # After the flip only stable/history (+pre-release when set) are
+        # referenced; everything else is superseded. The manifest AND the
+        # loaders subtree live inside trees/<tag>/, so one purge drops
+        # payload, index and loaders together — no half-deleted states
+        # (the pre-merge second root had exactly that cross-root window).
+        # Also sweeps legacy leftovers: slot dirs (pre-release/ etc.) an
+        # old-code build wrote back, and the standalone armbian/loaders/
+        # root from the two-root era — the pointer file never names
         # them, so they render nowhere.
         if: steps.rel.outputs.mode == 'promote' || steps.rel.outputs.mode == 'heal'
         run: |
@@ -385,7 +398,7 @@ jobs:
           import json, subprocess, sys
 
           IBASE = "seeed-storage:armbian/images"
-          LBASE = "seeed-storage:armbian/loaders"
+          ABASE = "seeed-storage:armbian"
           LEGACY = {"pre-release", "stable", "previous"}
 
           def rcat(path):
@@ -416,15 +429,17 @@ jobs:
                                     *hist) if t}
           print(f"referenced tags: {sorted(referenced) or 'none'}")
 
-          for base in (IBASE, LBASE):
-              for d in lsdirs(base):
-                  if d in LEGACY:
-                      print(f"::notice::purging legacy slot dir {base.rsplit(':',1)[1]}/{d}/ (old-code build residue)")
-                      subprocess.run(["rclone", "purge", f"{base}/{d}"], check=True)
-              for t in lsdirs(f"{base}/trees"):
-                  if t not in referenced:
-                      print(f"::notice::purging unreferenced tree {base.rsplit(':',1)[1]}/trees/{t}/")
-                      subprocess.run(["rclone", "purge", f"{base}/trees/{t}"], check=True)
+          for d in lsdirs(IBASE):
+              if d in LEGACY:
+                  print(f"::notice::purging legacy slot dir images/{d}/ (old-code build residue)")
+                  subprocess.run(["rclone", "purge", f"{IBASE}/{d}"], check=True)
+          if "loaders" in lsdirs(ABASE):
+              print("::notice::purging legacy standalone armbian/loaders/ root (loaders live inside images/trees/<tag>/loaders/ now)")
+              subprocess.run(["rclone", "purge", f"{ABASE}/loaders"], check=True)
+          for t in lsdirs(f"{IBASE}/trees"):
+              if t not in referenced:
+                  print(f"::notice::purging unreferenced tree images/trees/{t}/")
+                  subprocess.run(["rclone", "purge", f"{IBASE}/trees/{t}"], check=True)
           print("GC done")
           PY
 

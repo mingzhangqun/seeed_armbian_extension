@@ -306,16 +306,14 @@ jobs:
 
           rclone purge "seeed-storage:armbian/images/trees/$TAG" --contimeout 15s 2>/dev/null \
             || echo "armbian/images/trees/$TAG did not exist (fresh tag) — nothing to purge"
-          rclone purge "seeed-storage:armbian/loaders/trees/$TAG" --contimeout 15s 2>/dev/null \
-            || echo "armbian/loaders/trees/$TAG did not exist — nothing to purge"
-          # The manifest lives inside trees/<tag>/ — the purge above took it.
+          # The manifest AND the loaders subtree live inside trees/<tag>/ —
+          # the purge above took both.
 
           python3 <<'PY'
           import json, os, subprocess, sys
 
           tag = os.environ["TAG"]
           IBASE = "seeed-storage:armbian/images"
-          LBASE = "seeed-storage:armbian/loaders"
 
           def rcat(path):
               r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
@@ -344,15 +342,22 @@ jobs:
           referenced = {t for t in (slots.get("stable"), slots.get("pre-release"),
                                     *hist) if t}
 
-          # The manifest rides inside trees/<tag>/, so purging an
-          # unreferenced tree drops its payload AND its index in one op —
-          # no half-deleted states to reconcile.
-          for base in (IBASE, LBASE):
-              for t in lsdirs(f"{base}/trees"):
-                  if t == tag or t in referenced:
-                      continue
-                  print(f"::notice::purging unreferenced tree {t} on {base}")
-                  subprocess.run(["rclone", "purge", f"{base}/trees/{t}"], check=True)
+          # The manifest AND the loaders subtree ride inside trees/<tag>/,
+          # so purging an unreferenced tree drops payload, index and
+          # loaders in one op — no half-deleted states to reconcile (the
+          # pre-merge second root had exactly that cross-root window).
+          # Also sweep the legacy standalone armbian/loaders/ root an
+          # old-code build may still write.
+          for t in lsdirs(f"{IBASE}/trees"):
+              if t == tag or t in referenced:
+                  continue
+              print(f"::notice::purging unreferenced tree {t}")
+              subprocess.run(["rclone", "purge", f"{IBASE}/trees/{t}"], check=True)
+          r = subprocess.run(["rclone", "lsf", "seeed-storage:armbian", "--dirs-only",
+                              "--contimeout", "15s"], capture_output=True, text=True)
+          if r.returncode == 0 and any(l.strip() == "loaders/" for l in r.stdout.splitlines()):
+              print("::notice::purging legacy standalone armbian/loaders/ root (loaders live inside images/trees/<tag>/loaders/ now)")
+              subprocess.run(["rclone", "purge", "seeed-storage:armbian/loaders"], check=True)
           print(f"GC done: referenced tags {sorted(referenced) or 'none'}, this run's tag {tag}")
           PY
 
@@ -680,8 +685,9 @@ jobs:
         # uploads — parallel legs would race the same dest paths with
         # differently-timestamped binaries. Missing rkspi_loader.img for
         # boards without BOOT_SUPPORT_SPI is expected, not an error.
-        # Tag-addressed dest: trees/<tag>/<board>/<sec>/ (link-manifested
-        # by the release job; rotates with images via slots.json).
+        # Dest: trees/<tag>/loaders/<board>/<sec>/ — loaders live INSIDE
+        # the tag's tree (same build, same purge unit; the manifest's
+        # "loaders" section strips the physical loaders/ prefix).
         if: ${{ env.HAS_RCLONE == 'true' && matrix.tier == 'cli' && matrix.release == 'trixie' && (matrix.profile || 'recovery') == 'recovery' }}
         working-directory: armbian-build
         run: |
@@ -695,7 +701,7 @@ jobs:
           for d in "${dirs[@]}"; do
             board="$(basename "$(dirname "$d")")"
             sec="$(basename "$d")"
-            dest="seeed-storage:armbian/loaders/trees/$TAG/$board/$sec"
+            dest="seeed-storage:armbian/images/trees/$TAG/loaders/$board/$sec"
             echo "Uploading loaders to $dest"
             rclone mkdir "$dest" 2>/dev/null || true
             rclone copy "$d/" "$dest" \
@@ -797,7 +803,6 @@ jobs:
 
           tag = os.environ["TAG"]
           IBASE = "seeed-storage:armbian/images"
-          LBASE = "seeed-storage:armbian/loaders"
 
           def lsjson_files(path):
               r = subprocess.run(["rclone", "lsjson", "-R", "--files-only", path],
@@ -814,16 +819,24 @@ jobs:
                   print(f"::error::rcat failed for {path}: {r.stderr.strip()}", file=sys.stderr)
                   sys.exit(1)
 
-          # Tree-relative keys (no tag prefix): the manifest stays valid
-          # whichever slot later points at it. No root identity files
-          # exist yet at this point (the manifest itself is written
-          # after this walk; the old tag file was folded into its
-          # "tag" field).
-          img_files = lsjson_files(f"{IBASE}/trees/{tag}")
-          ldr_files = lsjson_files(f"{LBASE}/trees/{tag}")
+          # ONE recursive walk of the tag's tree covers images AND the
+          # loaders subtree. Tree-relative keys (no tag prefix): the
+          # manifest stays valid whichever slot later points at it. No
+          # root identity file exists yet at this point (the manifest
+          # itself is written after this walk; the old tag file was
+          # folded into its "tag" field). Loaders keys drop the physical
+          # "loaders/" prefix so the manifest's shape is unchanged from
+          # the two-root era.
+          img_files, ldr_files = [], []
+          for p in lsjson_files(f"{IBASE}/trees/{tag}"):
+              if p.startswith("loaders/"):
+                  ldr_files.append(p[len("loaders/"):])
+              else:
+                  img_files.append(p)
 
-          def make_link(base, rel):
-              dest = f"{base}/trees/{tag}/{rel}"
+          def make_link(rel_section, rel):
+              dest = f"{IBASE}/trees/{tag}/{rel_section}/{rel}" if rel_section == "loaders" \
+                  else f"{IBASE}/trees/{tag}/{rel}"
               for attempt in (1, 2):
                   lr = subprocess.run(["rclone", "link", "--timeout", "60s", dest],
                                       capture_output=True, text=True)
@@ -834,21 +847,21 @@ jobs:
                       time.sleep(3)
               return rel, False, err
 
-          def link_all(base, rels):
+          def link_all(section, rels):
               out, failures = {}, []
               with ThreadPoolExecutor(max_workers=4) as ex:
-                  for i, (rel, ok, res) in enumerate(ex.map(lambda r: make_link(base, r), rels), 1):
+                  for i, (rel, ok, res) in enumerate(ex.map(lambda r: make_link(section, r), rels), 1):
                       if ok:
                           out[rel] = res
                       else:
                           failures.append(rel)
                           print(f"::warning::link failed: {rel}: {res}", file=sys.stderr)
                       if i % 25 == 0:
-                          print(f"  … {i}/{len(rels)} links ({base.rsplit(':', 1)[-1]})", file=sys.stderr)
+                          print(f"  … {i}/{len(rels)} links ({section})", file=sys.stderr)
               return out, failures
 
-          images, ifail = link_all(IBASE, img_files)
-          loaders, lfail = link_all(LBASE, ldr_files)
+          images, ifail = link_all("images", img_files)
+          loaders, lfail = link_all("loaders", ldr_files)
           if not images:
               print(f"::error::no image links created ({len(ifail)}/{len(img_files)} failed) — OneDrive throttled? Refusing to publish an unlinkable tree.", file=sys.stderr)
               sys.exit(1)
@@ -869,10 +882,10 @@ jobs:
               print(f"::error::cannot read slots.json: {r.stderr.strip()}", file=sys.stderr)
               sys.exit(1)
           slots = json.loads(r.stdout)
-          expected = {k: slots.get(k) for k in ("stable", "previous")}
+          expected = {k: slots.get(k) for k in ("stable", "history")}
           r2 = subprocess.run(["rclone", "cat", f"{IBASE}/slots.json", "--contimeout", "15s"],
                               capture_output=True, text=True)
-          if r2.returncode != 0 or {k: json.loads(r2.stdout).get(k) for k in ("stable", "previous")} != expected:
+          if r2.returncode != 0 or {k: json.loads(r2.stdout).get(k) for k in ("stable", "history")} != expected:
               print("::error::slots.json changed between reads — a concurrent writer (human edit?) is active; aborting", file=sys.stderr)
               sys.exit(1)
           slots["pre-release"] = tag
@@ -984,11 +997,9 @@ jobs:
             # manifest + pointer before publishing), so whatever the
             # matrix uploaded renders nowhere. One purge per root takes
             # the tree AND its manifest (it lives inside); the pointer
-            # reset below follows.
+            # reset below follows. Loaders ride inside the same tree.
             rclone purge "seeed-storage:armbian/images/trees/$TAG" --contimeout 15s 2>/dev/null \
               || echo "armbian/images/trees/$TAG did not exist — nothing to purge"
-            rclone purge "seeed-storage:armbian/loaders/trees/$TAG" --contimeout 15s 2>/dev/null \
-              || echo "armbian/loaders/trees/$TAG did not exist — nothing to purge"
           fi
           # Top-level heredoc (a nested one's terminator would never be
           # recognized). HAS_RCLONE gates inside: no mirror, no pointer.
