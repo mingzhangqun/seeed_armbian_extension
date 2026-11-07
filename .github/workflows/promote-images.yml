@@ -197,6 +197,7 @@ jobs:
                   print(f"::warning::candidate tree {pre} is absent; clearing only the dangling pre-release pointer", file=sys.stderr)
                   old["pre-release"] = None
                   write_slots(old)
+                  print(f"repaired_candidate={pre}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
                   changed = True
                   mode_out = "reconcile"
               else:
@@ -209,11 +210,21 @@ jobs:
                       gh("release", "edit", pre, "--draft=false", "--prerelease")
                   elif state not in ("false true", "false false"):
                       raise SystemExit(f"candidate Release {pre} is missing or has invalid state {state}")
-                  # Stable must always exist before rotating it into
-                  # history. A first-ever candidate can become stable
-                  # directly; an existing stable is validated by deploy.
+                  # Every tree entering the next stable/history state must
+                  # be covered both ways before any pointer is rotated.
                   new_hist = ([stable] if stable else []) + [t for t in hist if t != stable]
                   new_hist = list(dict.fromkeys(t for t in new_hist if t and t != pre))
+                  for tag_to_check in [pre, *new_hist[:depth]]:
+                      raw_check = remote("cat", f"{IBASE}/trees/{tag_to_check}/manifest.json",
+                                         "--contimeout", "15s")
+                      check_manifest = json.loads(raw_check)
+                      if check_manifest.get("tag") != tag_to_check or not check_manifest.get("files"):
+                          raise SystemExit(f"referenced tree {tag_to_check} is invalid; refusing history rotation")
+                      walked = remote("lsjson", "-R", "--files-only", f"{IBASE}/trees/{tag_to_check}")
+                      files_on_mirror = {it["Path"] for it in json.loads(walked or "[]")} - {"manifest.json"}
+                      if set(check_manifest["files"]) != files_on_mirror:
+                          raise SystemExit(f"manifest/tree coverage mismatch for {tag_to_check}; refusing history rotation")
+                  print("pre-rotation manifest/tree coverage OK")
                   new = dict(old)
                   new["stable"], new["history"], new["pre-release"] = pre, new_hist[:depth], None
                   new.pop("previous", None)
@@ -245,6 +256,10 @@ jobs:
               old.pop("previous", None)
               write_slots(old)
               changed = True
+
+          # The promotion path already validated each incoming reference
+          # before rotation. No further destructive history change occurs
+          # until the full shape check below succeeds.
 
           print(f"tag={old['stable']}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
           print(f"mode={mode_out}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
@@ -408,6 +423,29 @@ jobs:
           print("GC done — stable/history Releases retained")
           PY
 
+      - name: Remove a dangling candidate Release
+        if: steps.reconcile.outputs.repaired_candidate != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
+          CANDIDATE: ${{ steps.reconcile.outputs.repaired_candidate }}
+        run: |
+          set -euo pipefail
+          # Release deletion belongs to the same run that observed the
+          # missing tree, not to a later run that has already forgotten
+          # which candidate pointer it repaired.
+          state="$(gh release view "$CANDIDATE" --repo "$TARGET_REPO" \
+            --json isDraft,isPrerelease,assets,body --jq '[.isDraft,.isPrerelease,(.assets|length),.body]|@json')"
+          if [ "$(jq -r '.[0] or (.[1]|not) or (.[2] > 0)' <<<"$state")" = "true" ]; then
+            echo "::notice::keeping $CANDIDATE (draft, stable, or has assets)"
+            exit 0
+          fi
+          if ! jq -r '.[3]' <<<"$state" | grep -qE "${GITHUB_REPOSITORY}/actions/runs/[0-9]+"; then
+            echo "::notice::keeping $CANDIDATE (not owned by this pipeline)"
+            exit 0
+          fi
+          gh release delete "$CANDIDATE" --repo "$TARGET_REPO" --yes --cleanup-tag
+
       - name: Reconcile Releases and expire mirror notes
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
@@ -451,15 +489,6 @@ jobs:
                   expired.append(tag)
               if tag == slots.get("pre-release") or not rel["isPrerelease"]:
                   continue
-              # assets/body are available on release VIEW, not list.
-              detail = json.loads(gh("release", "view", tag, "--json", "assets,body"))
-              if rel["isDraft"] or detail["assets"] or not owned.search(detail.get("body") or ""):
-                  continue
-              r = subprocess.run(["rclone", "cat", f"{IBASE}/trees/{tag}/manifest.json",
-                                  "--contimeout", "15s"], capture_output=True, text=True)
-              if r.returncode and "not found" in r.stderr.lower():
-                  print(f"::warning::deleting dangling candidate Release {tag}")
-                  gh("release", "delete", tag, "--yes", "--cleanup-tag")
 
           # Preserve expired stable Releases but correct their download
           # promise. Do not rewrite notes while their tree is downloadable.
