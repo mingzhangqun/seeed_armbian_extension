@@ -3,9 +3,9 @@ name: "Images - Build & Pre-release"
 on:
   workflow_dispatch:
     inputs:
-      # ── Build source (which repo:branch to build from).
+      # ── Build source (which armbian-build branch to build from).
       armbian_build_repo:
-        description: "armbian-build source (repo:branch)"
+        description: "armbian-build source (repo:branch; repo must be <owner>/armbian-build)"
         required: false
         type: string
         default: "armbian-build:main"
@@ -133,6 +133,7 @@ jobs:
       count: ${{ steps.gen.outputs.count }}
       tag: ${{ steps.gen.outputs.tag }}
       ab_repo: ${{ steps.gen.outputs.ab_repo }}
+      ab_commit: ${{ steps.source.outputs.ab_commit }}
       release_repo: ${{ steps.gen.outputs.release_repo }}
     steps:
       - name: Generate matrix JSON from checkbox inputs
@@ -141,8 +142,9 @@ jobs:
           set -euo pipefail
 
           # Tag resolved ONCE here so init-release/upload/publish agree.
-          # YYMMDD-HHMM (UTC); init-release deletes any pre-existing same-name release.
-          tag="$(date -u +%y%m%d-%H%M)"
+          # The run id makes reruns and same-minute dispatches immutable:
+          # a new build must never delete a published same-stamp release/tree.
+          tag="$(date -u +%y%m%d-%H%M)-r${GITHUB_RUN_ID}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
           python3 <<'PY'
@@ -176,6 +178,11 @@ jobs:
               ab_repo = f"{owner}/{repo_part}:{branch_part}"
           repo, _, branch = ab_repo.partition(":")
           branch = branch or "main"
+          expected_repo = f"{os.environ['GITHUB_REPOSITORY_OWNER']}/armbian-build"
+          if repo != expected_repo:
+              raise SystemExit(
+                  f"ERROR: build source repo must be {expected_repo}, got {repo}; "
+                  "promote and page deployment share that repository contract")
 
           def board_exists(board):
               headers = {"Accept": "application/vnd.github+json"}
@@ -260,6 +267,17 @@ jobs:
           echo "Release tag: ${{ steps.gen.outputs.tag }}"
           echo "Release target: ${{ steps.gen.outputs.release_repo }}"
           echo "armbian-build: ${{ steps.gen.outputs.ab_repo }}"
+
+      - name: Resolve immutable build-source revision
+        id: source
+        env:
+          AB_REPO: ${{ steps.gen.outputs.ab_repo }}
+        run: |
+          set -euo pipefail
+          ab_commit="$(gh api "repos/${AB_REPO%:*}/git/refs/heads/${AB_REPO##*:}" --jq .object.sha)"
+          [[ "$ab_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid armbian-build commit"; exit 1; }
+          echo "ab_commit=$ab_commit" >> "$GITHUB_OUTPUT"
+          echo "Pinned armbian-build source: ${AB_REPO%:*}@$ab_commit"
 
   # Creates the single draft release all entries upload into, and resets
   # this run's tag-addressed staging tree on the OneDrive mirror.
@@ -347,25 +365,15 @@ jobs:
           referenced = {t for t in (slots.get("stable"), slots.get("pre-release"),
                                     *hist) if t}
 
-          # The manifest AND the loaders subtree ride inside trees/<tag>/,
-          # so purging an unreferenced tree drops payload, index and
-          # loaders in one op — no half-deleted states to reconcile (the
-          # pre-merge second root had exactly that cross-root window).
-          # Also sweep the pre-namespace global roots (armbian/images,
-          # armbian/loaders) a straggler pre-namespacing build may
-          # recreate — this namespace owns everything under <owner>/.
+          # The manifest and loaders are purged with their tree. Never
+          # touch armbian/images or armbian/loaders: those global roots
+          # are OUTSIDE this owner's namespace and may belong to another
+          # pipeline. Legacy migration cleanup must be a separate opt-in.
           for t in lsdirs(f"{IBASE}/trees"):
               if t == tag or t in referenced:
                   continue
               print(f"::notice::purging unreferenced tree {t}")
               subprocess.run(["rclone", "purge", f"{IBASE}/trees/{t}"], check=True)
-          r = subprocess.run(["rclone", "lsf", "seeed-storage:armbian", "--dirs-only",
-                              "--contimeout", "15s"], capture_output=True, text=True)
-          if r.returncode == 0:
-              for legacy in ("loaders/", "images/"):
-                  if any(l.strip() == legacy for l in r.stdout.splitlines()):
-                      print(f"::notice::purging pre-namespace global armbian/{legacy} (this pipeline owns armbian/<owner>/ only)")
-                      subprocess.run(["rclone", "purge", f"seeed-storage:armbian/{legacy.rstrip('/')}"], check=True)
           print(f"GC done: referenced tags {sorted(referenced) or 'none'}, this run's tag {tag}")
           PY
 
@@ -380,10 +388,16 @@ jobs:
           MATRIX: ${{ needs.plan.outputs.matrix }}
         run: |
           set -euo pipefail
-          # Same-minute re-runs can hit an existing release+tag: start fresh.
+          # Same-run init cleanup may remove its own DRAFT on a retry.
+          # Never delete a published release: its tag may back a live slot.
           if gh release view "${TAG}" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists — deleting old release + tag"
-            gh release delete "${TAG}" --repo "$TARGET_REPO" --yes --cleanup-tag
+            if [ "$(gh release view "$TAG" --repo "$TARGET_REPO" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error::${TAG} is already published; immutable build tags cannot replace it"
+              exit 1
+            fi
+            echo "Deleting this run's previous draft ${TAG} before retry"
+            gh release delete "${TAG}" --repo "$TARGET_REPO" --yes
+            gh api --method DELETE "repos/$TARGET_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
           fi
           # --target must name a ref of the RELEASE repo.
           target_args=()
@@ -427,6 +441,9 @@ jobs:
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
+      EXTENSION_SHA: ${{ github.sha }}
+      BUILD_SOURCE_REPO: ${{ needs.plan.outputs.release_repo }}
+      BUILD_SOURCE_SHA: ${{ needs.plan.outputs.ab_commit }}
       BOARD: ${{ matrix.board }}
 
     steps:
@@ -436,6 +453,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Verify immutable extension source revision
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXTENSION_SHA"
+          echo "Verified extension checkout: $EXTENSION_SHA"
 
       - name: Free up disk space
         run: |
@@ -469,13 +491,14 @@ jobs:
         id: abrepo
         env:
           AB_REPO: ${{ needs.plan.outputs.ab_repo }}
+          AB_COMMIT: ${{ needs.plan.outputs.ab_commit }}
         run: |
           set -euo pipefail
           [[ "${AB_REPO}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?:[A-Za-z0-9._/-]+$ ]] \
             || { echo "::error::armbian_build_repo must be 'owner/repo:branch', got '${AB_REPO}'"; exit 1; }
           echo "repo=${AB_REPO%:*}" >> "$GITHUB_OUTPUT"
-          echo "ref=${AB_REPO##*:}" >> "$GITHUB_OUTPUT"
-          echo "armbian-build: ${AB_REPO%:*} @ ${AB_REPO##*:}"
+          echo "ref=${AB_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "armbian-build: ${AB_REPO%:*} @ ${AB_COMMIT}"
 
       - name: Checkout armbian-build
         uses: actions/checkout@v4
@@ -484,6 +507,13 @@ jobs:
           ref: ${{ steps.abrepo.outputs.ref }}
           path: armbian-build
           fetch-depth: 1
+
+      - name: Verify immutable build-source revision
+        env:
+          SOURCE_SHA: ${{ needs.plan.outputs.ab_commit }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "Verified armbian-build checkout: $SOURCE_SHA"
 
       - name: Add trailing blank line to vendor defconfigs
         run: |
@@ -597,7 +627,7 @@ jobs:
           # Build the extension code from this workflow's repo + ref, not the
           # upstream main the armbian-build wrapper pins by default.
           export SEEED_EXTENSION_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          export SEEED_EXTENSION_REF="branch:${GITHUB_REF_NAME}"
+          export SEEED_EXTENSION_REF="commit:${GITHUB_SHA}"
           echo "extension source: ${SEEED_EXTENSION_REPO} @ ${SEEED_EXTENSION_REF}"
           # cli → --minimal (Debian 13); gnome → desktop (Ubuntu 26.04)
           # sized by the desktop_tier choice.
@@ -665,8 +695,12 @@ jobs:
           shopt -s nullglob
           files=(output/images/*.img.xz output/images/*.sha256 output/images/*.sha output/images/*.img.txt)
           ota_files=(output/images/$BOARD/ota/*)
-          if [ ${#files[@]} -eq 0 ] && [ ${#ota_files[@]} -eq 0 ]; then
-            echo "::error::nothing found under output/images/ to upload"
+          if [ ${#files[@]} -eq 0 ] || [ ${#ota_files[@]} -eq 0 ]; then
+            echo "::error::incomplete matrix output: ${#files[@]} image metadata file(s), ${#ota_files[@]} OTA file(s)"
+            exit 1
+          fi
+          if ! compgen -G 'output/images/*.img.xz' > /dev/null; then
+            echo "::error::no compressed .img.xz found; refusing an OTA-only partial leg"
             exit 1
           fi
 
@@ -727,22 +761,32 @@ jobs:
           shopt -s nullglob
           files=(output/images/*.img.xz output/images/*.sha256 output/images/*.sha output/images/*.img.txt)
           ota_files=(output/images/$BOARD/ota/*)
-          if [ ${#files[@]} -eq 0 ] && [ ${#ota_files[@]} -eq 0 ]; then
-            echo "::error::nothing found under output/images/ to upload"
+          if [ ${#files[@]} -eq 0 ] || [ ${#ota_files[@]} -eq 0 ]; then
+            echo "::error::incomplete matrix output: ${#files[@]} image metadata file(s), ${#ota_files[@]} OTA file(s)"
+            exit 1
+          fi
+          if ! compgen -G 'output/images/*.img.xz' > /dev/null; then
+            echo "::error::no compressed .img.xz found; refusing an OTA-only partial leg"
             exit 1
           fi
 
-          args=("${files[@]}" "${ota_files[@]}")
-          for f in "${args[@]}"; do
+          # Plain and secure filenames are intentionally identical; mark the
+          # profile in the shared GitHub release instead of --clobber races.
+          args=()
+          for f in "${files[@]}" "${ota_files[@]}"; do
             size=$(stat -c%s "$f")
             if [ "$size" -gt 2147483648 ]; then
               echo "::error::$(basename "$f") is $(numfmt --to=iec "$size") — over GitHub's 2 GiB release-asset cap; it needs a OneDrive-mode build (RCLONE_CONFIG) to ship"
               exit 1
             fi
+            suffix="${SECURITY:+secure-}${PROFILE}"
+            named="$(dirname "$f")/${suffix}-$(basename "$f")"
+            mv -- "$f" "$named"
+            args+=("$named")
           done
 
-          echo "=== uploading ${#args[@]} assets to ${TAG} @ ${TARGET_REPO} ==="
-          gh release upload "$TAG" "${args[@]}" --repo "$TARGET_REPO" --clobber
+          echo "=== uploading ${#args[@]} profile-prefixed assets to ${TAG} @ ${TARGET_REPO} ==="
+          gh release upload "$TAG" "${args[@]}" --repo "$TARGET_REPO"
           gh release view "$TAG" --repo "$TARGET_REPO" \
             --json assets --jq '"release now has \(.assets | length) assets"'
 
@@ -776,11 +820,17 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+    outputs:
+      rollback: ${{ steps.link-tree.outputs.rollback }}
     env:
       HAS_RCLONE: ${{ needs.probe-secrets.outputs.has_rclone }}
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
+      EXPECTED_MATRIX: ${{ needs.plan.outputs.matrix }}
+      BUILD_SOURCE_REPO: ${{ needs.plan.outputs.release_repo }}
+      EXTENSION_SHA: ${{ github.sha }}
+      BUILD_SOURCE_SHA: ${{ needs.plan.outputs.ab_commit }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -803,6 +853,7 @@ jobs:
         # group, but a human editing the file via the OneDrive web UI
         # must not be silently clobbered.
         if: ${{ env.HAS_RCLONE == 'true' }}
+        id: link-tree
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -837,6 +888,26 @@ jobs:
           # this walk, so no root identity file exists yet.
           rel_files = [p for p in lsjson_files(f"{IBASE}/trees/{tag}")
                        if p != "manifest.json"]
+          if not rel_files:
+              print(f"::error::trees/{tag} is empty — refusing to publish", file=sys.stderr)
+              sys.exit(1)
+
+          # Matrix results are a contract, not just a best-effort upload.
+          # Missing loaders do not invalidate images, but every planned leg
+          # must have a compressed image and at least one OTA payload.
+          planned = json.loads(os.environ["EXPECTED_MATRIX"])["include"]
+          for leg in planned:
+              sec = "secure" if leg["security"] else "plain"
+              prefix = f"{leg['board']}/{sec}/{leg['profile']}/"
+              leg_files = [p for p in rel_files if p.startswith(prefix)]
+              if not any(p.endswith(".img.xz") for p in leg_files):
+                  print(f"::error::{prefix}: no .img.xz uploaded", file=sys.stderr)
+                  sys.exit(1)
+              if not any(p.startswith(prefix + "ota/") and not p.endswith(".checksums")
+                         for p in leg_files):
+                  print(f"::error::{prefix}ota/: no OTA payload uploaded", file=sys.stderr)
+                  sys.exit(1)
+          print(f"matrix coverage OK: {len(planned)} complete legs")
 
           def make_link(rel):
               dest = f"{IBASE}/trees/{tag}/{rel}"
@@ -860,13 +931,20 @@ jobs:
                       print(f"::warning::link failed: {rel}: {res}", file=sys.stderr)
                   if i % 25 == 0:
                       print(f"  … {i}/{len(rel_files)} links", file=sys.stderr)
-          if not files_map:
-              print(f"::error::no links created ({len(failures)}/{len(rel_files)} failed) — OneDrive throttled? Refusing to publish an unlinkable tree.", file=sys.stderr)
+          if failures:
+              print(f"::error::{len(failures)}/{len(rel_files)} share links failed — refusing to publish an incomplete manifest", file=sys.stderr)
+              sys.exit(1)
+          if set(files_map) != set(rel_files):
+              print("::error::manifest link coverage differs from the uploaded tree", file=sys.stderr)
               sys.exit(1)
 
           manifest = {
               "tag": tag,
               "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "source": {"repo": os.environ["BUILD_SOURCE_REPO"],
+                         "commit": os.environ["BUILD_SOURCE_SHA"]},
+              "extension": {"repo": os.environ["GITHUB_REPOSITORY"],
+                            "commit": os.environ["EXTENSION_SHA"]},
               "files": files_map,
           }
           rcat(f"{IBASE}/trees/{tag}/manifest.json", json.dumps(manifest, indent=1, sort_keys=True))
@@ -888,6 +966,9 @@ jobs:
           slots["pre-release"] = tag
           rcat(f"{IBASE}/slots.json", json.dumps(slots, indent=1, sort_keys=True) + "\n")
           print(f"slots.json: pre-release → {tag} (stable/previous untouched)")
+          # Cleanup restores this exact prior document, not null, if the
+          # release publish below fails or the run is cancelled.
+          print(f"rollback={json.dumps(r.stdout)}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
           PY
 
       - name: Publish release
@@ -948,6 +1029,7 @@ jobs:
       GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
+      ROLLBACK: ${{ needs.release.outputs.rollback }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1006,22 +1088,30 @@ jobs:
           if os.environ.get("HAS_RCLONE") != "true":
               sys.exit(0)
           tag = sys.argv[1]
+          rollback = os.environ.get("ROLLBACK", "").strip()
           path = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json"
           r = subprocess.run(["rclone", "cat", path, "--contimeout", "15s"],
                              capture_output=True, text=True)
           if r.returncode != 0:
-              print(f"::warning::cannot read slots.json ({r.stderr.strip()}) — pointer left untouched")
-              sys.exit(0)
+              print(f"::error::cannot read slots.json ({r.stderr.strip()}) — pointer left untouched", file=sys.stderr)
+              sys.exit(1)
           slots = json.loads(r.stdout)
           if slots.get("pre-release") != tag:
-              print(f"pointer intact (pre-release = {slots.get('pre-release')!r}) — nothing to reset")
+              print(f"pointer intact (pre-release = {slots.get('pre-release')!r}) — nothing to restore")
               sys.exit(0)
-          slots["pre-release"] = None
+          if not rollback:
+              print("::error::this run flipped pre-release but saved no rollback document; refusing to discard the previous slot", file=sys.stderr)
+              sys.exit(1)
+          restored = json.loads(rollback)
+          if restored.get("pre-release") == tag:
+              print("::error::rollback document unexpectedly names this run's tag; refusing", file=sys.stderr)
+              sys.exit(1)
+          slots = restored
           w = subprocess.run(["rclone", "rcat", path],
                              input=json.dumps(slots, indent=1, sort_keys=True) + "\n",
                              capture_output=True, text=True)
           if w.returncode != 0:
-              print(f"::error::failed to reset slots.json pre-release pointer ({w.stderr.strip()}) — next page deploy will hard-fail until fixed by hand", file=sys.stderr)
+              print(f"::error::failed to restore slots.json ({w.stderr.strip()}) — next page deploy will hard-fail until fixed by hand", file=sys.stderr)
               sys.exit(1)
-          print("slots.json: pre-release pointer reset to null")
+          print(f"slots.json: restored previous pre-release {slots.get('pre-release')!r}")
           PY

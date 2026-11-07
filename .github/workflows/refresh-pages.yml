@@ -31,7 +31,12 @@ jobs:
         id: probe
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+          PAGES_TARGET_TOKEN: ${{ secrets.PAGES_TARGET_TOKEN }}
         run: |
+          if [ -z "$PAGES_TARGET_TOKEN" ]; then
+            echo "::error::PAGES_TARGET_TOKEN is not set — a refresh cannot update the page; aborting instead of reporting a false success."
+            exit 1
+          fi
           # Hard fail here: without rclone a refresh would deploy a page
           # with LINKS={} — stripping every file link for no reason.
           if [ -z "$RCLONE_CONFIG" ]; then

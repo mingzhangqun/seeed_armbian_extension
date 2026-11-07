@@ -38,7 +38,12 @@ runs:
       shell: bash
       env:
         TOK: ${{ inputs.pages_token }}
+        HAS_RCLONE: ${{ inputs.has_rclone }}
       run: |
+        if [ "$HAS_RCLONE" != "true" ]; then
+          echo "::error::images page deployment requires the OneDrive manifest; refusing to replace live data with an empty release-only bundle"
+          exit 1
+        fi
         if [ -z "$TOK" ]; then
           echo "::notice::PAGES_TARGET_TOKEN is not set — images page push skipped."
           echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -174,7 +179,8 @@ runs:
         if [ "${HAS_RCLONE:-}" = "true" ] && [ -f data-core.json ]; then
           :   # data-core.json comes from the manifest step
         else
-          echo '{"slots": {}, "manifests": {}}' > data-core.json
+          echo "::error::missing mirror data-core.json — refusing to deploy an empty page"
+          exit 1
         fi
 
         # Fetch the release list at deploy time — the page itself makes
@@ -227,13 +233,47 @@ runs:
         python3 -c 'import json; d = json.load(open("data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
         echo "=== index.html $(wc -c < images.html) bytes + data.json $(wc -c < data.json) bytes ==="
 
+    - name: Resolve the gh-pages parent
+      if: steps.gate.outputs.skip != 'true'
+      id: parent
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.pages_token }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        # gh api prints a raw error body on stdout, so a 404 leaves
+        # garbage in parent. Retry transient read failures; only a
+        # confirmed 404 selects the create-ref path.
+        parent=""
+        branch_missing=""
+        for attempt in 1 2 3; do
+          if response="$(gh api "repos/$REPO/branches/gh-pages" 2>&1)"; then
+            parent="$(jq -r '.commit.sha // empty' <<<"$response")"
+            break
+          fi
+          if jq -e '.message == "Branch not found"' >/dev/null 2>&1 <<<"$response"; then
+            branch_missing=true
+            break
+          fi
+          if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); else
+            echo "::error::cannot determine whether gh-pages exists; refusing to create a duplicate ref"
+            exit 1
+          fi
+        done
+        [[ "$parent" =~ ^[0-9a-f]{40}$ || -n "$branch_missing" ]] \
+          || { echo "::error::invalid gh-pages parent SHA"; exit 1; }
+        echo "sha=$parent" >> "$GITHUB_OUTPUT"
+
     - name: Push to the target repo's gh-pages
+      id: push
       if: steps.gate.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.pages_token }}
         REPO: ${{ inputs.repo }}
         TAG: ${{ inputs.tag }}
+        PARENT: ${{ steps.parent.outputs.sha }}
       run: |
         set -euo pipefail
         # data.json can reach hundreds of KB — pass the JSON body via
@@ -241,7 +281,7 @@ runs:
         # 128 KiB per-arg limit and killed gh with "Argument list too
         # long" (exit 126) before any API call.
         python3 - "$REPO" "$TAG" <<'PYEOF'
-        import base64, json, subprocess, sys
+        import base64, json, os, subprocess, sys
 
         repo, tag = sys.argv[1], sys.argv[2]
 
@@ -272,15 +312,8 @@ runs:
                   input=json.dumps({"tree": entries}))
         print(f"tree: {tree}")
 
-        # gh api prints the raw error body to stdout on failure, so a 404
-        # (no gh-pages branch yet) leaves garbage in parent — validate the
-        # shape instead of testing for emptiness.
-        r = subprocess.run(["gh", "api", f"repos/{repo}/branches/gh-pages",
-                            "--jq", ".commit.sha"],
-                           capture_output=True, text=True)
-        parent = r.stdout.strip() if r.returncode == 0 else ""
-        import re
-        if re.fullmatch(r"[0-9a-f]{40}", parent):
+        parent = os.environ["PARENT"]
+        if parent:
             body = {"message": f"pages: images {tag}", "tree": tree, "parents": [parent]}
             commit = gh("--method", "POST", f"repos/{repo}/git/commits", "--input", "-",
                         "--jq", ".sha", input=json.dumps(body))
@@ -295,6 +328,7 @@ runs:
                "--input", "-", "--jq", ".ref",
                input=json.dumps({"ref": "refs/heads/gh-pages", "sha": commit}))
         print(f"gh-pages commit pushed: {commit}")
+        print(f"commit={commit}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
         PYEOF
 
     - name: Trigger and verify the pages build
@@ -306,6 +340,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.pages_token }}
         REPO: ${{ inputs.repo }}
+        EXPECTED_COMMIT: ${{ steps.push.outputs.commit }}
       run: |
         set -euo pipefail
         # Assert by READING the config, not by writing it: the deploy token
@@ -321,13 +356,37 @@ runs:
           echo "::error::POST /pages/builds failed — the site would serve stale content"
           exit 1
         fi
+        [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+          || { echo "::error::missing pushed gh-pages commit"; exit 1; }
         for _ in $(seq 1 18); do
+          build="$(gh api "repos/$REPO/pages/builds/latest" 2>/dev/null || echo '{}')"
+          commit="$(jq -r '.commit // empty' <<<"$build")"
+          if [ "$commit" != "$EXPECTED_COMMIT" ]; then
+            # A newer manual build may finish while this build is queued;
+            # it still contains our pushed tree. Match only that build or
+            # a direct descendant of our commit.
+            if [ -n "$commit" ] && gh api "repos/$REPO/compare/$EXPECTED_COMMIT...$commit" --jq .status 2>/dev/null | grep -qx 'ahead'; then
+              echo "latest Pages build $commit contains pushed commit $EXPECTED_COMMIT"
+            else
+              commit=""
+            fi
+          fi
+          st="$(jq -r '.status // "?"' <<<"$build")"
+          if [ -z "$commit" ]; then
+            echo "waiting for build containing pushed commit ${EXPECTED_COMMIT:0:12}"
+          else
+            case "$st" in
+              built)
+                echo "pages build completed for ${EXPECTED_COMMIT:0:12}"; exit 0;;
+              errored)
+                echo "::error::pages build failed for ${EXPECTED_COMMIT:0:12}"; exit 1;;
+              queued|in_progress|building)
+                echo "pages build for ${EXPECTED_COMMIT:0:12}: $st";;
+              *)
+                echo "::error::unexpected pages build status '$st'"; exit 1;;
+            esac
+          fi
           sleep 10
-          st="$(gh api "repos/$REPO/pages/builds/latest" --jq '.status' 2>/dev/null || echo '?')"
-          case "$st" in
-            queued|in_progress|building)
-              echo "pages build started: $st"; exit 0;;
-          esac
         done
-        echo "::error::no pages build started within 3 minutes — pipeline stuck? The site would serve stale content."
+        echo "::error::pushed commit did not reach a successful Pages build within 3 minutes"
         exit 1

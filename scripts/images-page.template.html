@@ -31,7 +31,7 @@
       the pre slot vanishes with no tag-ordering heuristic.
     * RELEASES joins in per-tag metadata (publish date, GitHub link);
       release-list inference is only the fallback when no mirror tags
-      exist (fork mode: slots={}).
+      exist (fork mode: slots={}; assets supply the download links).
     * LINKS is synthesized from slots + manifests (synthLinks below):
       "<slot>/<board>/<sec>/<kind>/..." — one namespace; history tags
       prefix "history/<tag>/". Boards are discovered from the keys.
@@ -260,39 +260,42 @@ const ROW_LABEL = { img: "Image", ota: "OTA",
 const GROUPS = [["img", "sha256"], ["ota", "chk"]];
 
 function parse(name, size, url, secure, lk) {
-  const m = name.match(BOARD_PAT);
+  // GitHub-assets mode prefixes the original self-describing name with
+  // [secure-]<profile>- to keep matrix legs distinct in a shared release.
+  const originalName = name.replace(/^(?:secure-)?(?:recovery|ab)-/, "");
+  const m = originalName.match(BOARD_PAT);
   if (!m) return null;
   const board = m[1];
   // Secure-boot images append "-crypt" before the variant suffix
   // ("_gnome-crypt_desktop" vs "_gnome_desktop"), so match both orders.
-  const variant = name.indexOf("_gnome_desktop") >= 0 || name.indexOf("_gnome-crypt_desktop") >= 0 ? "desktop"
-                : name.indexOf("_minimal") >= 0 || name.indexOf("-crypt_minimal") >= 0 ? "cli" : null;
+  const variant = originalName.indexOf("_gnome_desktop") >= 0 || originalName.indexOf("_gnome-crypt_desktop") >= 0 ? "desktop"
+                : originalName.indexOf("_minimal") >= 0 || originalName.indexOf("-crypt_minimal") >= 0 ? "cli" : null;
   if (!variant) return null;
-  const mode = name.indexOf("_AB_PART") >= 0 ? "ab" : "recovery";
-  const crypt = name.indexOf("-crypt") >= 0;
+  const mode = originalName.indexOf("_AB_PART") >= 0 ? "ab" : "recovery";
+  const crypt = originalName.indexOf("-crypt") >= 0;
   let kind = null;
   // .img.sha is armbian's own checksum of the unpacked .img — redundant
   // next to the .img.xz.sha256 we generate; skip it.
-  if (name.endsWith(".img.sha")) return null;
-  if (name.endsWith(".img.xz.sha256")) kind = "sha256";
-  else if (name.endsWith(".img.xz")) kind = "img";
-  else if (name.endsWith(".img.txt")) kind = "txt";
+  if (originalName.endsWith(".img.sha")) return null;
+  if (originalName.endsWith(".img.xz.sha256")) kind = "sha256";
+  else if (originalName.endsWith(".img.xz")) kind = "img";
+  else if (originalName.endsWith(".img.txt")) kind = "txt";
   // The outer package shell compresses with the payload codec, so the
   // suffix is .tar.gz / .tar.xz / .tar.zst — match the stem, not one
   // hard-coded codec (port of the seeed-build.yml fix bc6f90e5).
-  else if (name.includes("_OTA.tar.")) kind = "ota";
-  else if (name.endsWith("_OTA.checksums")) kind = "chk";
-  else if (name.endsWith(".sha256")) kind = "sha256";
+  else if (originalName.includes("_OTA.tar.")) kind = "ota";
+  else if (originalName.endsWith("_OTA.checksums")) kind = "chk";
+  else if (originalName.endsWith(".sha256")) kind = "sha256";
   if (!kind) return null;
   // version metadata, extracted from the self-describing filename:
   // version "26.11.0-trunk" → "26.11.0"; release codename + kernel
-  const vm = name.match(VER_PAT);
-  const rm = name.match(REL_PAT);
+  const vm = originalName.match(VER_PAT);
+  const rm = originalName.match(REL_PAT);
   // secure comes from the mirror's "<sec>/" dir (plain|secure), not the
   // filename — plain and secure builds share identical filenames by design.
   return { board: board, variant: variant, mode: mode, crypt: crypt,
-           secure: !!secure, lk: lk,
-           kind: kind, name: name, size: size, url: url,
+           secure: !!secure || name.startsWith("secure-"), lk: lk,
+           kind: kind, name: originalName, size: size, url: url,
            ver: vm ? vm[1].replace(/-.*$/, "") : "",
            release: rm ? rm[1] : "",
            kernel: rm ? rm[2] : "" };
@@ -513,14 +516,18 @@ function buildSection(board, entries, slot, loaders) {
   const abS  = entries.filter(e => e.mode === "ab" && e.secure);
 
   const info = el("div", "info");
-  info.append(secGroup("PLAIN", false, [
+  const plainBoxes = [
     buildLoaderBox(false, loaders, slot),
-    buildModeBox("Recovery", "Single partition", rec,
-                 { suppressAb: false }, slot),
+    rec.length
+      ? buildModeBox("Recovery", "Single partition", rec,
+                     { suppressAb: false }, slot)
+      : null,
     ab.length
       ? buildModeBox("A/B", "Dual partition", ab, { suppressAb: true }, slot)
       : null,
-  ].filter(Boolean)));
+  ].filter(Boolean);
+  if (plainBoxes.length)
+    info.append(secGroup("PLAIN", false, plainBoxes));
   const secureBoxes = [
     buildLoaderBox(true, loaders, slot),
     recS.length

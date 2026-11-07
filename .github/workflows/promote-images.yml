@@ -114,10 +114,11 @@ jobs:
           stable_ptr="$(jq -r '.stable // empty' <<<"$slots_raw")"
           echo "slots.json: pre-release=${pre_ptr:-<null>} stable=${stable_ptr:-<null>}"
 
-          tag_pat='^[0-9]{6}-[0-9]{4}$'
+          tag_pat='^[0-9]{6}-[0-9]{4}(-r[0-9]+)?$'
           target_repo="${GITHUB_REPOSITORY_OWNER}/armbian-build"
 
-          # Tags must match YYMMDD-HHMM (the build stamp) — a hand-made
+          # Tags start with the build stamp YYMMDD-HHMM; the run id
+          # suffix prevents immutable-tag collisions. A hand-made
           # release with a free-form tag would win the lexicographic sort
           # otherwise and then fail the mirror guard below anyway.
           if [ -n "${TAG_IN:-}" ]; then
@@ -139,15 +140,15 @@ jobs:
             exit 0
           fi
 
-          jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
+          jq_pick="[.[] | select(.isPrerelease and (.tagName | test(\"$tag_pat\")))] | sort_by([.publishedAt, .tagName]) | last | .tagName // empty"
           tag="$(gh release list --repo "$target_repo" \
-                --json tagName,isPrerelease --jq "$jq_pick")"
+                --json tagName,isPrerelease,publishedAt --jq "$jq_pick")"
 
           # ── no pre-release: heal, recover-page, or real failure.
           if [ -z "$tag" ]; then
-            jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by(.tagName) | last | .tagName // empty"
+            jq_stable="[.[] | select(.isPrerelease == false and (.tagName | test(\"$tag_pat\")))] | sort_by([.publishedAt, .tagName]) | last | .tagName // empty"
             stable="$(gh release list --repo "$target_repo" \
-                --json tagName,isPrerelease --jq "$jq_stable")"
+                --json tagName,isPrerelease,publishedAt --jq "$jq_stable")"
             [ -n "$stable" ] \
               || { echo "::error::no pre-release and no stable release found in $target_repo"; exit 1; }
 
@@ -332,7 +333,7 @@ jobs:
             # indentation than the YAML block scalar, and the extra spaces
             # would render as a markdown code block.
             page_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/armbian-build/images/"
-            notes="$(printf 'Promoted to Stable — on-device verification passed.\n\nDownloads: %s\nBinaries live in the OneDrive mirror (tag-addressed trees, indexed by slots.json); this release carries no assets.\n\nslots.json flipped: previous ⟵ stable, pre-release ⟶ null.' "$page_url")"
+            notes="$(printf 'Promoted to Stable — on-device verification passed.\n\nDownloads: %s\nBinaries live in the OneDrive mirror (tag-addressed trees, indexed by slots.json); this release carries no assets.\n\nslots.json flipped: history ⟵ stable, pre-release ⟶ null.' "$page_url")"
             gh release edit "$TAG" --repo "$TARGET_REPO" --notes "$notes"
           else
             echo "heal mode — release $TAG is already published; flipping the pointer only"
@@ -391,10 +392,9 @@ jobs:
         # loaders subtree live inside trees/<tag>/, so one purge drops
         # payload, index and loaders together — no half-deleted states
         # (the pre-merge second root had exactly that cross-root window).
-        # Also sweeps legacy leftovers: slot dirs (pre-release/ etc.) an
-        # old-code build wrote back, and the standalone armbian/loaders/
-        # root from the two-root era — the pointer file never names
-        # them, so they render nowhere.
+        # Only legacy slot dirs inside this owner's namespace are swept.
+        # The global armbian/images and armbian/loaders roots belong to no
+        # single pipeline and must never be purged by routine GC.
         if: steps.rel.outputs.mode == 'promote' || steps.rel.outputs.mode == 'heal'
         run: |
           set -euo pipefail
@@ -402,7 +402,6 @@ jobs:
           import json, subprocess, sys
 
           IBASE = f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images"
-          ABASE = "seeed-storage:armbian"
           LEGACY = {"pre-release", "stable", "previous"}
 
           def rcat(path):
@@ -437,13 +436,6 @@ jobs:
               if d in LEGACY:
                   print(f"::notice::purging legacy slot dir images/{d}/ (old-code build residue)")
                   subprocess.run(["rclone", "purge", f"{IBASE}/{d}"], check=True)
-          # Pre-namespace global roots a straggler old-code build may
-          # recreate — this pipeline owns armbian/<owner>/ only. Owner
-          # namespace dirs never match these names.
-          for legacy in ("loaders", "images"):
-              if legacy in lsdirs(ABASE):
-                  print(f"::notice::purging pre-namespace global armbian/{legacy}/ root")
-                  subprocess.run(["rclone", "purge", f"{ABASE}/{legacy}"], check=True)
           for t in lsdirs(f"{IBASE}/trees"):
               if t not in referenced:
                   print(f"::notice::purging unreferenced tree images/trees/{t}/")
@@ -451,37 +443,66 @@ jobs:
           print("GC done")
           PY
 
-      - name: Clean up superseded pre-releases
-        # Older pre-releases carry no assets at all (the binaries live in
-        # the tag-addressed trees; the manifest is the link source)
-        # — pure noise once superseded. Only asset-less releases are
-        # deleted, so a GitHub-assets-mode (fork) release with real
-        # binaries is never touched. Drafts are left alone — they may
-        # belong to in-flight builds. Skipped in recover-page mode:
-        # nothing was promoted, so nothing was superseded. (In heal mode
-        # there are no pre-releases left by construction — harmless.)
+      - name: Clean up superseded releases
+        # Mirror retention and release lifecycle are the same policy:
+        # deleting a rotated-out tree must not leave an empty Stable
+        # release pointing at it. Only non-draft releases with a matching
+        # pipeline run URL and NO uploaded assets are owned by this flow;
+        # foreign/manual releases and forks with real assets stay intact.
+        # Pre-release cleanup shares the same ownership predicate.
         if: steps.rel.outputs.mode != 'recover-page'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          HAS_RCLONE: ${{ steps.probe.outputs.has_rclone }}
           TARGET_REPO: ${{ steps.rel.outputs.target_repo }}
           TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
-          stale="$(gh release list --repo "$TARGET_REPO" --limit 100 \
-            --json tagName,isPrerelease,isDraft \
-            --jq ".[] | select(.isPrerelease and .isDraft == false and .tagName != \"$TAG\") | .tagName")"
-          [ -n "$stale" ] || { echo "no superseded pre-releases"; exit 0; }
-          while read -r t; do
-            kind="$(gh release view "$t" --repo "$TARGET_REPO" --json assets \
-              --jq 'if ([.assets[].name] == []) then "asset-less" else "has-binaries" end')"
-            if [ "$kind" = "asset-less" ]; then
-              echo "deleting superseded pre-release: $t"
-              gh release delete "$t" --repo "$TARGET_REPO" --yes --cleanup-tag \
-                || echo "::warning::failed to delete $t"
-            else
-              echo "keeping $t (assets are not asset-less)"
-            fi
-          done <<<"$stale"
+          python3 - "$TAG" <<'PY'
+          import json, os, re, subprocess, sys
+
+          keep_tag = sys.argv[1]
+          repo = os.environ["TARGET_REPO"]
+          if os.environ.get("HAS_RCLONE") != "true":
+              print("OneDrive disabled — uploaded-asset releases are never deleted")
+              sys.exit(0)
+          slots = json.loads(subprocess.run(
+              ["rclone", "cat",
+               f"seeed-storage:armbian/{os.environ['GITHUB_REPOSITORY_OWNER'].lower()}/images/slots.json",
+               "--contimeout", "15s"], check=True, capture_output=True, text=True).stdout)
+          hist = slots.get("history")
+          if not isinstance(hist, list):
+              hist = [slots["previous"]] if slots.get("previous") else []
+          referenced = {slots.get("stable"), slots.get("pre-release"), *hist} - {None}
+
+          def release(*args):
+              r = subprocess.run(["gh", "release", *args, "--repo", repo],
+                                 capture_output=True, text=True)
+              if r.returncode:
+                  print(f"::error::gh release {' '.join(args)}: {r.stderr.strip()}", file=sys.stderr)
+                  sys.exit(1)
+              return r.stdout
+
+          owned = re.compile(
+              rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
+          for rel in json.loads(release("list", "--limit", "100", "--json",
+                                       "tagName,isDraft,isPrerelease,assets,body")):
+              tag = rel["tagName"]
+              if tag == keep_tag or tag in referenced:
+                  continue
+              if rel["isDraft"] or rel["assets"]:
+                  print(f"keeping {tag} (draft or uploaded assets)")
+                  continue
+              if not owned.search(rel.get("body") or ""):
+                  print(f"keeping {tag} (no pipeline run ownership marker)")
+                  continue
+              # A pre-release is superseded once a new pre-release exists
+              # (or after a successful promote); a stable is superseded
+              # only after the slot/history cap drops its reference.
+              kind = "stable rotated out of history" if not rel["isPrerelease"] else "superseded pre-release"
+              print(f"deleting {kind}: {tag}")
+              release("delete", tag, "--yes", "--cleanup-tag")
+          PY
 
   # Static download page push (template sync).
   pages:
