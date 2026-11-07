@@ -309,8 +309,12 @@ jobs:
           old="$(rclone cat "$IBASE/slots.json" --contimeout 15s | jq -r '."pre-release" // empty')"
           [ -n "$old" ] || { echo "no current candidate to retire"; exit 0; }
           echo "retiring candidate $old before the new build"
-          rclone cat "$IBASE/slots.json" --contimeout 15s \
-            | jq '."pre-release" = null' | rclone rcat "$IBASE/slots.json"
+          rclone cat "$IBASE/slots.json" --contimeout 15s | jq \
+            --arg old "$old" \
+            'if ."pre-release" != $old then error("slots.json changed during candidate retirement") else ."pre-release" = null end' \
+            | rclone rcat "$IBASE/slots.json"
+          check="$(rclone cat "$IBASE/slots.json" --contimeout 15s | jq -r '."pre-release" // empty')"
+          [ -z "$check" ] || { echo "::error::candidate $check appeared during retirement; refusing to overwrite"; exit 1; }
           echo "tag=$old" >> "$GITHUB_OUTPUT"
 
       - name: Hide the retired candidate before deleting its tree
@@ -495,6 +499,7 @@ jobs:
       - name: Checkout extension (default branch)
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Verify immutable extension source revision
@@ -665,6 +670,13 @@ jobs:
 
       - name: Build
         working-directory: armbian-build
+        env:
+          PROFILE: ${{ matrix.profile }}
+          SECURITY: ${{ matrix.security }}
+          TIER: ${{ matrix.tier }}
+          BOARD: ${{ matrix.board }}
+          RELEASE: ${{ matrix.release }}
+          DESKTOP_TIER: ${{ inputs.desktop_tier }}
         run: |
           set -euo pipefail
           # Build the extension code from this workflow's repo + ref, not the
@@ -675,14 +687,14 @@ jobs:
           # cli → --minimal (Debian 13); gnome → desktop (Ubuntu 26.04)
           # sized by the desktop_tier choice.
           TIER_ARGS=""
-          if [[ "${{ matrix.tier }}" == "cli" ]]; then
+          if [[ "$TIER" == "cli" ]]; then
               TIER_ARGS="--minimal"
           else
-              TIER_ARGS="-d gnome -t ${{ inputs.desktop_tier }}"
+              TIER_ARGS="-d gnome -t $DESKTOP_TIER"
           fi
 
           # Passphrase only when a security profile is set (preflight-validated).
-          if [[ -n "${{ matrix.security }}" ]]; then
+          if [[ -n "$SECURITY" ]]; then
               export CRYPTROOT_PASSPHRASE="${{ secrets.CRYPTROOT_PASSPHRASE }}"
           fi
 
@@ -692,10 +704,10 @@ jobs:
 
           # shellcheck disable=SC2086
           ./seeed-build.sh \
-            ${{ matrix.profile }} \
-            ${{ matrix.security }} \
-            -b "${{ matrix.board }}" \
-            -R "${{ matrix.release }}" \
+            $PROFILE \
+            $SECURITY \
+            -b "$BOARD" \
+            -R "$RELEASE" \
             $TIER_ARGS
 
       - name: Compress .img to .img.xz + sha256
@@ -826,6 +838,10 @@ jobs:
           done
           mkdir -p "$GITHUB_WORKSPACE/release-upload"
           cp -- "${args[@]}" "$GITHUB_WORKSPACE/release-upload/"
+          # Filenames are self-describing, but secure/plain can share them.
+          # Never merge different bytes under one release asset name.
+          ( cd "$GITHUB_WORKSPACE/release-upload" && sha256sum -- * ) \
+            > "$GITHUB_WORKSPACE/release-upload.sha256"
 
       - name: Stage GitHub release assets
         if: ${{ env.HAS_RCLONE != 'true' }}
@@ -833,6 +849,16 @@ jobs:
         with:
           name: release-assets-${{ matrix.board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ matrix.profile || 'recovery' }}-${{ matrix.security || 'plain' }}-${{ github.run_id }}
           path: release-upload/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Stage GitHub release asset checksums
+        if: ${{ env.HAS_RCLONE != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-hashes-${{ matrix.board }}-${{ matrix.release }}-${{ matrix.tier }}-${{ matrix.profile || 'recovery' }}-${{ matrix.security || 'plain' }}-${{ github.run_id }}
+          path: release-upload.sha256
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -873,6 +899,44 @@ jobs:
           pattern: release-assets-*-${{ github.run_id }}
           path: release-assets
           merge-multiple: true
+
+      - name: Download asset hashes for conflict checks
+        uses: actions/download-artifact@v5
+        with:
+          pattern: release-hashes-*-${{ github.run_id }}
+          path: release-hashes
+          merge-multiple: true
+
+      - name: Verify shared release asset names are not conflicting
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release-assets/*)
+          hashes=(release-hashes/*)
+          [ ${#files[@]} -gt 0 ] && [ ${#hashes[@]} -gt 0 ] \
+            || { echo "::error::staged release assets or hashes missing"; exit 1; }
+          python3 - <<'PY'
+          from collections import defaultdict
+          from hashlib import sha256
+          from pathlib import Path
+
+          expected = defaultdict(set)
+          for f in Path("release-hashes").iterdir():
+              for line in f.read_text().splitlines():
+                  digest, name = line.split(maxsplit=1)
+                  expected[name.lstrip("*")].add(digest)
+          conflicts = {name: values for name, values in expected.items() if len(values) != 1}
+          if conflicts:
+              raise SystemExit(f"same-named release assets differ between matrix legs: {conflicts}")
+          actual = {}
+          for f in Path("release-assets").iterdir():
+              if not f.is_file():
+                  raise SystemExit(f"unexpected release asset directory: {f}")
+              actual[f.name] = sha256(f.read_bytes()).hexdigest()
+          if actual != {name: next(iter(values)) for name, values in expected.items()}:
+              raise SystemExit("merged release assets do not match per-leg hashes")
+          print(f"verified {len(actual)} shared asset names; all duplicate names have identical bytes")
+          PY
 
       - name: Upload original filenames without clobbering
         run: |
