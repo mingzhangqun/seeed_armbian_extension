@@ -1052,14 +1052,19 @@ jobs:
           # this pipeline. Stable/history Releases are never deleted.
           rels = json.loads(subprocess.run(
               ["gh", "release", "list", "--repo", repo, "--limit", "100", "--json",
-               "tagName,isDraft,isPrerelease,assets,body"],
+               "tagName,isDraft,isPrerelease"],
               check=True, capture_output=True, text=True).stdout)
           owned = re.compile(rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
           for rel in rels:
               tag = rel["tagName"]
               if not rel["isPrerelease"] or rel["isDraft"] or tag == new_tag:
                   continue
-              if rel["assets"] or not owned.search(rel.get("body") or ""):
+              # assets/body are available on release VIEW, not list.
+              detail = json.loads(subprocess.run(
+                  ["gh", "release", "view", tag, "--repo", repo, "--json", "assets,body"],
+                  check=True, capture_output=True, text=True).stdout)
+              if detail["assets"] or not owned.search(detail.get("body") or ""):
+                  print(f"keeping pre-release {tag} (assets or foreign ownership)")
                   print(f"keeping pre-release {tag} (assets or foreign ownership)")
                   continue
               subprocess.run(["gh", "release", "delete", tag, "--repo", repo,

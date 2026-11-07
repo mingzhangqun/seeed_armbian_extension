@@ -445,13 +445,15 @@ jobs:
           # stable Release just because its mirror payload expired.
           owned = re.compile(rf"{re.escape(os.environ['GITHUB_REPOSITORY'])}/actions/runs/\d+\b")
           for rel in json.loads(gh("release", "list", "--limit", "100", "--json",
-                                   "tagName,isDraft,isPrerelease,assets,body")):
+                                   "tagName,isDraft,isPrerelease")):
               tag = rel["tagName"]
               if tag not in referenced and not rel["isPrerelease"]:
                   expired.append(tag)
               if tag == slots.get("pre-release") or not rel["isPrerelease"]:
                   continue
-              if rel["isDraft"] or rel["assets"] or not owned.search(rel.get("body") or ""):
+              # assets/body are available on release VIEW, not list.
+              detail = json.loads(gh("release", "view", tag, "--json", "assets,body"))
+              if rel["isDraft"] or detail["assets"] or not owned.search(detail.get("body") or ""):
                   continue
               r = subprocess.run(["rclone", "cat", f"{IBASE}/trees/{tag}/manifest.json",
                                   "--contimeout", "15s"], capture_output=True, text=True)
