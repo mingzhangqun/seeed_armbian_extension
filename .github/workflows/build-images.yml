@@ -269,8 +269,17 @@ jobs:
           # Enumerate the parent rather than treating every cat error as a fresh
           # namespace. Network/permission failures must stop initialization.
           if ! listing="$(rclone lsjson "$IBASE" --contimeout 15s 2>slots-list.error)"; then
-            cat slots-list.error >&2
-            exit 1
+            # OneDrive reports a missing directory as a listing error instead of
+            # an empty list: first dispatch for a new owner namespace. Create the
+            # namespace and fall through to pointer-file initialization below;
+            # every other failure must still stop initialization.
+            if ! grep -qi 'not found' slots-list.error; then
+              cat slots-list.error >&2
+              exit 1
+            fi
+            rclone mkdir "$IBASE" --contimeout 15s
+            echo "Created missing image namespace $IBASE"
+            listing="[]"
           fi
           if [ "$(jq '[.[] | select(.Path == "slots.json")] | length' <<<"$listing")" -eq 0 ]; then
             printf '%s\n' '{"stable":null,"pre-release":null,"history":[]}' |
