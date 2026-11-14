@@ -61,6 +61,14 @@ if [[ "yes" == "yes" ]]; then
 	enable_extension "seeed_armbian_extension/security-hardening/recomputer-security"
 fi
 
+# Vendor-kernel fixes carried as patches until the Armbian kernel mirror
+# (armbian/linux-rockchip rk-6.1-rkr7.2) picks them up; today that is the
+# imx219 VANA control on RK3576 CSI0/CSI1 from Seeed's fix/imx708_imx219.
+if [[ "yes" == "yes" ]]; then
+	display_alert "Kernel patches" "Enable seeed-kernel-patches staging" "info"
+	enable_extension "seeed_armbian_extension/rk-kernel-patches/rk-kernel-patches"
+fi
+
 # SSH power-loss recovery: run the ssh-protect repair script as ExecStartPre
 # of ssh.service in every seeed image.
 if [[ "yes" == "yes" ]]; then

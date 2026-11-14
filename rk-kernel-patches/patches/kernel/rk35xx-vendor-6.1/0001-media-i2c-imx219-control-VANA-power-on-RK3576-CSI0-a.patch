@@ -1,0 +1,224 @@
+From da28a0c32576d578ac63ecab2f7b423e71964c13 Mon Sep 17 00:00:00 2001
+From: Mkirin <haohao.wang@seeed.cc>
+Date: Sat, 14 Nov 2026 17:14:03 +0800
+Subject: [PATCH] media: i2c: imx219: control VANA power on RK3576 CSI0 and
+ CSI1
+
+Keep the Armbian IMX219 register sequence and control model unchanged.
+The only driver change is to acquire vana-supply and enable/disable it
+together with XVCLK in s_power(); cam0_pwr/cam1_pwr are fixed regulators
+backed by GPIOs (PCA9535 on CSI0).
+
+Control defaults are initialized before video_probe() powers the sensor,
+so cache control values in priv instead of issuing I2C accesses while
+unpowered; only the register access is skipped, and s_stream() replays
+the cached exposure and gain registers after the mode table.
+
+Make cam0_pwr and cam1_pwr controlled instead of always-on and add
+matching 100 ms startup and 500 ms off-on delays so each sensor
+completes POR. Keep the endpoint data-lane declaration unchanged; the
+legacy driver does not require an explicit clock lane or link frequency.
+---
+ .../recomputer-rk3576-devkit-cam.dtsi         | 16 ++---
+ drivers/media/i2c/imx219.c                    | 70 +++++++++++++++++--
+ 2 files changed, 74 insertions(+), 12 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/rockchip/recomputer-rk3576-devkit-cam.dtsi b/arch/arm64/boot/dts/rockchip/recomputer-rk3576-devkit-cam.dtsi
+index 44bbb8f52067..1e3b97f61dd3 100644
+--- a/arch/arm64/boot/dts/rockchip/recomputer-rk3576-devkit-cam.dtsi
++++ b/arch/arm64/boot/dts/rockchip/recomputer-rk3576-devkit-cam.dtsi
+@@ -13,9 +13,9 @@ cam0_pwr: cam0-pwr {
+         regulator-min-microvolt = <3300000>;
+         regulator-max-microvolt = <3300000>;
+         enable-active-high;
+-        gpio = <&gpio_xten  0  GPIO_ACTIVE_HIGH>; 
+-        regulator-boot-on;         
+-        regulator-always-on;        
++        gpio = <&gpio_xten  0  GPIO_ACTIVE_HIGH>;
++        startup-delay-us = <100000>;
++        off-on-delay-us = <500000>;
+     };
+ 
+     cam1_pwr: cam1-pwr {
+@@ -25,9 +25,9 @@ cam1_pwr: cam1-pwr {
+         regulator-min-microvolt = <3300000>;
+         regulator-max-microvolt = <3300000>;
+         enable-active-high;
+-        gpio = <&gpio1  RK_PD1  GPIO_ACTIVE_HIGH>; 
+-        regulator-boot-on;         
+-        regulator-always-on;        
++        gpio = <&gpio1  RK_PD1  GPIO_ACTIVE_HIGH>;
++        startup-delay-us = <100000>;
++        off-on-delay-us = <500000>;
+     };
+     
+ 
+@@ -91,7 +91,7 @@ imx219_0: imx219@10 {
+         port {
+             imx219_out0: endpoint {
+                 remote-endpoint = <&mipi_in_ucam2>;
+-                data-lanes = <1 2>;					
++                data-lanes = <1 2>;
+             };
+         };
+     };
+@@ -156,7 +156,7 @@ imx219_1: imx219@10 {
+         port {
+             imx219_out1: endpoint {
+                 remote-endpoint = <&mipi_in_ucam3>;
+-                data-lanes = <1 2>;					
++                data-lanes = <1 2>;
+             };
+         };
+     };
+diff --git a/drivers/media/i2c/imx219.c b/drivers/media/i2c/imx219.c
+index a59f301c6533..673887e5fe42 100644
+--- a/drivers/media/i2c/imx219.c
++++ b/drivers/media/i2c/imx219.c
+@@ -10,6 +10,7 @@
+  */
+ #include <linux/clk.h>
+ #include <linux/delay.h>
++#include <linux/regulator/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/init.h>
+ #include <linux/io.h>
+@@ -224,6 +225,8 @@ struct imx219 {
+ 	struct media_pad pad;
+ 	struct v4l2_ctrl_handler ctrl_handler;
+ 	struct clk *clk;
++	struct regulator *vana;
++	bool powered;
+ 	struct v4l2_rect crop_rect;
+ 	int hflip;
+ 	int vflip;
+@@ -419,6 +422,19 @@ static int imx219_s_stream(struct v4l2_subdev *sd, int enable)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Replay the cached exposure and gain registers: the mode table does
++	 * not program them, and they may have been accepted while the sensor
++	 * was unpowered.
++	 */
++	ret = reg_write(client, 0x0157, priv->analogue_gain);
++	ret |= reg_write(client, 0x0158, priv->digital_gain >> 8);
++	ret |= reg_write(client, 0x0159, priv->digital_gain & 0xff);
++	ret |= reg_write(client, 0x015a, priv->exposure_time >> 8);
++	ret |= reg_write(client, 0x015b, priv->exposure_time & 0xff);
++	if (ret)
++		return ret;
++
+ 	return reg_write_table(client, start);
+ }
+ 
+@@ -427,13 +443,32 @@ static int imx219_s_power(struct v4l2_subdev *sd, int on)
+ {
+ 	struct i2c_client *client = v4l2_get_subdevdata(sd);
+ 	struct imx219 *priv = to_imx219(client);
++	int ret;
+ 
+-	if (on)	{
++	if (on) {
+ 		dev_dbg(&client->dev, "imx219 power on\n");
+-		clk_prepare_enable(priv->clk);
+-	} else if (!on) {
++
++		ret = regulator_enable(priv->vana);
++		if (ret) {
++			dev_err(&client->dev, "failed to enable vana: %d\n", ret);
++			return ret;
++		}
++
++		ret = clk_prepare_enable(priv->clk);
++		if (ret) {
++			dev_err(&client->dev, "failed to enable clock: %d\n", ret);
++			regulator_disable(priv->vana);
++			return ret;
++		}
++
++		/* IMX219 needs t4 + max(t5, t6) after power and clock are up. */
++		usleep_range(6200, 7200);
++		priv->powered = true;
++	} else {
+ 		dev_dbg(&client->dev, "imx219 power off\n");
++		priv->powered = false;
+ 		clk_disable_unprepare(priv->clk);
++		regulator_disable(priv->vana);
+ 	}
+ 
+ 	return 0;
+@@ -538,6 +573,13 @@ static int imx219_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	u16 a_gain = 256;
+ 	u16 d_gain = 1;
+ 
++	/*
++	 * Control defaults are initialized before imx219_video_probe() powers
++	 * the sensor, and userspace may queue settings before streaming.
++	 * Always cache the values in priv; only the register access below is
++	 * skipped while the sensor is unpowered. imx219_s_stream() replays
++	 * the cached exposure and gain registers at stream start.
++	 */
+ 	switch (ctrl->id) {
+ 	case V4L2_CID_HFLIP:
+ 		priv->hflip = ctrl->val;
+@@ -595,6 +637,9 @@ static int imx219_s_ctrl(struct v4l2_ctrl *ctrl)
+ 		 * so the exposure & gain can reflect at the same frame
+ 		 */
+ 
++		if (!priv->powered)
++			return 0;
++
+ 		ret = reg_write(client, 0x0157, priv->analogue_gain);
+ 		ret |= reg_write(client, 0x0158, priv->digital_gain >> 8);
+ 		ret |= reg_write(client, 0x0159, priv->digital_gain & 0xff);
+@@ -604,6 +649,9 @@ static int imx219_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	case V4L2_CID_EXPOSURE:
+ 		priv->exposure_time = ctrl->val;
+ 
++		if (!priv->powered)
++			return 0;
++
+ 		ret = reg_write(client, 0x015a, priv->exposure_time >> 8);
+ 		ret |= reg_write(client, 0x015b, priv->exposure_time & 0xff);
+ 		return ret;
+@@ -616,6 +664,10 @@ static int imx219_s_ctrl(struct v4l2_ctrl *ctrl)
+ 			ctrl->val = priv->cur_mode->vts_def;
+ 		if ((ctrl->val - IMX219_EXP_LINES_MARGIN) != priv->cur_vts)
+ 			priv->cur_vts = ctrl->val - IMX219_EXP_LINES_MARGIN;
++
++		if (!priv->powered)
++			return 0;
++
+ 		ret = reg_write(client, 0x0160, ((priv->cur_vts >> 8) & 0xff));
+ 		ret |= reg_write(client, 0x0161, (priv->cur_vts & 0xff));
+ 		return ret;
+@@ -623,7 +675,10 @@ static int imx219_s_ctrl(struct v4l2_ctrl *ctrl)
+ 	default:
+ 		return -EINVAL;
+ 	}
+-	/* If enabled, apply settings immediately */
++	/* If enabled, apply settings immediately; else s_stream() will */
++	if (!priv->powered)
++		return 0;
++
+ 	reg = reg_read(client, 0x0100);
+ 	if ((reg & 0x1f) == 0x01)
+ 		imx219_s_stream(&priv->subdev, 1);
+@@ -1062,6 +1117,13 @@ static int imx219_probe(struct i2c_client *client,
+ 		return -EPROBE_DEFER;
+ 	}
+ 
++	/* Each CSI instance controls its own vana-supply (cam0_pwr/cam1_pwr). */
++	priv->vana = devm_regulator_get(&client->dev, "vana");
++	if (IS_ERR(priv->vana)) {
++		dev_err(&client->dev, "failed to get vana supply\n");
++		return PTR_ERR(priv->vana);
++	}
++
+ 	/* 1920 * 1080 by default */
+ 	priv->cur_mode = &supported_modes[1];
+ 	priv->cfg_num = ARRAY_SIZE(supported_modes);
+-- 
+2.55.0
+

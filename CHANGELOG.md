@@ -23,6 +23,27 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Added
 
+#### Vendor kernel patches
+
+- **Seeed kernel fixes staged into the kernel patch set.** A new
+  `rk-kernel-patches` sub-extension carries fixes from Seeed's
+  linux-rockchip branches that the Armbian vendor kernel mirror
+  (armbian/linux-rockchip `rk-6.1-rkr7.2`) does not track yet, as git
+  format-patch files under
+  `rk-kernel-patches/patches/kernel/<KERNELPATCHDIR>/`. First entry:
+  `media: i2c: imx219: control VANA power on RK3576 CSI0 and CSI1`
+  (Seeed `fix/imx708_imx219`, `da28a0c`) — acquires `vana-supply` and
+  toggles it with XVCLK in `s_power()`, caches control defaults while the
+  sensor is unpowered, and turns `cam0_pwr`/`cam1_pwr` into controlled
+  regulators with POR delays so both CSI sensors probe reliably. A
+  `post_family_config__seeed_stage_kernel_patches` hook stages the files
+  into `${USERPATCHES_PATH}/kernel/rk35xx-vendor-6.1/` pre-hash, so the
+  staged patch joins the kernel artifact's patch-dir hash — a cached
+  kernel build can never silently skip the fix — while the directory
+  match keeps vendor-next (6.12) and edge builds from ever seeing a 6.1
+  patch that would fail to apply. Same staging approach as the
+  rescue-default-env U-Boot patch.
+
 #### Production loaders (maskrom / SPI flash)
 
 - **Board u-boot production artifacts exported to the OneDrive
