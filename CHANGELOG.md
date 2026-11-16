@@ -52,6 +52,11 @@ Covers the work against the initial import (merge base `9980aee`,
   match keeps vendor-next (6.12) and edge builds from ever seeing a 6.1
   patch that would fail to apply. Same staging approach as the
   rescue-default-env U-Boot patch.
+- **v4l2-async `clr_unready_dev` type-confusion fix staged.** Second
+  entry: `media: v4l2-async: fix type confusion in clr_unready_dev`
+  (Seeed `fix/v4l2-async-clr-unready`, `11d79c1a`), applied after the
+  camera patch. Verified to apply cleanly on top of 0001 and to match
+  the branch tree for `v4l2-async.c` byte for byte.
 
 #### Production loaders (maskrom / SPI flash)
 
