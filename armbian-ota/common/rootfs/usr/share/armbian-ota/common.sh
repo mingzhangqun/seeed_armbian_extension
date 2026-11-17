@@ -201,7 +201,10 @@ ota_check_image_variant() {
     local package_variant system_variant
 
     package_variant="$(package_env_get_value "IMAGE_VARIANT" || true)"
-    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
+    # Legacy devices pre-date the armbian-image-release stamp.
+    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    [ -n "${system_variant}" ] ||
+        system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
     if [ -z "${package_variant}" ] || [ -z "${system_variant}" ]; then
         log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping legacy variant gate"
         return 0
