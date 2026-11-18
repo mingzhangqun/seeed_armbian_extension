@@ -1167,6 +1167,12 @@ jobs:
             exit 0
           fi
           echo "::notice::initialization did not complete; preserving any mirror tree for repair"
+          if [ -z "${TARGET_REPO:-}" ]; then
+            # A failed plan propagates empty outputs; gh release view would
+            # then misfire on git-repo detection instead of the API.
+            echo "::notice::plan failed before the release repo was resolved; no draft to inspect"
+            exit 0
+          fi
           if ! state="$(gh release view "$TAG" --repo "$TARGET_REPO" \
             --json isDraft,isPrerelease,body --jq '[.isDraft,.isPrerelease,.body]|@json' 2>&1)"; then
             grep -qi 'release not found' <<<"$state" \
