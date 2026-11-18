@@ -333,6 +333,7 @@ jobs:
       contents: write
       pages: write
       id-token: write
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1100,6 +1101,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
+      actions: write
     timeout-minutes: 10
     steps:
       - name: Checkout

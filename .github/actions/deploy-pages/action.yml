@@ -119,6 +119,25 @@ runs:
         python3 -c 'import json; d = json.load(open("site/images/data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
         echo "=== site/images: index.html $(wc -c < site/images/index.html) bytes + data.json $(wc -c < site/images/data.json) bytes ==="
 
+    - name: Retire any earlier page artifact from this run
+      # The retire-page deployment and the final page deployment can both
+      # run in one workflow run; deploy-pages refuses to pick between two
+      # artifacts named github-pages ("Artifact count is 2"), so drop the
+      # earlier one before uploading ours.
+      if: steps.gate.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+      run: |
+        set -euo pipefail
+        ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+          --jq '[.artifacts[] | select(.name == "github-pages") | .id] | join(" ")')"
+        for id in $ids; do
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/$id" >/dev/null \
+            || { echo "::error::cannot delete the stale github-pages artifact $id"; exit 1; }
+          echo "deleted the earlier github-pages artifact $id from this run"
+        done
+
     - name: Upload the page artifact
       if: steps.gate.outputs.skip != 'true'
       uses: actions/upload-pages-artifact@v3
