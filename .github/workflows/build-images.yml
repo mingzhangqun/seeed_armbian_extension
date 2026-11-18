@@ -459,10 +459,10 @@ jobs:
           # repo named by the notes' build-sources table. Pre-table notes
           # simply leave the (nonexistent) old tags untouched.
           gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
-          old_kernel_repo="$(jq -r '.[3]' <<<"$state" | grep -oP '^\| \K[^ |]+/linux-rockchip\b' | head -1)"
+          old_kernel_repo="$(jq -r '.[3]' <<<"$state" | grep -oP '^\| \[?\K[A-Za-z0-9_.-]+/linux-rockchip\b' | head -1)"
           if [[ -n "$old_kernel_repo" ]]; then
-            gh api --method DELETE "repos/${old_kernel_repo}/git/refs/tags/armbian-images-${OLD_TAG}" >/dev/null 2>&1 || true
-            echo "swept kernel tag armbian-images-${OLD_TAG} from ${old_kernel_repo} (if present)"
+            gh api --method DELETE "repos/${old_kernel_repo}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
+            echo "swept kernel tag ${OLD_TAG} from ${old_kernel_repo} (if present)"
           fi
 
       - name: Tag build sources and write the Release notes
@@ -491,7 +491,7 @@ jobs:
           lr_owner="${lr_repo_part%/*}"
           lr_tag=""
           if [[ "${lr_owner,,}" == "${GITHUB_REPOSITORY_OWNER,,}" ]]; then
-            lr_tag="armbian-images-${TAG}"
+            lr_tag="${TAG}"
             [[ -n "$REL_TOKEN" ]] \
               || { echo "::error::RELEASE_GH_TOKEN is required to tag the kernel fork ${lr_repo_part}"; exit 1; }
             GH_TOKEN="$REL_TOKEN" gh api --method DELETE "repos/${lr_repo_part}/git/refs/tags/${lr_tag}" >/dev/null 2>&1 || true
@@ -507,7 +507,11 @@ jobs:
 
           pages_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/images/"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          if [[ -n "$lr_tag" ]]; then lr_tag_cell="${lr_tag}"; else lr_tag_cell="- (not owned, no tag)"; fi
+          if [[ -n "$lr_tag" ]]; then
+            lr_tag_cell="[${lr_tag}](https://github.com/${lr_repo_part}/releases/tag/${lr_tag})"
+          else
+            lr_tag_cell="- (not owned, no tag)"
+          fi
           if [[ -z "$OVERRIDE" ]]; then kernel_line="Kernel: linux ${KVER} (vendor slot pin)"; else kernel_line="Kernel: linux ${KVER} (override; version line matched the vendor slot at plan time)"; fi
           cat > release-notes.md <<NOTES
           Binaries live only in the OneDrive mirror; this Release carries version metadata.
@@ -515,11 +519,11 @@ jobs:
 
           ## Build sources (pinned at run start)
 
-          | repo | revision | branch | tag |
+          | repo | branch | revision | tag |
           |---|---|---|---|
-          | ${GITHUB_REPOSITORY} | ${GITHUB_SHA} | ${GITHUB_REF_NAME} | ${TAG} |
-          | ${AB_REPO%:*} | ${AB_COMMIT} | ${AB_REPO##*:} | ${TAG} |
-          | ${lr_repo_part} | ${LR_COMMIT} | ${lr_branch} | ${lr_tag_cell} |
+          | [${GITHUB_REPOSITORY}](https://github.com/${GITHUB_REPOSITORY}) | [${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}) | [${GITHUB_SHA:0:12}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) | [${TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) |
+          | [${AB_REPO%:*}](https://github.com/${AB_REPO%:*}) | [${AB_REPO##*:}](https://github.com/${AB_REPO%:*}/tree/${AB_REPO##*:}) | [${AB_COMMIT:0:12}](https://github.com/${AB_REPO%:*}/commit/${AB_COMMIT}) | [${TAG}](https://github.com/${AB_REPO%:*}/releases/tag/${TAG}) |
+          | [${lr_repo_part}](https://github.com/${lr_repo_part}) | [${lr_branch}](https://github.com/${lr_repo_part}/tree/${lr_branch}) | [${LR_COMMIT:0:12}](https://github.com/${lr_repo_part}/commit/${LR_COMMIT}) | ${lr_tag_cell} |
 
           ${kernel_line}
           Run: ${run_url}
@@ -1152,8 +1156,8 @@ jobs:
           lr_repo_part="${LR_REPO%:*}"
           lr_owner="${lr_repo_part%/*}"
           if [[ "${lr_owner,,}" == "${GITHUB_REPOSITORY_OWNER,,}" ]]; then
-            gh api --method DELETE "repos/${lr_repo_part}/git/refs/tags/armbian-images-${TAG}" >/dev/null 2>&1 || true
-            echo "swept kernel tag armbian-images-${TAG} from ${lr_repo_part} (if present)"
+            gh api --method DELETE "repos/${lr_repo_part}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+            echo "swept kernel tag ${TAG} from ${lr_repo_part} (if present)"
           else
             echo "kernel source ${lr_repo_part} is not owned; no kernel tag to clean"
           fi
