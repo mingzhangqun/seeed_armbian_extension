@@ -582,14 +582,34 @@ jobs:
         run: |
           .github/scripts/generate-deb-index.sh /tmp/debs public/index.html /tmp/sdk-debs.manifest
 
+      - name: Carry the live images page into the snapshot
+        # The site hosts this apt repository at the root and the images
+        # page at images/; a Pages deployment replaces the whole site, so
+        # the artifact must include both subtrees. The images pipeline
+        # mirrors the apt repository the same way when it deploys. A
+        # missing page (first deploy on a fresh site) is skipped.
+        run: |
+          set -euo pipefail
+          site_base="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/"
+          mkdir -p public/images
+          for f in index.html data.json; do
+            if ! curl -fsSL --max-time 60 -o "public/images/$f" "${site_base}images/$f"; then
+              echo "images page ${f} absent on the live site — not carried"
+              rm -f "public/images/$f"
+            fi
+          done
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: public
 
   # ──────────────────────────────────────────────────
-  # Deploy APT to this repository's project Pages. Images publishing is a
-  # separate pipeline in armbian-build and must not share this destination.
+  # Deploy APT to this repository's project Pages. The images pipeline
+  # deploys the same site with the apt repository carried over — see the
+  # carry steps on both sides. Concurrent apt and images deployments can
+  # interleave (separate concurrency groups); the last deployment wins
+  # and the next one re-merges both subtrees.
   # ──────────────────────────────────────────────────
   deploy-pages:
     needs: publish

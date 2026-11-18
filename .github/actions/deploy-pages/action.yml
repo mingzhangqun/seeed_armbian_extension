@@ -119,6 +119,18 @@ runs:
         python3 -c 'import json; d = json.load(open("site/images/data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
         echo "=== site/images: index.html $(wc -c < site/images/index.html) bytes + data.json $(wc -c < site/images/data.json) bytes ==="
 
+    - name: Carry the live apt repository into the snapshot
+      # The site hosts the apt repository at the root and this page at
+      # images/; a Pages deployment replaces the whole site, so the
+      # artifact must include both subtrees. apt-repo-publish mirrors
+      # images/ the same way when it deploys.
+      if: steps.gate.outputs.skip != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        site_base="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/"
+        python3 .github/scripts/fetch-apt-site.py "$site_base" site
+
     - name: Retire any earlier page artifact from this run
       # The retire-page deployment and the final page deployment can both
       # run in one workflow run; deploy-pages refuses to pick between two
