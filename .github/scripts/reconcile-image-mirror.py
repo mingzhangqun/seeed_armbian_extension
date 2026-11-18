@@ -154,7 +154,7 @@ class Mirror:
                 continue
             if self.slots() != expected:
                 raise ReconcileError("slots.json changed during GC; stopping before legacy purge")
-            self.call("purge", f"{self.base}/{directory}")
+            self.purge(f"{self.base}/{directory}")
         for tag in self.dirs("trees"):
             if tag in references(current):
                 continue
@@ -163,7 +163,13 @@ class Mirror:
                     f"slots.json changed during GC; preserving tree {tag}"
                 )
             print(f"purging expired mirror tree {tag}; retaining its GitHub Release")
-            self.call("purge", f"{self.base}/trees/{tag}")
+            self.purge(f"{self.base}/trees/{tag}")
+
+    def purge(self, path):
+        # OneDrive keeps purged items in the recycle bin, still counted
+        # against quota. --onedrive-hard-delete (rclone >= 1.67, drive_type
+        # business) issues a Graph permanentDelete so the space is freed.
+        self.call("purge", path, "--onedrive-hard-delete")
 
 
 class Releases:
@@ -299,7 +305,7 @@ class Releases:
             print(f"marked expired mirror retention on retained Release {tag}")
 
 
-def reconcile(mirror, releases, depth=1):
+def reconcile(mirror, releases, depth=0):
     if depth < 0:
         raise ReconcileError("HISTORY_DEPTH must be >= 0")
     old = mirror.slots()
@@ -399,7 +405,7 @@ def reconcile(mirror, releases, depth=1):
         # Clean legacy directories independently of whether a stable exists.
         for directory in mirror.dirs(""):
             if directory in ("pre-release", "stable", "previous"):
-                mirror.call("purge", f"{mirror.base}/{directory}")
+                mirror.purge(f"{mirror.base}/{directory}")
         mirror.gc(desired)
         releases.remove_dangling(repaired, release_list)
         releases.reconcile_history(desired, release_list)
@@ -423,7 +429,7 @@ def main():
     releases = Releases(repo, os.environ["GITHUB_REPOSITORY"])
     result = reconcile(
         mirror, releases,
-        int(os.environ.get("HISTORY_DEPTH", "1")),
+        int(os.environ.get("HISTORY_DEPTH", "0")),
     )
     output = os.environ.get("GITHUB_OUTPUT")
     if output:

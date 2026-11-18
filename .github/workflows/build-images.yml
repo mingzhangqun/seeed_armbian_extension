@@ -333,7 +333,7 @@ jobs:
           if [ -n "$OLD_TAG" ]; then
             [[ "$OLD_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
               { echo "::error::invalid retired mirror tag; refusing tree cleanup"; exit 1; }
-            rclone purge "$IBASE/trees/$OLD_TAG" --contimeout 15s
+            rclone purge "$IBASE/trees/$OLD_TAG" --contimeout 15s --onedrive-hard-delete
           fi
           if ! rclone lsd "$IBASE/trees/$TAG" --contimeout 15s > tree.check 2> tree.error; then
             if grep -qi 'not found' tree.error; then
@@ -344,7 +344,7 @@ jobs:
               exit 1
             fi
           else
-            rclone purge "$IBASE/trees/$TAG" --contimeout 15s
+            rclone purge "$IBASE/trees/$TAG" --contimeout 15s --onedrive-hard-delete
           fi
 
       - name: Remove the retired candidate Release

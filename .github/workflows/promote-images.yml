@@ -5,6 +5,11 @@ name: "Images - Release"
 
 on:
   workflow_dispatch:
+    inputs:
+      history_depth:
+        description: "Mirror history depth: old stable trees kept on OneDrive (0 purges them on promotion)"
+        default: "0"
+        required: false
 
 concurrency:
   group: images-mirror
@@ -35,7 +40,8 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           GH_REPO: ${{ github.repository_owner }}/armbian-build
           RCLONE_CONFIG: ${{ runner.home }}/.config/rclone/rclone.conf
-          HISTORY_DEPTH: "1"
+          # Empty input (API-triggered runs without inputs) falls back to 0.
+          HISTORY_DEPTH: ${{ inputs.history_depth || '0' }}
         run: |
           export RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
           python3 .github/scripts/reconcile-image-mirror.py
