@@ -11,10 +11,16 @@ inputs:
     description: rclone.conf contents (raw or base64) — pass the RCLONE_CONFIG secret
     required: true
 
+outputs:
+  remote:
+    description: The OneDrive remote name every mirror path is rooted at
+    value: seeed-storage
+
 runs:
   using: composite
   steps:
     - name: Install rclone + seeed-storage remote
+      id: install
       uses: AnimMouse/setup-rclone@v1
       with:
         version: v1.67.0

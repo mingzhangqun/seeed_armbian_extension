@@ -457,10 +457,11 @@ jobs:
           gh release delete "$OLD_TAG" --repo "$TARGET_REPO" --yes --cleanup-tag
           # The retired candidate's source tags go with its Release: the
           # extension tag lives in this repo; the kernel tag lives in the
-          # repo named by the notes' build-sources table. Pre-table notes
-          # simply leave the (nonexistent) old tags untouched.
+          # repo named by the notes' build-sources table (parsed by the
+          # shared notes-meta CLI). Pre-table notes simply leave the
+          # (nonexistent) old tags untouched.
           gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
-          old_kernel_repo="$(jq -r '.[3]' <<<"$state" | grep -oP '^\| \[?\K[A-Za-z0-9_.-]+/linux-rockchip\b' | head -1)"
+          old_kernel_repo="$(jq -r '.[3]' <<<"$state" | python3 .github/scripts/notes-meta.py kernel-repo)"
           if [[ -n "$old_kernel_repo" ]]; then
             gh api --method DELETE "repos/${old_kernel_repo}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
             echo "swept kernel tag ${OLD_TAG} from ${old_kernel_repo} (if present)"
