@@ -58,7 +58,7 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: refresh
-          repo: ${{ steps.mirror.outputs.release_repo }}
+          repo: ${{ github.repository }}
           release_repo: ${{ steps.mirror.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}

@@ -24,12 +24,12 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # The page ALWAYS lives on the build-source repo (owner/armbian-build
-    # — the callers pass release_repo as the push target), pushed via the
-    # gh-pages API with PAGES_TARGET_TOKEN. A same-repo actions-mode
-    # deployment path used to exist but was unreachable by construction
-    # (release_repo is an armbian-build repo, never this extension repo)
-    # and was removed 2026-11-07.
+    # The page lives on the extension repo (the workflow's own repository —
+    # callers pass it as `repo`), pushed via the gh-pages API with
+    # PAGES_TARGET_TOKEN. Release metadata still comes from `release_repo`
+    # (owner/armbian-build, where the Releases and the device OTA contract
+    # live). A same-repo actions-mode deployment path used to exist but was
+    # unreachable by construction and was removed 2026-11-07.
     - name: Resolve deploy gate
       id: gate
       shell: bash

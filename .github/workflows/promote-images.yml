@@ -64,7 +64,7 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.promote.outputs.tag }}
-          repo: ${{ needs.promote.outputs.target_repo }}
+          repo: ${{ github.repository }}
           release_repo: ${{ needs.promote.outputs.target_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
