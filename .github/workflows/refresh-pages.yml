@@ -17,17 +17,14 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Probe secrets
         id: probe
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
-          PAGES_TARGET_TOKEN: ${{ secrets.PAGES_TARGET_TOKEN }}
         run: |
-          if [ -z "$PAGES_TARGET_TOKEN" ]; then
-            echo "::error::PAGES_TARGET_TOKEN is not set — a refresh cannot update the page; aborting instead of reporting a false success."
-            exit 1
-          fi
           if [ -z "$RCLONE_CONFIG" ]; then
             echo "::error::RCLONE_CONFIG is not set — a refresh would strip all file links from the page; aborting."
             exit 1
@@ -58,8 +55,6 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: refresh
-          repo: ${{ github.repository }}
           release_repo: ${{ steps.mirror.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}

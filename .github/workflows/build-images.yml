@@ -331,6 +331,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      pages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -393,10 +395,8 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: retire-${{ needs.plan.outputs.tag }}
-          repo: ${{ github.repository }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
 
       - name: Reset this run's staging tree
@@ -1095,9 +1095,11 @@ jobs:
     needs: [plan, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    # PAGES_TARGET_TOKEN pushes gh-pages; GITHUB_TOKEN reads Releases.
+    # GITHUB_TOKEN deploys this repo's Pages; it also reads Releases.
     permissions:
       contents: read
+      pages: write
+      id-token: write
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1107,12 +1109,10 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.plan.outputs.tag }}
-          # Push the page to this repo's gh-pages; release metadata
-          # stays on the armbian-build repo.
-          repo: ${{ github.repository }}
+          # Deploys this repo's Pages site; release metadata stays on
+          # the armbian-build repo.
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
 
   cleanup:

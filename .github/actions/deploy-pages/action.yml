@@ -1,12 +1,9 @@
 name: "Deploy images page"
-description: "Bundle the mirror manifest into data.json, stage the static page, and deploy"
+description: "Bundle the mirror manifest into data.json, stage the static page, and deploy via the official Pages Actions pipeline"
 
 inputs:
   tag:
-    description: "Release tag (used in commit message)"
-    required: true
-  repo:
-    description: "Target repo for the page (owner/repo)"
+    description: "Release tag (used in deployment context)"
     required: true
   release_repo:
     description: "Repo where the release lives (owner/repo)"
@@ -14,33 +11,39 @@ inputs:
   rclone_config:
     description: "RCLONE_CONFIG secret content (required for the mirror manifest)"
     required: true
-  pages_token:
-    description: "PAGES_TARGET_TOKEN secret content (drives the gh-pages API push)"
-    required: false
   gh_token:
-    description: "GH_TOKEN for release/repo API calls (needs contents:read to list releases)"
+    description: "GH_TOKEN for release/repo API calls (needs contents:read to list releases, pages:read for the deploy gate)"
     required: true
+
+# Callers must grant this job `pages: write` and `id-token: write`:
+# actions/deploy-pages deploys THIS repository's Pages site with
+# GITHUB_TOKEN — no gh-pages branch and no cross-repo PAT.
 
 runs:
   using: "composite"
   steps:
-    # The page lives on the extension repo (the workflow's own repository —
-    # callers pass it as `repo`), pushed via the gh-pages API with
-    # PAGES_TARGET_TOKEN. Release metadata still comes from `release_repo`
-    # (owner/armbian-build, where the Releases and the device OTA contract
-    # live). A same-repo actions-mode deployment path used to exist but was
-    # unreachable by construction and was removed 2026-11-07.
+    # The page deploys to the extension repo's (the workflow's own
+    # repository) Pages site through the official artifact pipeline.
+    # Release metadata still comes from `release_repo` (owner/armbian-build,
+    # where the Releases and the device OTA contract live). The former
+    # gh-pages branch push (git data API + POST /pages/builds + stale-
+    # content watchdog) was removed 2026-11-18: an artifact deployment is
+    # atomic, so there is no commit-pushed-but-not-built window to guard.
     - name: Resolve deploy gate
       id: gate
       shell: bash
       env:
-        TOK: ${{ inputs.pages_token }}
+        GH_TOKEN: ${{ inputs.gh_token }}
       run: |
-        if [ -z "$TOK" ]; then
-          echo "::notice::PAGES_TARGET_TOKEN is not set — images page push skipped."
+        # Skip with a notice when the site is not enabled for "GitHub
+        # Actions" source yet — mirroring the old missing-token skip so an
+        # unconfigured repo never fails a green run.
+        info="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '{build_type, source}' 2>/dev/null || true)"
+        if [ -z "$info" ] || [ "$(jq -r '.build_type // empty' <<<"$info")" != "workflow" ]; then
+          echo "::notice::Pages site is not enabled with 'GitHub Actions' source — images page deploy skipped. Enable it once in Settings → Pages."
           echo "skip=true" >> "$GITHUB_OUTPUT"
         else
-          echo "deploy: gh-pages API push to the build-source repo"
+          echo "deploy: official Pages Actions deployment to ${GITHUB_REPOSITORY}"
         fi
 
     - name: Checkout (page generator)
@@ -59,9 +62,9 @@ runs:
       #                          it; trees never move)
       #   trees/<tag>/manifest.json   immutable per-build
       #                          {relpath → share URL}, written once by
-      #                          the build's release job — lives INSIDE
-      #                          the tree, so one purge drops a tag's
-      #                          payload and its index atomically
+      #                          the build's release job — lives INSIDE the
+      #                          tree, so one purge drops a tag's payload
+      #                          and its index atomically
       # This step validates (signed manifests, non-empty images, sane
       # history) and writes data-core.json; the render step merges in
       # the release list and emits the single data.json the page
@@ -99,178 +102,31 @@ runs:
         # an old stable outside the newest 30 Releases keeps its metadata.
         python3 .github/scripts/deploy-images-page.py data
 
-        cp .github/assets/images-page.template.html images.html
+        # The artifact root maps to the site root: files must land in
+        # images/ so the URL stays .../<repo>/images/.
+        mkdir -p site/images
+        cp .github/assets/images-page.template.html site/images/index.html
+        cp data.json site/images/data.json
 
         # Tripwires: the template must carry no placeholders, and the
         # page must actually load the data bundle.
-        if grep -q '\$PAGE_' images.html; then
+        if grep -q '\$PAGE_' site/images/index.html; then
           echo "::error::template still holds \$PAGE_ placeholders"
           exit 1
         fi
-        grep -q 'fetch("data.json"' images.html \
+        grep -q 'fetch("data.json"' site/images/index.html \
           || { echo "::error::page does not fetch data.json — template mismatch?"; exit 1; }
-        python3 -c 'import json; d = json.load(open("data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
-        echo "=== index.html $(wc -c < images.html) bytes + data.json $(wc -c < data.json) bytes ==="
+        python3 -c 'import json; d = json.load(open("site/images/data.json")); assert d["repo"] and "slots" in d and "manifests" in d and "releases" in d'
+        echo "=== site/images: index.html $(wc -c < site/images/index.html) bytes + data.json $(wc -c < site/images/data.json) bytes ==="
 
-    - name: Resolve the gh-pages parent
+    - name: Upload the page artifact
       if: steps.gate.outputs.skip != 'true'
-      id: parent
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.pages_token }}
-        REPO: ${{ inputs.repo }}
-      run: |
-        set -euo pipefail
-        # Keep gh's JSON stdout separate from its human-readable stderr. Only
-        # a structured 404 response selects create-ref; all other failures are
-        # retried and then rejected rather than risking a duplicate ref.
-        parent=""
-        branch_missing=""
-        for attempt in 1 2 3; do
-          error_file="$(mktemp)"
-          if response="$(gh api "repos/$REPO/branches/gh-pages" 2>"$error_file")"; then
-            rm -f "$error_file"
-            parent="$(jq -r '.commit.sha // empty' <<<"$response")"
-            break
-          fi
-          if [ "$(jq -r '.message // empty' <<<"$response" 2>/dev/null)" = "Branch not found" ] \
-              && grep -q 'HTTP 404' "$error_file"; then
-            branch_missing=true
-            rm -f "$error_file"
-            break
-          fi
-          rm -f "$error_file"
-          if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); else
-            echo "::error::cannot determine whether gh-pages exists; refusing to create a duplicate ref"
-            exit 1
-          fi
-        done
-        [[ "$parent" =~ ^[0-9a-f]{40}$ || -n "$branch_missing" ]] \
-          || { echo "::error::invalid gh-pages parent SHA"; exit 1; }
-        echo "sha=$parent" >> "$GITHUB_OUTPUT"
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: site
 
-    - name: Push to the target repo's gh-pages
-      id: push
+    - name: Deploy the images page
+      # Waits for the deployment to finish and fails loudly on error —
+      # the site can never silently keep serving stale content.
       if: steps.gate.outputs.skip != 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.pages_token }}
-        REPO: ${{ inputs.repo }}
-        TAG: ${{ inputs.tag }}
-        PARENT: ${{ steps.parent.outputs.sha }}
-      run: |
-        set -euo pipefail
-        # data.json can reach hundreds of KB — pass the JSON body via
-        # stdin, never the command line: a big payload blew the kernel's
-        # 128 KiB per-arg limit and killed gh with "Argument list too
-        # long" (exit 126) before any API call.
-        python3 - "$REPO" "$TAG" <<'PYEOF'
-        import base64, json, os, subprocess, sys
-
-        repo, tag = sys.argv[1], sys.argv[2]
-
-        def gh(*args, input=None):
-            r = subprocess.run(["gh", "api", *args], input=input,
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                print(f"::error::gh api {' '.join(args)} failed: {r.stderr.strip()}", file=sys.stderr)
-                sys.exit(1)
-            return r.stdout.strip()
-
-        def put_blob(local, path):
-            content = base64.b64encode(open(local, "rb").read()).decode()
-            sha = gh("--method", "POST", f"repos/{repo}/git/blobs", "--input", "-",
-                     "--jq", ".sha",
-                     input=json.dumps({"content": content, "encoding": "base64"}))
-            print(f"blob {path}: {sha}")
-            return sha
-
-        # Two files: the static shell + the data bundle it fetches.
-        entries = [{"path": "images/index.html", "mode": "100644", "type": "blob",
-                    "sha": put_blob("images.html", "images/index.html")},
-                   {"path": "images/data.json", "mode": "100644", "type": "blob",
-                    "sha": put_blob("data.json", "images/data.json")}]
-
-        tree = gh("--method", "POST", f"repos/{repo}/git/trees", "--input", "-",
-                  "--jq", ".sha",
-                  input=json.dumps({"tree": entries}))
-        print(f"tree: {tree}")
-
-        parent = os.environ["PARENT"]
-        if parent:
-            body = {"message": f"pages: images {tag}", "tree": tree, "parents": [parent]}
-            commit = gh("--method", "POST", f"repos/{repo}/git/commits", "--input", "-",
-                        "--jq", ".sha", input=json.dumps(body))
-            gh("--method", "PATCH", f"repos/{repo}/git/refs/heads/gh-pages",
-               "--input", "-", "--jq", ".object.sha",
-               input=json.dumps({"sha": commit}))
-        else:
-            body = {"message": f"pages: images {tag}", "tree": tree}
-            commit = gh("--method", "POST", f"repos/{repo}/git/commits", "--input", "-",
-                        "--jq", ".sha", input=json.dumps(body))
-            gh("--method", "POST", f"repos/{repo}/git/refs",
-               "--input", "-", "--jq", ".ref",
-               input=json.dumps({"ref": "refs/heads/gh-pages", "sha": commit}))
-        print(f"gh-pages commit pushed: {commit}")
-        print(f"commit={commit}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-        PYEOF
-
-    - name: Trigger and verify the pages build
-      # The legacy branch pipeline can wedge silently (seen 2026-11-02 on
-      # a fork: POST /pages/builds returns "queued" and nothing runs).
-      # Fail loudly instead of leaving the site on stale content.
-      if: steps.gate.outputs.skip != 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.pages_token }}
-        REPO: ${{ inputs.repo }}
-        EXPECTED_COMMIT: ${{ steps.push.outputs.commit }}
-      run: |
-        set -euo pipefail
-        # Assert by READING the config, not by writing it: the deploy token
-        # has contents+pages-build rights but NOT pages-settings admin —
-        # POST/PATCH /pages 404s (no perms), which made the old
-        # write-to-assert emit a permanent warning on every run
-        # (2026-11-03). GET is allowed; warn only on actual drift. The
-        # build trigger below remains the hard gate for stale content.
-        cur="$(gh api "repos/$REPO/pages" --jq '.source.branch + " " + .source.path' 2>/dev/null || echo '?')"
-        [ "$cur" = "gh-pages /" ] \
-          || echo "::warning::pages source is '$cur', expected 'gh-pages /' — fix in repo Settings → Pages"
-        if ! gh api --method POST "repos/$REPO/pages/builds" >/dev/null 2>&1; then
-          echo "::error::POST /pages/builds failed — the site would serve stale content"
-          exit 1
-        fi
-        [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
-          || { echo "::error::missing pushed gh-pages commit"; exit 1; }
-        for _ in $(seq 1 18); do
-          build="$(gh api "repos/$REPO/pages/builds/latest" 2>/dev/null || echo '{}')"
-          commit="$(jq -r '.commit // empty' <<<"$build")"
-          if [ "$commit" != "$EXPECTED_COMMIT" ]; then
-            # A newer manual build may finish while this build is queued;
-            # it still contains our pushed tree. Match only that build or
-            # a direct descendant of our commit.
-            if [ -n "$commit" ] && gh api "repos/$REPO/compare/$EXPECTED_COMMIT...$commit" --jq .status 2>/dev/null | grep -qx 'ahead'; then
-              echo "latest Pages build $commit contains pushed commit $EXPECTED_COMMIT"
-            else
-              commit=""
-            fi
-          fi
-          st="$(jq -r '.status // "?"' <<<"$build")"
-          if [ -z "$commit" ]; then
-            echo "waiting for build containing pushed commit ${EXPECTED_COMMIT:0:12}"
-          else
-            case "$st" in
-              built)
-                echo "pages build completed for ${EXPECTED_COMMIT:0:12}"; exit 0;;
-              errored)
-                echo "::error::pages build failed for ${EXPECTED_COMMIT:0:12}"; exit 1;;
-              queued|in_progress|building)
-                echo "pages build for ${EXPECTED_COMMIT:0:12}: $st";;
-              *)
-                echo "::error::unexpected pages build status '$st'"; exit 1;;
-            esac
-          fi
-          sleep 10
-        done
-        echo "::error::pushed commit did not reach a successful Pages build within 3 minutes"
-        exit 1
+      uses: actions/deploy-pages@v4

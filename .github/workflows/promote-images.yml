@@ -56,6 +56,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,8 +66,8 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.promote.outputs.tag }}
-          repo: ${{ github.repository }}
+          # Deploys this repo's Pages site; release metadata stays on
+          # the armbian-build repo.
           release_repo: ${{ needs.promote.outputs.target_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
-          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
