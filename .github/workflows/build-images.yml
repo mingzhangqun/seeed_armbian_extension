@@ -1107,8 +1107,9 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.plan.outputs.tag }}
-          # Push the page to the build-source repo's gh-pages.
-          repo: ${{ needs.plan.outputs.release_repo }}
+          # Push the page to this repo's gh-pages; release metadata
+          # stays on the armbian-build repo.
+          repo: ${{ github.repository }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
