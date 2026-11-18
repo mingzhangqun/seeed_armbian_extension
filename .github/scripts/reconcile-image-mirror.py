@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from image_mirror_common import (
@@ -269,6 +270,46 @@ class Releases:
             return
         self.call("release", "delete", tag, "--yes", "--cleanup-tag")
 
+    def gc_stale_drafts(self, slots, releases, age_days=7):
+        # A cancelled or re-run-all'd attempt can leave a draft Release with
+        # no slots.json pointer: the build's retire flow keys on the pointer,
+        # so nothing ever replaces it. Sweep owned, asset-less drafts that
+        # are past the failed-job-rerun window — together with their source
+        # tags (extension, and the kernel repo named by the notes table) —
+        # so orphaned runs cannot accumulate. A rerun after the window
+        # simply recreates its draft via the create-step replace block.
+        referenced = references(slots)
+        now = datetime.now(timezone.utc)
+        for release in releases:
+            tag = release["tagName"]
+            if not release["isDraft"] or tag in referenced:
+                continue
+            state = self.view(tag, ["createdAt", "assets", "body"])
+            if state["assets"]:
+                print(f"keeping draft {tag}: it holds assets")
+                continue
+            body = state["body"] or ""
+            if not re.search(
+                rf"{re.escape(self.workflow_repo)}/actions/runs/\d+\b", body
+            ):
+                print(f"keeping draft {tag}: not owned by this pipeline")
+                continue
+            created = datetime.fromisoformat(
+                state["createdAt"].replace("Z", "+00:00")
+            )
+            if (now - created).days < age_days:
+                print(f"keeping draft {tag}: within the rerun-resume window")
+                continue
+            self.call("release", "delete", tag, "--yes", "--cleanup-tag")
+            for repo in [self.workflow_repo, *re.findall(
+                r"^\| \[?([A-Za-z0-9_.-]+/linux-rockchip)\b", body, re.MULTILINE
+            )]:
+                try:
+                    self.api("DELETE", f"repos/{repo}/git/refs/tags/{tag}")
+                except ReconcileError:
+                    pass  # the ref is already absent (or not ours to touch)
+            print(f"gc: removed stale draft {tag} and its source tags")
+
     def reconcile_history(self, slots, releases):
         referenced = references(slots)
         available = {release["tagName"] for release in releases}
@@ -417,6 +458,7 @@ def reconcile(mirror, releases, depth=0):
         releases.mark_latest(stable)
     mirror.gc(desired)
     releases.reconcile_history(desired, releases.list())
+    releases.gc_stale_drafts(desired, releases.list())
     return {"tag": stable or "", "mode": mode}
 
 
