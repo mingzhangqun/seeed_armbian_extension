@@ -470,9 +470,10 @@ jobs:
         # One tag name per run across the repos that produced it: the
         # extension and (when the kernel repo is owned by this run's
         # owner) the linux-rockchip source get refs here; the armbian-build
-        # ref is created by the release --target in the next step. Tag
-        # names embed the run id, so replacing a ref on a rerun only ever
-        # replaces this run's own partial attempt.
+        # ref is created by the release --target in the next step. The tag
+        # comes from this run's plan output, so a failed-job rerun that
+        # reaches this step again only ever replaces this run's own
+        # partial refs.
         id: sources
         env:
           GH_TOKEN: ${{ github.token }}
@@ -542,7 +543,9 @@ jobs:
           MATRIX: ${{ needs.plan.outputs.matrix }}
         run: |
           set -euo pipefail
-          # Re-run all replaces this run's owned prerelease.
+          # Replace-block for a re-run whose plan regenerated this same tag
+          # (failed-job reruns reuse plan outputs); a re-run all retires the
+          # earlier attempt's candidate through the retire flow instead.
           if ! state="$(gh release view "$TAG" --repo "$TARGET_REPO" \
             --json isDraft,isPrerelease,body --jq '[.isDraft,.isPrerelease,.body]|@json' 2>&1)"; then
             grep -qi 'release not found' <<<"$state" || {
@@ -1138,8 +1141,9 @@ jobs:
       - name: Delete this run's source tags
         # The sources step tags the extension and (when the kernel repo is
         # owned) the kernel fork before the draft Release exists; sweep
-        # them when initialization did not complete. Tag names embed the
-        # run id, so this only ever touches this run's own refs.
+        # them when initialization did not complete. The tag comes from
+        # this run's plan output, so this only ever touches this run's
+        # own refs.
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           LR_REPO: ${{ needs.plan.outputs.lr_repo }}
