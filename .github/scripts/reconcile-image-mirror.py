@@ -12,7 +12,9 @@ from image_mirror_common import (
     ImageMirrorError,
     command,
     decode,
+    kernel_repo_from_notes,
     parse_slots,
+    pipeline_owned,
     references,
 )
 
@@ -262,9 +264,7 @@ class Releases:
         if state["isDraft"] or not state["isPrerelease"] or state["assets"]:
             print(f"keeping {tag}: draft, stable, or has assets")
             return
-        owned = re.search(
-            rf"{re.escape(self.workflow_repo)}/actions/runs/\d+\b", state["body"] or ""
-        )
+        owned = pipeline_owned(state["body"] or "", self.workflow_repo)
         if not owned:
             print(f"keeping {tag}: not owned by this pipeline")
             return
@@ -289,9 +289,7 @@ class Releases:
                 print(f"keeping draft {tag}: it holds assets")
                 continue
             body = state["body"] or ""
-            if not re.search(
-                rf"{re.escape(self.workflow_repo)}/actions/runs/\d+\b", body
-            ):
+            if not pipeline_owned(body, self.workflow_repo):
                 print(f"keeping draft {tag}: not owned by this pipeline")
                 continue
             created = datetime.fromisoformat(
@@ -306,9 +304,10 @@ class Releases:
             # before the source-tag sweep. The release repo is swept with the
             # same tolerate-missing loop below instead.
             self.call("release", "delete", tag, "--yes")
-            for repo in [self.workflow_repo, self.repo, *re.findall(
-                r"^\| \[?([A-Za-z0-9_.-]+/linux-rockchip)\b", body, re.MULTILINE
-            )]:
+            kernel_repo = kernel_repo_from_notes(body)
+            for repo in [self.workflow_repo, self.repo] + (
+                [kernel_repo] if kernel_repo else []
+            ):
                 try:
                     self.api("DELETE", f"repos/{repo}/git/refs/tags/{tag}")
                 except ReconcileError:
