@@ -609,7 +609,7 @@ recovery_status() {
     err="$(state_get ERROR_MSG)"
 
     echo "=== Armbian OTA Status (Recovery) ==="
-    echo "Mode: recovery (plain v0.8)"
+    echo "Mode: recovery (backend v0.8)"
     echo "Status: ${status}"
     echo "Installed payload: ${installed:-none}"
     echo "Last-good backup: ${backup:-none}"
