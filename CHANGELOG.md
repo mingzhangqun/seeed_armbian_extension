@@ -209,6 +209,10 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### OTA payload security
 
+- **Release gate active on trunk images.** `ota_check_board_release` now
+  falls back to the `/etc/os-release` `VERSION_CODENAME` when
+  `/etc/armbian-release` carries no `RELEASE=` (upstream never stamps it),
+  so cross-release OTA is refused on every image, not only stamped ones.
 - **Encrypted and signed OTA payloads.** On encrypted-rootfs images the OTA
   packaging encrypts `rootfs.tar.gz` (AES-256-CBC, key derived from the
   LUKS passphrase via HKDF-SHA256) and signs `payload.manifest` (IV, plaintext
