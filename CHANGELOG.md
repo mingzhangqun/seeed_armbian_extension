@@ -169,6 +169,14 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### OTA payload security
 
+- **zstd capability is probed, not declared.** `OTA_RUNTIME_FORMATS` lists
+  `zst` only when the zstd CLI exists, so a zst package fed to an image
+  without zstd is refused at negotiation instead of misreporting
+  `missing package.env` (runtime version bumped 1.3 → 1.4);
+  `load_package_env_metadata` now propagates tar's stderr so listing or
+  extraction failures surface their real cause. A/B images now install
+  zstd (recovery parity) so `--ota-format zstd` packages decode on every
+  A/B device instead of depending on incidental desktop-stack deps.
 - **Encrypted and signed OTA payloads.** On encrypted-rootfs images the OTA
   packaging encrypts `rootfs.tar.gz` (AES-256-CBC, key derived from the
   LUKS passphrase via HKDF-SHA256) and signs `payload.manifest` (IV, plaintext
