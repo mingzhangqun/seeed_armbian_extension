@@ -99,15 +99,38 @@ fw_env_get() {
 
 # True when the persistent env blob fails its CRC check. fw_printenv still
 # prints the (default) variables in that state, so the warning on stderr is
-# the only reliable signal.
+# the only reliable signal. Message wording differs across libubootenv
+# generations: classic u-boot-tools says "Bad CRC", trixie libubootenv says
+# "Cannot read environment" -- match both.
 fw_env_crc_bad() {
     err_file="${TMPDIR:-/tmp}/fwenv.crc.$$"
 
     fw_printenv > /dev/null 2> "${err_file}" || true
-    grep -qi "bad crc" "${err_file}"
+    grep -qiE "bad crc|cannot read environment|failed to read environment" "${err_file}"
     rc=$?
     rm -f "${err_file}" 2>/dev/null || true
     [ "${rc}" -eq 0 ]
+}
+
+# Sanitize a bad-CRC env blob: zero it and stamp the CRC32 of the zeroed
+# data (a valid EMPTY env). trixie libubootenv refuses to write a bad-CRC
+# env outright, so fw_setenv needs this before any rebuild write.
+fw_env_repair_blob() {
+    set -- $(awk 'NR==1 && !/^#/ {print $1, $2, $3; exit}' "${OTA_FW_ENV_CONFIG}" 2>/dev/null)
+    [ -b "$1" ] || return 1
+    fw_env_repair_disk="$1"
+    fw_env_repair_off="${2:-${OTA_FW_ENV_OFFSET}}"
+    fw_env_repair_sz="${3:-${OTA_FW_ENV_SIZE}}"
+
+    dd if=/dev/zero of="${fw_env_repair_disk}" \
+        bs=1 seek=$((fw_env_repair_off)) count=$((fw_env_repair_sz)) \
+        conv=notrunc 2>/dev/null || return 1
+    # crc32(0x7ffc zero bytes) = 0xb52d2b04, little-endian, for the default
+    # 0x8000 blob; other sizes still yield a readable empty env via the
+    # classic bad-CRC fallback, so the constant only needs the common case.
+    printf '\004\053\055\265' | dd of="${fw_env_repair_disk}" \
+        bs=1 seek=$((fw_env_repair_off)) conv=notrunc 2>/dev/null || return 1
+    return 0
 }
 
 # Set one variable and verify by readback.
@@ -129,8 +152,14 @@ fw_env_set_multi() {
     done
 
     fw_setenv -s "${script_file}" || {
-        rm -f "${script_file}" 2>/dev/null || true
-        return 1
+        # trixie libubootenv refuses to write a bad-CRC env; sanitize the
+        # blob to a valid empty env and retry once (the routing-set rebuild
+        # callers write the full env, so empty-then-rewrite is correct).
+        fw_env_repair_blob 2>/dev/null || true
+        fw_setenv -s "${script_file}" || {
+            rm -f "${script_file}" 2>/dev/null || true
+            return 1
+        }
     }
     rm -f "${script_file}" 2>/dev/null || true
 
