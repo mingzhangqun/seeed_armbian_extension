@@ -190,11 +190,14 @@ runs:
             print(f"blob {path}: {sha}")
             return sha
 
-        # Two files: the static shell + the data bundle it fetches.
-        entries = [{"path": "images/index.html", "mode": "100644", "type": "blob",
-                    "sha": put_blob("images.html", "images/index.html")},
-                   {"path": "images/data.json", "mode": "100644", "type": "blob",
-                    "sha": put_blob("data.json", "images/data.json")}]
+        # Two files at the site root: the static shell + the data bundle
+        # it fetches. The tree carries no base_tree, so the push replaces
+        # the whole gh-pages tree — stale subtrees (e.g. the old images/
+        # layout from the shared-site era) drop out automatically.
+        entries = [{"path": "index.html", "mode": "100644", "type": "blob",
+                    "sha": put_blob("images.html", "index.html")},
+                   {"path": "data.json", "mode": "100644", "type": "blob",
+                    "sha": put_blob("data.json", "data.json")}]
 
         tree = gh("--method", "POST", f"repos/{repo}/git/trees", "--input", "-",
                   "--jq", ".sha",
