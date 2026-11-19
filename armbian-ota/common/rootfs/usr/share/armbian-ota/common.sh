@@ -170,7 +170,8 @@ ota_assert_payload_matches_system() {
 # package metadata cache (load_package_env_metadata). The package side must
 # carry both fields (package-create.sh always stamps them -- absence means a
 # broken or hand-mangled package); the device side is read from
-# /etc/armbian-release and only enforced when readable. RELEASE honors
+# /etc/armbian-release (upstream never stamps RELEASE there) with the
+# os-release codename as the working fallback. RELEASE honors
 # OTA_CLI_ALLOW_RELEASE_CHANGE (CLI --allow-release-change) as the explicit
 # distro-migration escape hatch; BOARD never gets one.
 ota_check_board_release() {
@@ -183,6 +184,13 @@ ota_check_board_release() {
 
     sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
     sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+    # os-release VERSION_CODENAME is present on every image (base-files) and
+    # tracks the actual suite, so the gate is active even on trunk images.
+    [ -n "${sys_release}" ] ||
+        sys_release="$(
+            . /etc/os-release 2>/dev/null
+            echo "${VERSION_CODENAME:-}"
+        )"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
