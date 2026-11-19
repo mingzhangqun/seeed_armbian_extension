@@ -1,12 +1,12 @@
 name: "Deploy images page"
-description: "Bundle the mirror manifest into data.json, stage the static page, and deploy"
+description: "Bundle the mirror manifest into data.json, stage the static page, and deploy to the release repo's gh-pages"
 
 inputs:
   tag:
     description: "Release tag (used in commit message)"
     required: true
   repo:
-    description: "Target repo for the page (owner/repo)"
+    description: "Target repo for the page (owner/armbian-build)"
     required: true
   release_repo:
     description: "Repo where the release lives (owner/repo)"
@@ -24,12 +24,17 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # The page ALWAYS lives on the build-source repo (owner/armbian-build
-    # — the callers pass release_repo as the push target), pushed via the
-    # gh-pages API with PAGES_TARGET_TOKEN. A same-repo actions-mode
-    # deployment path used to exist but was unreachable by construction
-    # (release_repo is an armbian-build repo, never this extension repo)
-    # and was removed 2026-11-07.
+    # One Pages site, one writer: the images page lives on the release
+    # repo's (owner/armbian-build) gh-pages branch, pushed via the git
+    # data API with PAGES_TARGET_TOKEN; the apt repository stays on the
+    # extension repo's own site. The 2026-11-18 artifact pipeline deployed
+    # both subtrees to ONE site and made each deployment carry the other's
+    # tree — a lost-update race (an images deploy reverted a fresh apt
+    # publish until the next apt deploy) plus a full re-upload of the apt
+    # pool on every page deploy. Split back to one writer per site
+    # 2026-11-19. The official artifact pipeline cannot deploy cross-repo,
+    # so the page pays for the split with a non-atomic push: the
+    # trigger-and-verify step below is the watchdog for that window.
     - name: Resolve deploy gate
       id: gate
       shell: bash
