@@ -509,7 +509,7 @@ jobs:
           pages_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/images/"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           if [[ -n "$lr_tag" ]]; then
-            lr_tag_cell="[${lr_tag}](https://github.com/${lr_repo_part}/tree/${lr_tag})"
+            lr_tag_cell="[${lr_tag}](https://github.com/${lr_repo_part}/releases/tag/${lr_tag})"
           else
             lr_tag_cell="- (not owned, no tag)"
           fi
@@ -522,8 +522,8 @@ jobs:
 
           | repo | branch | revision | tag |
           |---|---|---|---|
-          | [${GITHUB_REPOSITORY}](https://github.com/${GITHUB_REPOSITORY}) | [${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}) | [${GITHUB_SHA:0:12}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) | [${TAG}](https://github.com/${GITHUB_REPOSITORY}/tree/${TAG}) |
-          | [${AB_REPO%:*}](https://github.com/${AB_REPO%:*}) | [${AB_REPO##*:}](https://github.com/${AB_REPO%:*}/tree/${AB_REPO##*:}) | [${AB_COMMIT:0:12}](https://github.com/${AB_REPO%:*}/commit/${AB_COMMIT}) | [${TAG}](https://github.com/${AB_REPO%:*}/tree/${TAG}) |
+          | [${GITHUB_REPOSITORY}](https://github.com/${GITHUB_REPOSITORY}) | [${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}) | [${GITHUB_SHA:0:12}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) | [${TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) |
+          | [${AB_REPO%:*}](https://github.com/${AB_REPO%:*}) | [${AB_REPO##*:}](https://github.com/${AB_REPO%:*}/tree/${AB_REPO##*:}) | [${AB_COMMIT:0:12}](https://github.com/${AB_REPO%:*}/commit/${AB_COMMIT}) | [${TAG}](https://github.com/${AB_REPO%:*}/releases/tag/${TAG}) |
           | [${lr_repo_part}](https://github.com/${lr_repo_part}) | [${lr_branch}](https://github.com/${lr_repo_part}/tree/${lr_branch}) | [${LR_COMMIT:0:12}](https://github.com/${lr_repo_part}/commit/${LR_COMMIT}) | ${lr_tag_cell} |
 
           ${kernel_line}
