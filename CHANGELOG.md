@@ -98,6 +98,13 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Env CRC self-heal works on trixie libubootenv.** `fw_env_crc_bad` now
+  matches the trixie wording ("Cannot read environment") alongside the
+  classic "Bad CRC", and `fw_env_set_multi` sanitizes a bad-CRC blob (zero
+  + valid empty-env CRC) and retries once — trixie `fw_setenv` refuses to
+  write a bad-CRC env outright, which broke every rebuild path. Verified
+  on-device: corrupt -> detect -> repair+rewrite -> routing readback ->
+  CRC good.
 - **Encrypted userdata resizes in one boot.** `armbian-resize-userdata`
   grows the LUKS mapping with `cryptsetup resize` (online, via the kernel
   key) instead of reloading the `dmsetup` table, which always failed on
