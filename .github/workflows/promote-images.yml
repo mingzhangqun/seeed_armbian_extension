@@ -39,7 +39,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           GH_REPO: ${{ github.repository_owner }}/armbian-build
-          RCLONE_CONFIG: ${{ runner.home }}/.config/rclone/rclone.conf
           # Empty input (API-triggered runs without inputs) falls back to 0.
           HISTORY_DEPTH: ${{ inputs.history_depth || '0' }}
         run: |
