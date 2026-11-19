@@ -890,8 +890,12 @@ jobs:
           dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/$BOARD/$sec_dir/$PROFILE"
           echo "Uploading to $dest"
           rclone mkdir "$dest" 2>/dev/null || true
+          # Leading "/" anchors each pattern to the transfer root so we only
+          # pick top-level image files — an unanchored "*.img.xz" also matches
+          # <BOARD>/loaders/<sec>/rkspi_loader.img.xz and re-creates the whole
+          # board tree under ab/ and recovery/ (nested <board>/loaders dir).
           rclone copy output/images/ "$dest" \
-            --include "*.img.xz" --include "*.img.xz.sha256" --include "*.img.sha" --include "*.img.txt" \
+            --include "/*.img.xz" --include "/*.img.xz.sha256" --include "/*.img.sha" --include "/*.img.txt" \
             --transfers 4 --stats-one-line --stats 30s
           if [ ${#ota_files[@]} -gt 0 ]; then
             rclone mkdir "$dest/ota" 2>/dev/null || true
