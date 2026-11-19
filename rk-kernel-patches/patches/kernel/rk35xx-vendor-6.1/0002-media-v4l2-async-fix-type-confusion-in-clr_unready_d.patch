@@ -1,0 +1,73 @@
+From 11d79c1a42657be5c2ccd35dc5df229649bb672f Mon Sep 17 00:00:00 2001
+From: mingzq <north_sea@qq.com>
+Date: Mon, 16 Nov 2026 10:11:03 +0000
+Subject: [PATCH] media: v4l2-async: fix type confusion in clr_unready_dev
+
+The vendor-only __v4l2_async_notifier_clr_unready_dev() walked
+notifier->waiting, which holds struct v4l2_async_subdev entries, as
+if they were struct v4l2_subdev, then called list_del_init() and
+wrote NULL at v4l2_subdev member offsets - all out of bounds for the
+smaller asd allocation, corrupting adjacent heap memory.
+
+rkcif invokes this right after its notifier completes, which mangled
+and dropped the lens-focus asd the sensor driver had queued. Any VCM
+driver registering later (e.g. udev-time module load) could then never
+match, and unbinding the sensor crashed with a use-after-free while
+cleaning up the corrupted asd list.
+
+Walk the waiting list with the correct type, unlink both the waiting
+and asd_list nodes and free the asd. Release the fwnode reference a
+waiting FWNODE-matched descriptor holds, mirroring the normal cleanup
+path, so the forced drop does not leak it.
+
+Verified on reComputer RK3576 DevKit together with the dw9800w chip
+id check fix (separate commit): the VCM binds into the media graph
+and V4L2_CID_FOCUS_ABSOLUTE moves the lens over its full range.
+---
+ drivers/media/v4l2-core/v4l2-async.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/media/v4l2-core/v4l2-async.c b/drivers/media/v4l2-core/v4l2-async.c
+index f527c655293c..5ebb842a2bc5 100644
+--- a/drivers/media/v4l2-core/v4l2-async.c
++++ b/drivers/media/v4l2-core/v4l2-async.c
+@@ -593,10 +593,11 @@ EXPORT_SYMBOL(v4l2_async_nf_register);
+ static int __v4l2_async_notifier_clr_unready_dev(
+ 	struct v4l2_async_notifier *notifier)
+ {
+-	struct v4l2_subdev *sd, *tmp;
++	struct v4l2_subdev *sd, *sd_tmp;
++	struct v4l2_async_subdev *asd, *asd_tmp;
+ 	int clr_num = 0;
+ 
+-	list_for_each_entry_safe(sd, tmp, &notifier->done, async_list) {
++	list_for_each_entry_safe(sd, sd_tmp, &notifier->done, async_list) {
+ 		struct v4l2_async_notifier *subdev_notifier =
+ 			v4l2_async_find_subdev_notifier(sd);
+ 
+@@ -605,10 +606,18 @@ static int __v4l2_async_notifier_clr_unready_dev(
+ 					subdev_notifier);
+ 	}
+ 
+-	list_for_each_entry_safe(sd, tmp, &notifier->waiting, async_list) {
+-		list_del_init(&sd->async_list);
+-		sd->asd = NULL;
+-		sd->dev = NULL;
++	/* notifier->waiting holds asds, not subdevs: drop them properly */
++	list_for_each_entry_safe(asd, asd_tmp, &notifier->waiting, list) {
++		switch (asd->match_type) {
++		case V4L2_ASYNC_MATCH_FWNODE:
++			fwnode_handle_put(asd->match.fwnode);
++			break;
++		default:
++			break;
++		}
++		list_del_init(&asd->list);
++		list_del(&asd->asd_list);
++		kfree(asd);
+ 		clr_num++;
+ 	}
+ 
+-- 
+2.55.0
+

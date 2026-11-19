@@ -23,6 +23,41 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Added
 
+#### Vendor kernel patches
+
+- **Seeed kernel fixes staged into the kernel patch set.** A new
+  `rk-kernel-patches` sub-extension carries fixes from Seeed's
+  linux-rockchip branches that the Armbian vendor kernel mirror
+  (armbian/linux-rockchip `rk-6.1-rkr7.2`) does not track yet, as git
+  format-patch files under
+  `rk-kernel-patches/patches/kernel/<KERNELPATCHDIR>/`. First entry:
+  `media: rockchip: camera fixes for recomputer devkits (imx219 power +
+  VCM)` — one squashed patch carrying the whole Seeed
+  `fix/imx708_imx219` branch (`fe9944f8..67bb8b01`): imx219 VANA power
+  control on RK3576 CSI0/CSI1 (`vana-supply` toggled with XVCLK in
+  `s_power()`, control defaults cached while the sensor is unpowered,
+  `cam0_pwr`/`cam1_pwr` turned into controlled regulators with POR
+  delays so both CSI sensors probe reliably); the VCM supply fixed and
+  camera power logic unified on the recomputer devkits so imx708/imx219
+  probing no longer races the dw9800w-vcc power state; dw9800w
+  accepting any readable chip id (production modules carry variants);
+  VCM current tuning; and imx219 hardening of the unpowered control and
+  stream-stop paths (no I2C while VANA off). Verified to apply cleanly
+  on `fe9944f8` and to reproduce the branch tree exactly
+  (5 files, +112/-43). A
+  `post_family_config__seeed_stage_kernel_patches` hook stages the files
+  into `${USERPATCHES_PATH}/kernel/rk35xx-vendor-6.1/` pre-hash, so the
+  staged patch joins the kernel artifact's patch-dir hash — a cached
+  kernel build can never silently skip the fix — while the directory
+  match keeps vendor-next (6.12) and edge builds from ever seeing a 6.1
+  patch that would fail to apply. Same staging approach as the
+  rescue-default-env U-Boot patch.
+- **v4l2-async `clr_unready_dev` type-confusion fix staged.** Second
+  entry: `media: v4l2-async: fix type confusion in clr_unready_dev`
+  (Seeed `fix/v4l2-async-clr-unready`, `11d79c1a`), applied after the
+  camera patch. Verified to apply cleanly on top of 0001 and to match
+  the branch tree for `v4l2-async.c` byte for byte.
+
 #### Production loaders (maskrom / SPI flash)
 
 - **Board u-boot production artifacts exported to the OneDrive
