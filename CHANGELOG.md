@@ -173,6 +173,12 @@ Covers the work against the initial import (merge base `9980aee`,
   falls back to the `/etc/os-release` `VERSION_CODENAME` when
   `/etc/armbian-release` carries no `RELEASE=` (upstream never stamps it),
   so cross-release OTA is refused on every image, not only stamped ones.
+- **zstd capability is probed, not declared.** `OTA_RUNTIME_FORMATS` lists
+  `zst` only when the zstd CLI exists, so a zst package fed to an image
+  without zstd is refused at negotiation instead of misreporting
+  `missing package.env` (runtime version bumped 1.3 → 1.4);
+  `load_package_env_metadata` now propagates tar's stderr so listing or
+  extraction failures surface their real cause.
 - **Encrypted and signed OTA payloads.** On encrypted-rootfs images the OTA
   packaging encrypts `rootfs.tar.gz` (AES-256-CBC, key derived from the
   LUKS passphrase via HKDF-SHA256) and signs `payload.manifest` (IV, plaintext
