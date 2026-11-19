@@ -169,8 +169,9 @@ ota_assert_payload_matches_system() {
 # FIT, and a cross-release flash silently switches the distro. Requires the
 # package metadata cache (load_package_env_metadata). The package side must
 # carry both fields (package-create.sh always stamps them -- absence means a
-# broken or hand-mangled package); the device side is read from
-# /etc/armbian-release and only enforced when readable. RELEASE honors
+# broken or hand-mangled package); the device side is the build-stamped
+# RELEASE from /etc/armbian-image-release (exact truth). Unstamped images
+# skip the release check. RELEASE honors
 # OTA_CLI_ALLOW_RELEASE_CHANGE (CLI --allow-release-change) as the explicit
 # distro-migration escape hatch; BOARD never gets one.
 ota_check_board_release() {
@@ -182,7 +183,9 @@ ota_check_board_release() {
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
     sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
-    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+    # Build-stamped truth: the image identity file carries RELEASE= next to
+    # IMAGE_VARIANT (rootfs-install hook, image finalize).
+    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -201,7 +204,10 @@ ota_check_image_variant() {
     local package_variant system_variant
 
     package_variant="$(package_env_get_value "IMAGE_VARIANT" || true)"
-    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
+    # Legacy devices pre-date the armbian-image-release stamp.
+    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    [ -n "${system_variant}" ] ||
+        system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
     if [ -z "${package_variant}" ] || [ -z "${system_variant}" ]; then
         log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping legacy variant gate"
         return 0
