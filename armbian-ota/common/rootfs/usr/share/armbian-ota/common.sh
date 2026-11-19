@@ -355,8 +355,11 @@ ota_check_payload_capacity() {
 # armbian-ota deb version; bump it whenever OTA_RUNTIME_FORMATS or the apply
 # hook contract changes. Packages declare PAYLOAD_FORMAT / MIN_RUNTIME_VERSION
 # in package.env and phase 1 negotiates against these (docs/10-ota-package-formats.md).
-OTA_RUNTIME_VERSION="1.3"
-OTA_RUNTIME_FORMATS="gz xz zst"
+OTA_RUNTIME_VERSION="1.4"
+# zst is declared only when the zstd CLI exists (tar --zstd depends on it);
+# images without zstd then refuse zst packages at negotiation.
+OTA_RUNTIME_FORMATS="gz xz"
+command -v zstd >/dev/null 2>&1 && OTA_RUNTIME_FORMATS="${OTA_RUNTIME_FORMATS} zst"
 OTA_HOOK_API="1"
 OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
 # Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.
@@ -594,23 +597,35 @@ ota_require_runtime() {
 
 load_package_env_metadata() {
     local package_path="$1"
-    local manifest_entry
+    local manifest_entry err_file listing
 
     if [ "${OTA_PACKAGE_ENV_PATH:-}" = "${package_path}" ] && [ -n "${OTA_PACKAGE_ENV_CONTENT+x}" ]; then
         return 0
     fi
 
     log_info "Reading OTA package metadata from ${package_path}" >&2
-    manifest_entry="$(
-        tar -tf "${package_path}" 2>/dev/null \
-            | awk '/(^|\/)package\.env$/ { print; exit }'
-    )"
+    # Propagate tar's stderr so a failed listing/extraction reports its real
+    # cause (unreadable file, unsupported compression), not "missing package.env".
+    err_file="$(mktemp 2>/dev/null)" || err_file="/tmp/ota-package-env.err.$$"
+
+    listing="$(tar -tf "${package_path}" 2>"${err_file}")" || {
+        log_warn "Cannot list OTA package ${package_path}: $(head -n1 "${err_file}")"
+        rm -f "${err_file}"
+        return 1
+    }
+    manifest_entry="$(printf '%s\n' "${listing}" | awk '/(^|\/)package\.env$/ { print; exit }')"
     if [ -z "${manifest_entry}" ]; then
+        rm -f "${err_file}"
         return 1
     fi
 
     OTA_PACKAGE_ENV_PATH="${package_path}"
-    OTA_PACKAGE_ENV_CONTENT="$(tar -xOf "${package_path}" "${manifest_entry}" 2>/dev/null)" || return 1
+    OTA_PACKAGE_ENV_CONTENT="$(tar -xOf "${package_path}" "${manifest_entry}" 2>"${err_file}")" || {
+        log_warn "Cannot read ${manifest_entry} from ${package_path}: $(head -n1 "${err_file}")"
+        rm -f "${err_file}"
+        return 1
+    }
+    rm -f "${err_file}"
 }
 
 package_env_get_value() {
