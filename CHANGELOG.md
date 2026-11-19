@@ -156,6 +156,11 @@ Covers the work against the initial import (merge base `9980aee`,
     `CMD_BOOTI` on ARM64 so it cannot be Kconfig-disabled); the same patch
     compiles the default-env rescue dispatcher down to the signed
     recovery-FIT branch. Plain builds are unchanged.
+  - `bootm`/`boot_fit` refuse FIT launches on plain (non-`FIT_SIGNATURE`)
+    builds (mirror of the `booti` guard): a raw-FIT image's env blob can
+    no longer steer a plain loader into running the secure kernel — the
+    mismatch stops at the loader. `BOOT_RAW_MODE` builds need a
+    verifying U-Boot.
   - `decryption-disk.sh` hard-fails the raw (pre-SSKR-migration)
     passphrase path when OP-TEE is unavailable (plain U-Boot ships no
     BL32), closing the loader-swap window while the passphrase is still

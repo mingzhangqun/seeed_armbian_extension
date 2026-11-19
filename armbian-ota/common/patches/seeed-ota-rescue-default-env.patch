@@ -37,8 +37,12 @@ even when a foreign image's unsigned env blob steers the boot path, so
   cannot be disabled that way because DISTRO_DEFAULTS selects it on
   ARM64).
 
-Plain builds compile both #else branches unchanged -- byte-identical
-behavior, the patch content is the only artifact-hash delta.
+Plain-build lockdown (the mirror image): plain boards boot from ext4
+assets only, but a raw-FIT image's unsigned env blob can steer a plain
+loader into ota_normal_boot_fit. cmd/bootm.c and cmd/bootfit.c (vendor
+boot_fit, also via "bootm <fit_addr>") refuse FIT launches on
+non-FIT_SIGNATURE builds, so a loader/OS mismatch stops at the loader
+instead of running the secure kernel behind the initramfs TEE gate.
 
 The persistent (prefilled) env carries the full transactional bootcmd;
 this default is its CRC-failure fallback (Seeed recovery OTA v0.8,
@@ -173,3 +177,34 @@ design section 3.4).
  	/* Consume 'booti' */
  	argc--; argv++;
  
+--- a/cmd/bootm.c
++++ b/cmd/bootm.c
+@@ -92,4 +92,11 @@
+ int do_bootm(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
+ {
++#ifndef CONFIG_FIT_SIGNATURE
++	/* Seeed plain-build lockdown: plain boards boot from ext4 assets
++	 * only; mirror of the booti guard on verified builds. */
++	printf("bootm: FIT boot is disabled on plain builds\n");
++	return CMD_RET_FAILURE;
++#endif
++
+ #ifdef CONFIG_NEEDS_MANUAL_RELOC
+ 	static int relocated = 0;
+
+--- a/cmd/bootfit.c
++++ b/cmd/bootfit.c
+@@ -59,6 +59,13 @@
+ static int do_boot_fit(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
+ {
++#ifndef CONFIG_FIT_SIGNATURE
++	/* Seeed plain-build lockdown: raw-FIT layout entry (also via
++	 * "bootm <fit_addr>"), never needed on plain boards. */
++	printf("boot_fit: raw FIT boot is disabled on plain builds\n");
++	return CMD_RET_FAILURE;
++#endif
++
+ 	char *bootm_args[1];
+ 	char fit_addr[12];
+ 	ulong size;
+ 	void *fit;
