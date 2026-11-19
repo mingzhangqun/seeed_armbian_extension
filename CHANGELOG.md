@@ -98,6 +98,9 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Status wording.** `armbian-ota status` no longer prints
+  `Mode: recovery (plain v0.8)` on encrypted devices — the backend flavor
+  was never the image flavor; it reads `backend v0.8` now.
 - **Secure-boot rescue: dedicated `recovery` raw FIT partition.** Secure
   boot Recovery images now split the boot area in two: the existing raw FIT
   `boot` partition plus a new `PARTLABEL=recovery` partition (same size as
