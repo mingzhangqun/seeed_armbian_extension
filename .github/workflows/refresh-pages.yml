@@ -17,9 +17,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      pages: write
-      id-token: write
-      actions: write
     steps:
       - name: Probe secrets
         id: probe
@@ -56,6 +53,11 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: refresh
+          # The page lives on the release repo's gh-pages branch (one
+          # site, one writer); the apt repository keeps the extension
+          # repo's own Pages site.
+          repo: ${{ steps.mirror.outputs.release_repo }}
           release_repo: ${{ steps.mirror.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}

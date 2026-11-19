@@ -331,9 +331,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      pages: write
-      id-token: write
-      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -396,8 +393,13 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: retire-${{ needs.plan.outputs.tag }}
+          # The page lives on the release repo's gh-pages branch (one
+          # site, one writer); the apt repository keeps the extension
+          # repo's own Pages site.
+          repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
 
       - name: Reset this run's staging tree
@@ -1100,16 +1102,14 @@ jobs:
 
   # Render the page from the current mirror manifests.
   pages:
-    name: Deploy images page (template sync)
+    name: Deploy images page (release repo's gh-pages)
     needs: [plan, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    # GITHUB_TOKEN deploys this repo's Pages; it also reads Releases.
+    # GITHUB_TOKEN reads Releases; the page push itself rides
+    # PAGES_TARGET_TOKEN to the release repo's gh-pages.
     permissions:
       contents: read
-      pages: write
-      id-token: write
-      actions: write
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1119,10 +1119,13 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.plan.outputs.tag }}
-          # Deploys this repo's Pages site; release metadata stays on
-          # the armbian-build repo.
+          # The page lives on the release repo's gh-pages branch (one
+          # site, one writer); the apt repository keeps the extension
+          # repo's own Pages site.
+          repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
+          pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
           gh_token: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
 
   cleanup:
