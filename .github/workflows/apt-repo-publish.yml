@@ -588,8 +588,13 @@ jobs:
           path: public
 
   # ──────────────────────────────────────────────────
-  # Deploy APT to this repository's project Pages. Images publishing is a
-  # separate pipeline in armbian-build and must not share this destination.
+  # Deploy APT to this repository's project Pages. This site has exactly
+  # one writer: the images page lives on the release repo's (owner/
+  # armbian-build) gh-pages branch instead, so an apt deployment replaces
+  # only the apt tree and carries nothing else. (The 2026-11-18 shared-
+  # site design made each side carry the other's subtree — a lost-update
+  # race plus a full apt re-upload on every images deploy; split back
+  # 2026-11-19.)
   # ──────────────────────────────────────────────────
   deploy-pages:
     needs: publish

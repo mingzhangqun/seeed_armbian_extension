@@ -393,7 +393,10 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: retire-${{ needs.plan.outputs.tag }}
-          repo: ${{ github.repository }}
+          # The page lives on the release repo's gh-pages branch (one
+          # site, one writer); the apt repository keeps the extension
+          # repo's own Pages site.
+          repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
           pages_token: ${{ secrets.PAGES_TARGET_TOKEN }}
@@ -485,6 +488,7 @@ jobs:
           LR_COMMIT: ${{ needs.plan.outputs.lr_commit }}
           OVERRIDE: ${{ needs.plan.outputs.lr_override }}
           KVER: ${{ needs.plan.outputs.kver }}
+          RELEASE_REPO: ${{ needs.plan.outputs.release_repo }}
         run: |
           set -euo pipefail
           lr_repo_part="${LR_REPO%:*}"
@@ -506,7 +510,10 @@ jobs:
           gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
           echo "Tagged ${GITHUB_REPOSITORY}@${GITHUB_SHA} as ${TAG}"
 
-          pages_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/images/"
+          # The download page is the release repo's own Pages site root
+          # (one site, one writer; the page push lands on its gh-pages).
+          page_repo="${RELEASE_REPO,,}"
+          pages_url="https://${page_repo%/*}.github.io/${page_repo#*/}/"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           if [[ -n "$lr_tag" ]]; then
             lr_tag_cell="[${lr_tag}](https://github.com/${lr_repo_part}/releases/tag/${lr_tag})"
@@ -1099,11 +1106,12 @@ jobs:
 
   # Render the page from the current mirror manifests.
   pages:
-    name: Deploy images page (template sync)
+    name: Deploy images page (release repo's gh-pages)
     needs: [plan, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    # PAGES_TARGET_TOKEN pushes gh-pages; GITHUB_TOKEN reads Releases.
+    # GITHUB_TOKEN reads Releases; the page push itself rides
+    # PAGES_TARGET_TOKEN to the release repo's gh-pages.
     permissions:
       contents: read
     timeout-minutes: 10
@@ -1115,7 +1123,9 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.plan.outputs.tag }}
-          # Push the page to the build-source repo's gh-pages.
+          # The page lives on the release repo's gh-pages branch (one
+          # site, one writer); the apt repository keeps the extension
+          # repo's own Pages site.
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
