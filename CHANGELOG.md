@@ -98,6 +98,13 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Encrypted userdata resizes in one boot.** `armbian-resize-userdata`
+  grows the LUKS mapping with `cryptsetup resize` (online, via the kernel
+  key) instead of reloading the `dmsetup` table, which always failed on
+  LUKS2 with "Required key not available" (masked key). The two-stage
+  partition-then-reboot flow is gone: freshly flashed encrypted devices
+  have full userdata on the first boot, so first-boot A/B OTA staging no
+  longer needs a second boot.
 - **Status wording.** `armbian-ota status` no longer prints
   `Mode: recovery (plain v0.8)` on encrypted devices — the backend flavor
   was never the image flavor; it reads `backend v0.8` now.
