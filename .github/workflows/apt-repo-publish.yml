@@ -101,23 +101,10 @@ jobs:
             esac
           }
           matrix=''
-          seen_families=''
           for b in "${boards[@]}"; do
             fam="$(family_of "$b")"
             matrix+="{\"target\":\"uboot\",\"board\":\"${b}\",\"family\":\"${fam}\"},"
-            if [[ "${seen_families}" != *"|${fam}|"* ]]; then
-              seen_families="${seen_families}|${fam}|"
-              if [[ "${INPUT_BUILD_KERNEL}" == 'true' ]]; then
-                kernel_board="$(sed -n "s/:${fam}\$//p" <<<"${kernel_hosts}" | head -n1)"
-                [[ -n "${kernel_board}" ]] || {
-                  echo "::error::No available kernel host board for ${fam} at ${RESOLVED}."
-                  exit 1
-                }
-                matrix+="{\"target\":\"kernel\",\"board\":\"${kernel_board}\",\"family\":\"${fam}\"},"
-              fi
-            fi
           done
-          matrix="[${matrix%,}]"
           # Ref validation: chars in [A-Za-z0-9._-/] (branch/tag names)
           if [[ ! "${INPUT_REF}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
             echo "::error::Invalid armbian_build_ref: '${INPUT_REF}'"
@@ -136,9 +123,9 @@ jobs:
           # family kernel. Do not bind it to a missing first board and report
           # success with no kernel artifact. Industrial boards require their
           # dedicated ref; main cannot silently satisfy that request.
+          seen_families=''
           if [[ "${INPUT_BUILD_KERNEL}" == 'true' ]]; then
             kernel_boards=()
-            seen_families=''
             for b in "${boards[@]}"; do
               fam="$(family_of "$b")"
               [[ "${seen_families}" == *"|${fam}|"* ]] && continue
@@ -154,10 +141,13 @@ jobs:
               echo "::error::build_kernel requested, but no selected board can host a kernel at ${RESOLVED}."
               exit 1
             fi
-            kernel_hosts="$(printf '%s\n' "${kernel_boards[@]}")"
-          else
-            kernel_hosts=''
+            # One kernel matrix entry per family, hosted on its first
+            # selected board that exists at the resolved ref.
+            for entry in "${kernel_boards[@]}"; do
+              matrix+="{\"target\":\"kernel\",\"board\":\"${entry%:*}\",\"family\":\"${entry##*:}\"},"
+            done
           fi
+          matrix="[${matrix%,}]"
           {
             echo "matrix<<EOF"
             echo "${matrix}"
@@ -598,8 +588,13 @@ jobs:
           path: public
 
   # ──────────────────────────────────────────────────
-  # Deploy APT to this repository's project Pages. Images publishing is a
-  # separate pipeline in armbian-build and must not share this destination.
+  # Deploy APT to this repository's project Pages. This site has exactly
+  # one writer: the images page lives on the release repo's (owner/
+  # armbian-build) gh-pages branch instead, so an apt deployment replaces
+  # only the apt tree and carries nothing else. (The 2026-11-18 shared-
+  # site design made each side carry the other's subtree — a lost-update
+  # race plus a full apt re-upload on every images deploy; split back
+  # 2026-11-19.)
   # ──────────────────────────────────────────────────
   deploy-pages:
     needs: publish
