@@ -488,6 +488,7 @@ jobs:
           LR_COMMIT: ${{ needs.plan.outputs.lr_commit }}
           OVERRIDE: ${{ needs.plan.outputs.lr_override }}
           KVER: ${{ needs.plan.outputs.kver }}
+          RELEASE_REPO: ${{ needs.plan.outputs.release_repo }}
         run: |
           set -euo pipefail
           lr_repo_part="${LR_REPO%:*}"
@@ -509,7 +510,10 @@ jobs:
           gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
           echo "Tagged ${GITHUB_REPOSITORY}@${GITHUB_SHA} as ${TAG}"
 
-          pages_url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/images/"
+          # The download page is the release repo's own Pages site root
+          # (one site, one writer; the page push lands on its gh-pages).
+          page_repo="${RELEASE_REPO,,}"
+          pages_url="https://${page_repo%/*}.github.io/${page_repo#*/}/"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           if [[ -n "$lr_tag" ]]; then
             lr_tag_cell="[${lr_tag}](https://github.com/${lr_repo_part}/releases/tag/${lr_tag})"
