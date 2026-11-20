@@ -252,11 +252,18 @@ just script the good path. Four pieces do that:
    builds instead. Plain builds keep the command and the booti-based
    rescue chain. The same patch compiles the default-env
    rescue dispatcher down to the signed recovery-FIT branch only.
-3. **Plain U-Boot keeps every boot command; FIT entry is env-gated
-   only.** The layout stamp keeps every env producer (fwenv routing
-   set, uboot-env-prefill, the compiled default env) on the ext4 fs
-   path, so no automatic routing calls `boot_fit`/`bootm` on plain.
-   Manual FIT boot on plain is a plain env edit: point
+3. **Plain U-Boot keeps every boot command; FIT entry is env-gated in
+   the persistent env only.** The layout stamp keeps the persistent env
+   producers (fwenv routing set, uboot-env-prefill) on the ext4 fs
+   path (`ota_rescue_boot=run ota_rescue_boot_fs || run
+   distro_bootcmd`). The compiled default env is gated by
+   `CONFIG_FIT_SIGNATURE` at compile time, not by the layout stamp:
+   its plain branch keeps the `|| run ota_rescue_boot_fit ||`
+   fallback, so an ext4-branch failure on plain (CRC-lost env, an
+   A/B build without `/recovery` assets, or a plain loader with a
+   raw-FIT disk) can still call `boot_fit` automatically. The final
+   backstop is the TEE gate, not this routing. Manual FIT boot on
+   plain is a plain env edit: point
    `ota_normal_boot` at `run ota_normal_boot_fit`, or call `boot_fit`
    at the prompt. The loader/disk mismatch (plain loader + raw-FIT
    disk) backstops at the TEE gate: a secure rootfs cannot complete

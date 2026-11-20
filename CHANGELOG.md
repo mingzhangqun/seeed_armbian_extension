@@ -122,8 +122,13 @@ Covers the work against the initial import (merge base `9980aee`,
     compiles the default-env rescue dispatcher down to the signed
     recovery-FIT branch. Plain builds are unchanged.
   - plain (non-`FIT_SIGNATURE`) builds keep every boot command: FIT
-    entry is env-gated only — the layout stamp keeps all env producers
-    on the ext4 fs path, manual FIT boot is a plain env edit or a
+    entry is env-gated in the persistent env only — the layout stamp
+    keeps the fwenv routing set and uboot-env-prefill on the ext4 fs
+    path, while the compiled default env is `CONFIG_FIT_SIGNATURE`-
+    gated at compile time and keeps its `|| run ota_rescue_boot_fit ||`
+    fallback on plain, so an ext4-branch failure can still reach
+    `boot_fit` automatically (the TEE gate is the final backstop).
+    Manual FIT boot is a plain env edit or a
     `boot_fit` at the prompt. The loader/disk mismatch backstops at the
     TEE gate (secure rootfs cannot complete boot under a plain loader).
     `BOOT_RAW_MODE` builds need a verifying U-Boot.
