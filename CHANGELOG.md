@@ -63,6 +63,33 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Env CRC self-heal works on trixie libubootenv.** `fw_env_crc_bad` now
+  matches the trixie wording ("Cannot read environment") alongside the
+  classic "Bad CRC", and `fw_env_set_multi` sanitizes a bad-CRC blob (zero
+  + valid empty-env CRC) and retries once — trixie `fw_setenv` refuses to
+  write a bad-CRC env outright, which broke every rebuild path. Verified
+  on-device: corrupt -> detect -> repair+rewrite -> routing readback ->
+  CRC good.
+- **Partial env writes no longer sanitize the blob.** The
+  sanitize-and-retry in `fw_env_set_multi` is now gated on an explicit
+  `--full-set` contract (only `fw_env_write_routing_set` passes it): any
+  other caller failing `fw_setenv` fails the write with the blob
+  untouched. Before, a two-key arming write that hit an I/O error (or a
+  CRC mis-detection) would zero a good-CRC env and rewrite only
+  `ota_in_progress`/`ota_boot_next` — a valid-CRC blob without the
+  routing set, i.e. an endless Rescue loop no auto-rebuild can detect.
+- **Encrypted userdata resizes in one boot.** `armbian-resize-userdata`
+  grows the LUKS mapping online with `cryptsetup resize --key-file
+  /run/armbian-luks-passphrase` (the initramfs-stashed key; a bare call
+  has no key source in the TTY-less service) instead of reloading the
+  `dmsetup` table, which always failed on LUKS2 with "Required key not
+  available" (masked key). The two-stage
+  partition-then-reboot flow is gone: freshly flashed encrypted devices
+  have full userdata on the first boot, so first-boot A/B OTA staging no
+  longer needs a second boot.
+- **Status wording.** `armbian-ota status` no longer prints
+  `Mode: recovery (plain v0.8)` on encrypted devices — the backend flavor
+  was never the image flavor; it reads `backend v0.8` now.
 - **Secure-boot rescue: dedicated `recovery` raw FIT partition.** Secure
   boot Recovery images now split the boot area in two: the existing raw FIT
   `boot` partition plus a new `PARTLABEL=recovery` partition (same size as

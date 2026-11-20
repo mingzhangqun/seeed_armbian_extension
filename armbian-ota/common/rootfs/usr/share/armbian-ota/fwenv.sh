@@ -99,15 +99,38 @@ fw_env_get() {
 
 # True when the persistent env blob fails its CRC check. fw_printenv still
 # prints the (default) variables in that state, so the warning on stderr is
-# the only reliable signal.
+# the only reliable signal. Message wording differs across libubootenv
+# generations: classic u-boot-tools says "Bad CRC", trixie libubootenv says
+# "Cannot read environment" -- match both.
 fw_env_crc_bad() {
     err_file="${TMPDIR:-/tmp}/fwenv.crc.$$"
 
     fw_printenv > /dev/null 2> "${err_file}" || true
-    grep -qi "bad crc" "${err_file}"
+    grep -qiE "bad crc|cannot read environment|failed to read environment" "${err_file}"
     rc=$?
     rm -f "${err_file}" 2>/dev/null || true
     [ "${rc}" -eq 0 ]
+}
+
+# Sanitize a bad-CRC env blob: zero it and stamp the CRC32 of the zeroed
+# data (a valid EMPTY env). trixie libubootenv refuses to write a bad-CRC
+# env outright, so fw_setenv needs this before any rebuild write.
+fw_env_repair_blob() {
+    set -- $(awk 'NR==1 && !/^#/ {print $1, $2, $3; exit}' "${OTA_FW_ENV_CONFIG}" 2>/dev/null)
+    [ -b "$1" ] || return 1
+    fw_env_repair_disk="$1"
+    fw_env_repair_off="${2:-${OTA_FW_ENV_OFFSET}}"
+    fw_env_repair_sz="${3:-${OTA_FW_ENV_SIZE}}"
+
+    dd if=/dev/zero of="${fw_env_repair_disk}" \
+        bs=1 seek=$((fw_env_repair_off)) count=$((fw_env_repair_sz)) \
+        conv=notrunc 2>/dev/null || return 1
+    # crc32(0x7ffc zero bytes) = 0xb52d2b04, little-endian, for the default
+    # 0x8000 blob; other sizes still yield a readable empty env via the
+    # classic bad-CRC fallback, so the constant only needs the common case.
+    printf '\004\053\055\265' | dd of="${fw_env_repair_disk}" \
+        bs=1 seek=$((fw_env_repair_off)) conv=notrunc 2>/dev/null || return 1
+    return 0
 }
 
 # Set one variable and verify by readback.
@@ -121,7 +144,16 @@ fw_env_set() {
 }
 
 # Set multiple variables in one fw_setenv -s run and verify each by readback.
+# Pass --full-set only when the script rewrites the whole routing env: the
+# bad-CRC sanitize-and-retry below lands on an EMPTY blob, so a partial
+# script would ship a valid-CRC env without bootcmd (endless Rescue loop).
 fw_env_set_multi() {
+    full_set=0
+    if [ "${1:-}" = "--full-set" ]; then
+        full_set=1
+        shift
+    fi
+
     script_file="$(mktemp 2>/dev/null)" || return 1
 
     for kv in "$@"; do
@@ -129,8 +161,17 @@ fw_env_set_multi() {
     done
 
     fw_setenv -s "${script_file}" || {
-        rm -f "${script_file}" 2>/dev/null || true
-        return 1
+        if [ "${full_set}" -eq 0 ]; then
+            rm -f "${script_file}" 2>/dev/null || true
+            return 1
+        fi
+        # trixie libubootenv refuses to write a bad-CRC env; sanitize the
+        # blob to a valid empty env and retry once (full-set callers only).
+        fw_env_repair_blob 2>/dev/null || true
+        fw_setenv -s "${script_file}" || {
+            rm -f "${script_file}" 2>/dev/null || true
+            return 1
+        }
     }
     rm -f "${script_file}" 2>/dev/null || true
 
@@ -207,7 +248,7 @@ fw_env_write_routing_set() {
     # sit inside a double-quoted argument
     rescue_fs='ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root='"${OTA_RESCUE_ROOT_DEFAULT}"' rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
 
-    fw_env_set_multi \
+    fw_env_set_multi --full-set \
         "ota_in_progress=${in_prog}" \
         "ota_boot_next=${next}" \
         "ota_normal_boot_fs=${OTA_ENV_NORMAL_BOOT_FS}" \
