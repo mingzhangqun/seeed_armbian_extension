@@ -59,7 +59,7 @@ immediately**):
 | 2 | partition capacity gate: `ROOTFS_BYTES`/`BOOT_BYTES` stamps vs target slot partitions, 110% extract margin (raw FIT 1:1), encrypted targets reserve the LUKS2 header | `blkid`, `blockdev` |
 | 3 | staging store: reuse the userdata overlay upper already mounted at `/media/root-rw`, never unlock or mount its backing ext4 again; sweep aborted staging dirs, then the space gate (staged payload/ciphertext sizes + shared margin, using `ROOTFS_BYTES`/`BOOT_BYTES` when present) | `mountpoint`, `df` |
 | 4 | `extract_ota_package` + `ota_assert_dual_payload` (on the extracted dir) + `ota_verify_payload` (shared with recovery) | `tar`, `sha256sum`, `openssl` |
-| 5 | `ab_update_target_partition`: unlock target if LUKS (key from security partition flow) → mount → `empty_mount_dir` clean (**no mkfs**; UUID/label preserved) → extract rootfs payload → write target boot (tar extract or `boot.itb` dd) → rewrite target `fstab`/`armbianEnv.txt` UUIDs → sync + unmount; staging directory removed afterwards | `cryptsetup`, `mount`, `tar`, `dd` |
+| 5 | `ab_update_target_partition`: unlock target if LUKS (key from security partition flow) → mount → `mkfs.ext4` rebuild (fs label + UUID replay; falls back to `empty_mount_dir` clean when mkfs.ext4 is unavailable) → extract rootfs payload → write target boot (tar extract or `boot.itb` dd) → rewrite target `fstab`/`armbianEnv.txt` UUIDs → sync + unmount; staging directory removed afterwards | `cryptsetup`, `mount`, `mkfs.ext4`, `tar`, `dd` |
 | 6 | `state ready_to_boot` + `ab_env_prepare` (switch `boot_slot`, set `ota_in_progress=1`) | `fw_setenv` |
 
 Key structural difference: recovery rewrites the rootfs partition from the
