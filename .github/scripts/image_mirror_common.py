@@ -79,8 +79,12 @@ def references(slots):
 # The build-sources table in the Release notes: the kernel repo row may be
 # plain ("| owner/linux-rockchip | ...") or markdown-linked
 # ("| [owner/linux-rockchip](url) | ..."). One regex, used by the build
-# workflow's retire step and by reconcile's stale-draft GC.
-KERNEL_REPO_RE = re.compile(r"^\| \[?([A-Za-z0-9_.-]+/linux-rockchip)\b", re.MULTILINE)
+# workflow's retire step and by reconcile's stale-draft GC. The lookahead
+# requires a table cell boundary, so suffixed fork names (e.g.
+# owner/linux-rockchip-seeed) never match-truncate.
+KERNEL_REPO_RE = re.compile(
+    r"^\| \[?([A-Za-z0-9_.-]+/linux-rockchip)(?=[\]\|\s]|$)", re.MULTILINE
+)
 
 
 def kernel_repo_from_notes(body):

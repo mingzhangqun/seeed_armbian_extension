@@ -2,7 +2,7 @@
 """CLI for the Release-notes metadata shared by workflows and reconcile.
 
 Subcommands (body is read from stdin):
-  kernel-repo <repo>     Print the kernel repo named by the build-sources
+  kernel-repo            Print the kernel repo named by the build-sources
                          table, or nothing.
   pipeline-owned <repo>  Exit 0 when the body links a run of <repo>, else 1.
 """
