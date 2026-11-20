@@ -179,6 +179,11 @@ Covers the work against the initial import (merge base `9980aee`,
   `missing package.env` (runtime version bumped 1.3 → 1.4);
   `load_package_env_metadata` now propagates tar's stderr so listing or
   extraction failures surface their real cause.
+- **Image identity stamps consolidated into `armbian-image-release`.**
+  `IMAGE_VARIANT` and `SEEED_EXTENSION_REPO/COMMIT` are stamped at image
+  finalize (after the framework's release snapshot, so they cannot be
+  clobbered); the device variant gate falls back to the legacy
+  `/etc/armbian-ota-image` for pre-existing devices.
 - **Encrypted and signed OTA payloads.** On encrypted-rootfs images the OTA
   packaging encrypts `rootfs.tar.gz` (AES-256-CBC, key derived from the
   LUKS passphrase via HKDF-SHA256) and signs `payload.manifest` (IV, plaintext
@@ -324,7 +329,8 @@ Covers the work against the initial import (merge base `9980aee`,
   compatibility path.
 - **Release provenance.** GitHub Releases target the exact armbian-build
   commit used for the image build, including cross-repository Releases.
-  `/etc/armbian-release` records only the extension commit, not a mutable ref.
+  `/etc/armbian-image-release` records only the extension commit, not a
+  mutable ref.
 
 - **PR #37 hardening: OTA integrity, mirror safety and CI fail-closed
   behavior.** A/B staging now reuses the mounted userdata overlay upper
@@ -466,9 +472,9 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Removed
 
-- **Mutable extension ref in release metadata.** `/etc/armbian-release` keeps
-  the immutable `SEEED_EXTENSION_COMMIT`; `SEEED_EXTENSION_REF` is no longer
-  recorded.
+- **Mutable extension ref in release metadata.** `/etc/armbian-image-release`
+  keeps the immutable `SEEED_EXTENSION_COMMIT`; `SEEED_EXTENSION_REF` is no
+  longer recorded.
 - **Legacy OTA mirror test harness.** The unused
   `.github/scripts/test_image_mirror.py` is removed; mirror coverage checks
   remain in the OCR/publishing pipeline.
