@@ -12,6 +12,21 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Fixed
 
+- **Security-partition discovery now actually anchors to the boot disk.**
+  `lsblk -no PKNAME` emits bare kernel names (no `/dev/` prefix) and
+  refuses bare names as inputs, so `ota_get_security_part`'s disk filter
+  never matched and every pick silently fell through to the unanchored
+  first match -- including `ab_get_security_part`, which had copied the
+  same broken filter. Multi-disk clone setups could read the wrong
+  disk's key partition. Both now re-prefix `/dev/` after each PKNAME
+  lookup.
+- **Target-slot A/B OTA state file got real values.** `ota_state_commit_tmp`
+  and `ota_state_set_key` committed to the global `OTA_STATE_FILE`
+  regardless of the file argument, so `ab_write_target_state` wrote its
+  keys into the RUNNING system's state and left the target slot's file an
+  empty template. The passed file is now the actual destination; state
+  files also collapse to one atomic write per boundary (no more
+  template + 7 sequential rewrites with duplicate keys).
 - **Plain U-Boot no longer has any live raw-FIT entry in the env it
   produces.** Patch `#else`, the env prefill and
   `fw_env_write_routing_set` write the `*_boot_fit` keys as refusal
@@ -410,6 +425,17 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Changed
 
+- **U-Boot routing env has a single source of truth.** The routing
+  scripts (ota_normal/rescue boot pair, transactional bootcmd) live
+  only in fwenv.sh; the env prefill sources it at image assembly
+  instead of carrying its own copies, and the U-Boot default-env
+  patch's rescue keys are machine-verified against the compiled
+  default env at every recovery build (`ota_uboot_env_prefill_check_
+  sync`). Disk/parent-disk resolution likewise converged into
+  fwenv.sh/find-userdata.sh (was seven hand-rolled copies).
+- **`ota_assert_dual_payload` asserts on the extracted staging dir**
+  instead of streaming the package tar twice; space and capacity gates
+  still run first.
 - **Image-variant compatibility gate.** `IMAGE_VARIANT=cli|desktop` is recorded
   in both the firmware and package; `armbian-ota start` rejects CLI/Desktop
   cross-upgrades when both stamps are present, while legacy images keep their
