@@ -1,18 +1,28 @@
 # Build-time U-Boot environment prefill for OTA images (A/B and recovery).
 #
 # Vendor U-Boot (env_blk) loads its environment from a raw area on its own
-# boot disk at CONFIG_ENV_OFFSET (0x3f8000, size 0x8000, no redundant copy for
-# both rk3576 and rk3588 vendor trees). Images historically shipped with that
-# area blank, so every first boot ran the compiled default bootcmd behind a
-# bad-CRC warning; recovery images have no runtime env writer at all, which
-# left their kernel cmdline without the armbian.bootdev anchoring token and
-# let multi-disk blkid first-match resolve partitions on the wrong disk.
-# Prefilling a valid blob here makes every flash boot the token-carrying
-# bootcmd from the start; U-Boot saveenv and ota-init writes simply overwrite
-# the area later.
+# boot disk at CONFIG_ENV_OFFSET (0x3f8000, size 0x8000) with a redundant
+# copy at CONFIG_ENV_OFFSET_REDUND (0x3f0000) on rk3576 builds; see the
+# seeed-uboot-redundant-env U-Boot patch. Images historically shipped with
+# that area blank, so every first boot ran the compiled default bootcmd
+# behind a bad-CRC warning; recovery images have no runtime env writer at
+# all, which left their kernel cmdline without the armbian.bootdev anchoring
+# token and let multi-disk blkid first-match resolve partitions on the wrong
+# disk. Prefilling valid blobs here makes every flash boot the token-carrying
+# bootcmd from the start; U-Boot saveenv and ota-init writes simply alternate
+# between the two copies later.
 
-OTA_UBOOT_ENV_OFFSET_HEX="0x3f8000" # CONFIG_ENV_OFFSET (env/Kconfig, ARCH_ROCKCHIP)
-OTA_UBOOT_ENV_SIZE_HEX="0x8000"     # CONFIG_ENV_SIZE
+OTA_UBOOT_ENV_OFFSET_HEX="0x3f8000"       # CONFIG_ENV_OFFSET (env/Kconfig, ARCH_ROCKCHIP)
+OTA_UBOOT_ENV_REDUND_OFFSET_HEX="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
+OTA_UBOOT_ENV_SIZE_HEX="0x8000"           # CONFIG_ENV_SIZE
+# seeed-uboot-redundant-env.patch stages for rk3576/rk3588 (same env_blk
+# layout conventions; rk3588 keeps U-Boot in partition 1, raw area holds
+# only idbloader + env); other boards need the 4-byte-header single-copy
+# blob or their U-Boot reads bad-CRC.
+OTA_UBOOT_ENV_REDUNDANT=0
+case "${BOOT_SOC:-}" in
+    rk3576 | rk3588) OTA_UBOOT_ENV_REDUNDANT=1 ;;
+esac
 
 # mkenvimage discovery: the build container ships u-boot-tools, but fall back
 # to the binary produced by any local U-Boot compilation so image-only builds
@@ -118,13 +128,14 @@ function ota_uboot_env_prefill_compose() {
 # u-boot.itb at sector 16384) and the FIT lands inside partition 1 by
 # design, far beyond the env area.
 function ota_uboot_env_prefill_assert_layout() {
-    local offset=$((OTA_UBOOT_ENV_OFFSET_HEX))
+    local offset_hex="$1"
+    local offset=$((offset_hex))
     local size=$((OTA_UBOOT_ENV_SIZE_HEX))
     local env_end_sector=$(((offset + size) / 512))
     local first_part_start uboot_end sector64_blob candidate
 
     ((offset % 512 == 0 && size % 512 == 0)) ||
-        exit_with_error "Env geometry not sector-aligned" "offset=${OTA_UBOOT_ENV_OFFSET_HEX} size=${OTA_UBOOT_ENV_SIZE_HEX}"
+        exit_with_error "Env geometry not sector-aligned" "offset=${offset_hex} size=${OTA_UBOOT_ENV_SIZE_HEX}"
 
     first_part_start="$(sfdisk -J "${LOOP}" 2>/dev/null |
         jq '.partitiontable.partitions | map(.start) | min')" ||
@@ -151,20 +162,23 @@ function ota_uboot_env_prefill_assert_layout() {
 # bootcmd that will run on first boot.
 function ota_uboot_env_prefill_verify() {
     local loop="$1" seek_sector="$2" size="$3"
-    local env_info
+    local env_info data_skip
 
+    # Redundant layout: CRC(4) + flags(1) + data; single-copy: CRC(4) + data.
+    [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]] && data_skip=5 || data_skip=4
     env_info="$(dd if="${loop}" bs=512 skip="${seek_sector}" count="$((size / 512))" status=none |
-        python3 -c '
+        python3 -c "
 import struct, sys, zlib
+skip = ${data_skip}
 blob = sys.stdin.buffer.read()
-crc = struct.unpack("<I", blob[:4])[0]
-if (zlib.crc32(blob[4:]) & 0xFFFFFFFF) != crc:
-    sys.exit("env blob CRC mismatch after write")
-for entry in blob[4:].split(b"\0"):
+crc = struct.unpack('<I', blob[:4])[0]
+if (zlib.crc32(blob[skip:]) & 0xFFFFFFFF) != crc:
+    sys.exit('env blob CRC mismatch after write')
+for entry in blob[skip:].split(b'\0'):
     if not entry:
         break
-    print(entry.decode("utf-8", "replace"))
-')" || exit_with_error "Env blob readback failed" "${env_info}"
+    print(entry.decode('utf-8', 'replace'))
+")" || exit_with_error "Env blob readback failed" "${env_info}"
     # Verify the tokens the composed env actually carries.  A/B blobs anchor
     # on the armbian.bootdev bootcmd from /etc/u-boot-initial-env (plus the
     # raw-fit override on secure images); only recovery blobs carry the v0.8
@@ -204,9 +218,11 @@ for entry in blob[4:].split(b"\0"):
 
 function post_write_uboot_platform__910_prefill_uboot_env() {
     local offset=$((OTA_UBOOT_ENV_OFFSET_HEX))
+    local redund_offset=$((OTA_UBOOT_ENV_REDUND_OFFSET_HEX))
     local size=$((OTA_UBOOT_ENV_SIZE_HEX))
     local seek_sector=$((offset / 512))
-    local mkenvimage_bin final_env blob
+    local redund_seek_sector=$((redund_offset / 512))
+    local mkenvimage_bin final_env blob mkenv_flags
 
     mkenvimage_bin="$(ota_uboot_env_prefill_mkenvimage)" ||
         exit_with_error "mkenvimage not found" "install u-boot-tools or run a u-boot build first"
@@ -215,19 +231,37 @@ function post_write_uboot_platform__910_prefill_uboot_env() {
     blob="$(mktemp)" || exit_with_error "mktemp failed"
 
     ota_uboot_env_prefill_compose "${final_env}"
-    ota_uboot_env_prefill_assert_layout
+    ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_OFFSET_HEX}"
 
-    "${mkenvimage_bin}" -s "${size}" -o "${blob}" "${final_env}" ||
-        exit_with_error "mkenvimage failed" "${mkenvimage_bin}"
+    # -r = redundant layout (flags=1 both copies: deterministic primary on
+    # first boot, first saveenv alternates). Single boards get 4B header.
+    mkenv_flags=()
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        mkenv_flags=(-r)
+        ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
+    fi
+    "${mkenvimage_bin}" "${mkenv_flags[@]}" -s "${size}" -o "${blob}" "${final_env}" ||
+        exit_with_error "mkenvimage failed" "${mkenvimage_bin} ${mkenv_flags[*]}"
     [[ "$(stat -c%s "${blob}")" == "${size}" ]] ||
         exit_with_error "Unexpected blob size" "$(stat -c%s "${blob}") != ${size}"
 
     dd if="${blob}" of="${LOOP}" bs=512 seek="${seek_sector}" conv=notrunc status=none ||
         exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_OFFSET_HEX}"
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        dd if="${blob}" of="${LOOP}" bs=512 seek="${redund_seek_sector}" conv=notrunc status=none ||
+            exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
+    fi
     sync
 
     ota_uboot_env_prefill_verify "${LOOP}" "${seek_sector}" "${size}"
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        ota_uboot_env_prefill_verify "${LOOP}" "${redund_seek_sector}" "${size}"
+    fi
 
     rm -f "${final_env}" "${blob}"
-    display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offset ${OTA_UBOOT_ENV_OFFSET_HEX}" "info"
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offsets ${OTA_UBOOT_ENV_OFFSET_HEX} + ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX} (redundant)" "info"
+    else
+        display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offset ${OTA_UBOOT_ENV_OFFSET_HEX} (single copy)" "info"
+    fi
 }

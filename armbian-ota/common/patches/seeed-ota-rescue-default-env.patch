@@ -37,8 +37,13 @@ even when a foreign image's unsigned env blob steers the boot path, so
   cannot be disabled that way because DISTRO_DEFAULTS selects it on
   ARM64).
 
-Plain builds compile both #else branches unchanged -- byte-identical
-behavior, the patch content is the only artifact-hash delta.
+Plain (non-FIT_SIGNATURE) builds carry no command guards: every boot
+command stays available and FIT entry is env-gated only -- the layout
+stamp keeps all env producers on the ext4 fs path, so a raw-FIT image's
+env blob steering a plain loader into ota_normal_boot_fit merely runs
+the unverified kernel until the initramfs TEE gate fails it late (no
+BL32, SSKR unavailable). Manual FIT boot on plain is a plain env edit
+(point ota_normal_boot at ota_normal_boot_fit, or call boot_fit).
 
 The persistent (prefilled) env carries the full transactional bootcmd;
 this default is its CRC-failure fallback (Seeed recovery OTA v0.8,

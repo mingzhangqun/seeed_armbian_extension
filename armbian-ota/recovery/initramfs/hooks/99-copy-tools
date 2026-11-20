@@ -127,6 +127,19 @@ if [ "${fw_env_staged}" -eq 2 ]; then
         mkdir -p "${DESTDIR}/usr/lib/aarch64-linux-gnu"
         cp -p "${lib}" "${DESTDIR}/usr/lib/aarch64-linux-gnu/"
     done
+    # Sanitize blobs the both-bad env rebuild dd's (fw_env_repair_blob);
+    # generated from this image's compiled default env, so the rebuild is
+    # dead without them -- hard fail instead of shipping a broken rescue.
+    for sanitize_bin in env-sanitize-redundant.bin env-sanitize-single.bin; do
+        if [ -f "/usr/share/armbian-ota/${sanitize_bin}" ]; then
+            mkdir -p "${DESTDIR}/usr/share/armbian-ota"
+            cp -p "/usr/share/armbian-ota/${sanitize_bin}" \
+                "${DESTDIR}/usr/share/armbian-ota/${sanitize_bin}"
+        else
+            echo "[99-copy-tools] missing required ${sanitize_bin}; both-bad env rebuild would be dead" >&2
+            exit 1
+        fi
+    done
     echo "[99-copy-tools] staged fw_setenv/fw_printenv + libubootenv" >&2
 else
     echo "[99-copy-tools] WARN: fw_setenv/fw_printenv not found in rootfs (${fw_env_staged}/2); OTA env writes will fail on device" >&2
