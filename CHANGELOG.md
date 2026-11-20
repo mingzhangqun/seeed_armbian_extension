@@ -70,6 +70,14 @@ Covers the work against the initial import (merge base `9980aee`,
   write a bad-CRC env outright, which broke every rebuild path. Verified
   on-device: corrupt -> detect -> repair+rewrite -> routing readback ->
   CRC good.
+- **Partial env writes no longer sanitize the blob.** The
+  sanitize-and-retry in `fw_env_set_multi` is now gated on an explicit
+  `--full-set` contract (only `fw_env_write_routing_set` passes it): any
+  other caller failing `fw_setenv` fails the write with the blob
+  untouched. Before, a two-key arming write that hit an I/O error (or a
+  CRC mis-detection) would zero a good-CRC env and rewrite only
+  `ota_in_progress`/`ota_boot_next` — a valid-CRC blob without the
+  routing set, i.e. an endless Rescue loop no auto-rebuild can detect.
 - **Encrypted userdata resizes in one boot.** `armbian-resize-userdata`
   grows the LUKS mapping online with `cryptsetup resize --key-file
   /run/armbian-luks-passphrase` (the initramfs-stashed key; a bare call
