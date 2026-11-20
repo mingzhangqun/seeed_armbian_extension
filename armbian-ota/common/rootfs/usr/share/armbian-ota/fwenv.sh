@@ -101,15 +101,20 @@ fw_env_get() {
 # prints the (default) variables in that state, so the warning on stderr is
 # the only reliable signal. Message wording differs across libubootenv
 # generations: classic u-boot-tools says "Bad CRC", trixie libubootenv says
-# "Cannot read environment" -- match both.
+# "Cannot read environment" -- match both. A CRC-valid but EMPTY blob is
+# also treated as bad: it is the sanitize/rewrite intermediate state and
+# U-Boot never falls back to the compiled default env for it, so only this
+# detection can trigger a rebuild.
 fw_env_crc_bad() {
     err_file="${TMPDIR:-/tmp}/fwenv.crc.$$"
 
-    fw_printenv > /dev/null 2> "${err_file}" || true
-    grep -qiE "bad crc|cannot read environment|failed to read environment" "${err_file}"
-    rc=$?
+    env_list="$(fw_printenv 2> "${err_file}")" || true
+    if grep -qiE "bad crc|cannot read environment|failed to read environment" "${err_file}"; then
+        rm -f "${err_file}" 2>/dev/null || true
+        return 0
+    fi
     rm -f "${err_file}" 2>/dev/null || true
-    [ "${rc}" -eq 0 ]
+    [ -z "${env_list}" ]
 }
 
 # Sanitize a bad-CRC env blob: zero it and stamp the CRC32 of the zeroed
@@ -131,6 +136,19 @@ fw_env_repair_blob() {
     printf '\004\053\055\265' | dd of="${fw_env_repair_disk}" \
         bs=1 seek=$((fw_env_repair_off)) conv=notrunc 2>/dev/null || return 1
     return 0
+}
+
+# Flip one bit of the env CRC so U-Boot sees a bad CRC and falls back to the
+# compiled default env (Rescue routing). Used when a full-set rewrite fails
+# after sanitize: a valid-CRC EMPTY env would hang autoboot at the prompt.
+fw_env_poison_crc() {
+    set -- $(awk 'NR==1 && !/^#/ {print $1, $2, $3; exit}' "${OTA_FW_ENV_CONFIG}" 2>/dev/null)
+    [ -b "$1" ] || return 1
+    fw_env_poison_off="${2:-${OTA_FW_ENV_OFFSET}}"
+    byte="$(dd if="$1" bs=1 skip=$((fw_env_poison_off)) count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')"
+    [ -n "${byte}" ] || return 1
+    printf "$(printf '\\%03o' $((byte ^ 255)))" \
+        | dd of="$1" bs=1 seek=$((fw_env_poison_off)) count=1 conv=notrunc 2>/dev/null
 }
 
 # Set one variable and verify by readback.
@@ -160,19 +178,31 @@ fw_env_set_multi() {
         printf '%s\n' "${kv}" >> "${script_file}"
     done
 
-    fw_setenv -s "${script_file}" || {
-        if [ "${full_set}" -eq 0 ]; then
-            rm -f "${script_file}" 2>/dev/null || true
+    set_err="${TMPDIR:-/tmp}/fwenv.set.$$.err"
+    fw_setenv -s "${script_file}" 2>"${set_err}" || {
+        rm -f "${script_file}" 2>/dev/null || true
+        if [ "${full_set}" -eq 0 ] || \
+           ! { grep -qiE "bad crc|cannot read environment|failed to read environment" "${set_err}" || fw_env_crc_bad; }; then
+            # Partial writers, and any failure that is not a confirmed
+            # bad-CRC refusal, fail with the blob untouched.
+            cat "${set_err}" >&2
+            rm -f "${set_err}" 2>/dev/null || true
             return 1
         fi
+        rm -f "${set_err}" 2>/dev/null || true
         # trixie libubootenv refuses to write a bad-CRC env; sanitize the
         # blob to a valid empty env and retry once (full-set callers only).
+        echo "fwenv: WARNING sanitizing env blob (bad CRC) before full-set rewrite" >&2
         fw_env_repair_blob 2>/dev/null || true
         fw_setenv -s "${script_file}" || {
+            # Leave a BAD CRC, not the valid-empty one: U-Boot falls back to
+            # the compiled default env (Rescue) instead of hanging at boot.
+            fw_env_poison_crc 2>/dev/null || true
             rm -f "${script_file}" 2>/dev/null || true
             return 1
         }
     }
+    rm -f "${set_err}" 2>/dev/null || true
     rm -f "${script_file}" 2>/dev/null || true
 
     for kv in "$@"; do

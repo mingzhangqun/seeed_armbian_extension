@@ -78,6 +78,15 @@ Covers the work against the initial import (merge base `9980aee`,
   CRC mis-detection) would zero a good-CRC env and rewrite only
   `ota_in_progress`/`ota_boot_next` — a valid-CRC blob without the
   routing set, i.e. an endless Rescue loop no auto-rebuild can detect.
+- **Env sanitize is confirmed, loud, and never leaves a valid empty blob.**
+  `fw_env_set_multi` now captures the failed `fw_setenv` stderr and only
+  sanitizes on a confirmed bad-CRC refusal (or a fresh `fw_env_crc_bad`);
+  any other failure fails with the blob untouched, and the sanitize
+  itself logs a warning. `fw_env_crc_bad` also flags a CRC-valid but
+  empty blob (the sanitize/rewrite intermediate state U-Boot cannot
+  recover from), and a failed rewrite-after-sanitize poisons one CRC bit
+  so U-Boot falls back to the compiled default env instead of hanging
+  at the prompt.
 - **Encrypted userdata resizes in one boot.** `armbian-resize-userdata`
   grows the LUKS mapping online with `cryptsetup resize --key-file
   /run/armbian-luks-passphrase` (the initramfs-stashed key; a bare call
