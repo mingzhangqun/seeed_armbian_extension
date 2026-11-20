@@ -48,6 +48,8 @@ function ota_uboot_env_prefill_compose() {
         grep -q '^bootcmd=.*armbian\.bootdev' "${src_env}" ||
             exit_with_error "A/B initial env lacks bootdev token" "${src_env}"
 
+        local mode_override_env
+        mode_override_env="$(mktemp)" || exit_with_error "mktemp failed"
         if ota_raw_boot_enabled; then
             # Raw-FIT images must take the bootcmd's raw-fit branch from the
             # very first boot. The else-branch runs distro_bootcmd first, and
@@ -57,13 +59,13 @@ function ota_uboot_env_prefill_compose() {
             # device and dies with "No boot partition" (RK3588 SD boot,
             # 2026-09-03). ota-init only sets this mode after a bootstrapped
             # first boot, which never happens without this injection.
-            raw_override_env="$(mktemp)" || exit_with_error "mktemp failed"
-            printf 'ab_boot_mode=raw-fit\n' > "${raw_override_env}"
-            ota_ab_merge_uboot_env_files "${final_env}" "${src_env}" "${raw_override_env}"
-            rm -f "${raw_override_env}"
+            printf 'ab_boot_mode=raw-fit\n' > "${mode_override_env}"
         else
-            ota_ab_merge_uboot_env_files "${final_env}" "${src_env}"
+            # Plain A/B: stamp the fs branch; plain FIT boots stay a manual console action.
+            printf 'ab_boot_mode=filesystem\n' > "${mode_override_env}"
         fi
+        ota_ab_merge_uboot_env_files "${final_env}" "${src_env}" "${mode_override_env}"
+        rm -f "${mode_override_env}"
         return 0
     fi
 
@@ -77,15 +79,18 @@ function ota_uboot_env_prefill_compose() {
     # carries the armbian.bootdev tokens in its own bootargs, and the rescue
     # branches inject them directly, so no bootargs prefixing is needed here.
     routing_env="$(mktemp)" || exit_with_error "mktemp failed"
-    # Plain uses ext4 only; secure/raw-FIT uses the signed boot/recovery FIT
-    # directly. Do not make FIT a fallback for plain.
-    local rescue_root="LABEL=armbi_root" normal_boot rescue_boot
+    # Plain uses ext4 only; FIT is never a plain fallback.
+    local rescue_root="LABEL=armbi_root" normal_boot rescue_boot fit_normal fit_rescue
     if ota_raw_boot_enabled; then
         normal_boot='run ota_normal_boot_fit'
         rescue_boot='run ota_rescue_boot_fit'
+        fit_normal='setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
+        fit_rescue='setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
     else
         normal_boot='run ota_normal_boot_fs'
         rescue_boot='run ota_rescue_boot_fs || run distro_bootcmd'
+        fit_normal='echo "PLAIN: raw FIT boot refused"'
+        fit_rescue='echo "PLAIN: raw FIT boot refused"'
     fi
     if ota_encrypted_rootfs_enabled; then
         rescue_root="/dev/mapper/armbian-root"
@@ -97,10 +102,10 @@ function ota_uboot_env_prefill_compose() {
         printf '%s\n' 'ota_in_progress=0'
         printf '%s\n' 'ota_boot_next=recovery'
         printf '%s\n' 'ota_normal_boot_fs=setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scriptaddr} /boot.scr && source ${scriptaddr}'
-        printf '%s\n' 'ota_normal_boot_fit=setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
+        printf 'ota_normal_boot_fit=%s\n' "${fit_normal}"
         printf 'ota_normal_boot=%s\n' "${normal_boot}"
         printf '%s\n' "ota_rescue_boot_fs=ext4load \${devtype} \${devnum}:1 \${kernel_addr_r} /recovery/Image && ext4load \${devtype} \${devnum}:1 \${ramdisk_addr_r} /recovery/uInitrd && ext4load \${devtype} \${devnum}:1 \${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=${rescue_root} rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=\${devtype} armbian.bootdevnum=\${devnum} armbian.ota_role=recovery\" && booti \${kernel_addr_r} \${ramdisk_addr_r} \${fdt_addr_r}"
-        printf '%s\n' 'ota_rescue_boot_fit=setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
+        printf 'ota_rescue_boot_fit=%s\n' "${fit_rescue}"
         printf 'ota_rescue_boot=%s\n' "${rescue_boot}"
         printf '%s\n' 'bootcmd=if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
     } > "${routing_env}"
@@ -177,6 +182,9 @@ for entry in blob[skip:].split(b'\0'):
         if ota_raw_boot_enabled; then
             grep -q '^ab_boot_mode=raw-fit' <<< "${env_info}" ||
                 exit_with_error "Prefilled A/B env lacks raw-fit mode" "ab_boot_mode not carried into blob"
+        else
+            grep -q '^ab_boot_mode=filesystem' <<< "${env_info}" ||
+                exit_with_error "Prefilled A/B env lacks filesystem mode" "ab_boot_mode not carried into blob"
         fi
     else
         grep -q '^ota_normal_boot_fit=' <<< "${env_info}" ||
@@ -191,6 +199,10 @@ for entry in blob[skip:].split(b'\0'):
             grep -qx 'ota_rescue_boot=run ota_rescue_boot_fit' <<< "${env_info}" ||
                 exit_with_error "Prefilled env lacks secure rescue dispatcher" "ota_rescue_boot not carried into blob"
         else
+            grep -q '^ota_normal_boot_fit=echo ' <<< "${env_info}" ||
+                exit_with_error "Prefilled plain env has live FIT script" "ota_normal_boot_fit must be a refusal stub"
+            grep -q '^ota_rescue_boot_fit=echo ' <<< "${env_info}" ||
+                exit_with_error "Prefilled plain env has live FIT script" "ota_rescue_boot_fit must be a refusal stub"
             grep -qx 'ota_normal_boot=run ota_normal_boot_fs' <<< "${env_info}" ||
                 exit_with_error "Prefilled env lacks plain normal boot dispatcher" "ota_normal_boot not carried into blob"
             grep -qx 'ota_rescue_boot=run ota_rescue_boot_fs || run distro_bootcmd' <<< "${env_info}" ||
