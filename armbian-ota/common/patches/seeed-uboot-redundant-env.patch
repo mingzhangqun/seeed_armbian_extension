@@ -1,0 +1,56 @@
+From: mingzq <north_sea@qq.com>
+Date: Thu, 20 Nov 2026 07:10:00 +0000
+Subject: [PATCH] env: make CONFIG_ENV_OFFSET_REDUND selectable for the block-device env driver
+
+The block-device env driver (env_blk.c) fully implements redundant
+environment (dual-copy load, alternating writes, flag-serial selection),
+but its CONFIG_ENV_OFFSET_REDUND symbol is only declared inside
+"if ENVF" (which requires ENV_IS_NOWHERE), so BLK_DEV builds can never
+turn it on. Declare a BLK_DEV-selectable instance under ARCH_ROCKCHIP
+and map it to CONFIG_SYS_REDUNDAND_ENVIRONMENT next to the MMC mapping,
+so a defconfig fragment of:
+
+  CONFIG_ENV_OFFSET_REDUND=0x3f0000
+
+activates dual-copy env at 0x3f8000 (primary) + 0x3f0000 (redundant),
+both 0x8000: a saveenv power cut then leaves the other copy intact and
+U-Boot falls back to it instead of the compiled default environment.
+
+diff --git a/env/Kconfig b/env/Kconfig
+index 86afc2a2e63..f3a3c31d1a0 100644
+--- a/env/Kconfig
++++ b/env/Kconfig
+@@ -523,6 +523,16 @@ config ENV_SIZE
+ 	help
+ 	  Size of the environment storage area
+ 
++config ENV_OFFSET_REDUND
++	hex "Environment redundant(backup) offset"
++	depends on ENV_IS_IN_BLK_DEV
++	default 0x3f0000
++	help
++	  Second storage area of CONFIG_ENV_SIZE for a redundant copy of
++	  the environment (block-device env driver): a valid backup copy in
++	  case the other copy is corrupted, e.g. a power failure during a
++	  "saveenv" operation.
++
+ if ENVF
+ config ENV_OFFSET_REDUND
+ 	hex "Environment redundant(backup) offset"
+diff --git a/include/environment.h b/include/environment.h
+index bd831074013..88c47ff0f6b 100644
+--- a/include/environment.h
++++ b/include/environment.h
+@@ -67,6 +67,12 @@
+ # endif
+ #endif
+ 
++#if defined(CONFIG_ENV_IS_IN_BLK_DEV)
++# ifdef CONFIG_ENV_OFFSET_REDUND
++#  define CONFIG_SYS_REDUNDAND_ENVIRONMENT
++# endif
++#endif
++
+ #if defined(CONFIG_ENV_IS_IN_NAND)
+ # if defined(CONFIG_ENV_OFFSET_OOB)
+ #  ifdef CONFIG_ENV_OFFSET_REDUND

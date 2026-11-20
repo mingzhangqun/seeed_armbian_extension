@@ -11,8 +11,9 @@
 # which would silently drop every other variable).
 
 OTA_FW_ENV_CONFIG="${OTA_FW_ENV_CONFIG:-/etc/fw_env.config}"
-OTA_FW_ENV_OFFSET="0x3f8000"   # CONFIG_ENV_OFFSET (vendor env_blk)
-OTA_FW_ENV_SIZE="0x8000"       # CONFIG_ENV_SIZE
+OTA_FW_ENV_OFFSET="0x3f8000"        # CONFIG_ENV_OFFSET (vendor env_blk)
+OTA_FW_ENV_REDUND_OFFSET="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
+OTA_FW_ENV_SIZE="0x8000"            # CONFIG_ENV_SIZE
 
 # Whole-disk device backing partition device $1, via sysfs parent walk.
 # /dev/mmcblk0p3 -> /dev/mmcblk0, /dev/nvme0n1p3 -> /dev/nvme0n1.
@@ -62,14 +63,17 @@ fw_env_boot_disk() {
     [ -n "${anchor_dev}" ] && fw_env_parent_disk "${anchor_dev}"
 }
 
-# (Re)write /etc/fw_env.config for boot disk $1. Idempotent.
+# (Re)write /etc/fw_env.config for boot disk $1. Idempotent. Two entries =
+# redundant env mode: libubootenv alternates writes between the copies.
 fw_env_write_config() {
     disk="$1"
 
     [ -b "${disk}" ] || return 1
     mkdir -p "$(dirname "${OTA_FW_ENV_CONFIG}")" 2>/dev/null || return 1
-    printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}" \
-        > "${OTA_FW_ENV_CONFIG}" || return 1
+    {
+        printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}"
+        printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_REDUND_OFFSET}" "${OTA_FW_ENV_SIZE}"
+    } > "${OTA_FW_ENV_CONFIG}" || return 1
     return 0
 }
 
@@ -117,9 +121,10 @@ fw_env_crc_bad() {
     [ -z "${env_list}" ]
 }
 
-# Sanitize a bad-CRC env blob: zero it and stamp the CRC32 of the zeroed
-# data (a valid EMPTY env). trixie libubootenv refuses to write a bad-CRC
-# env outright, so fw_setenv needs this before any rebuild write.
+# Sanitize a bad-CRC env copy: zero it and stamp the redundant-env empty
+# layout (CRC over the data area, flags byte at offset 4). trixie libubootenv
+# refuses to write when no copy parses, so fw_setenv needs one readable copy
+# before any rebuild write. Only reached when BOTH copies are bad.
 fw_env_repair_blob() {
     set -- $(awk 'NR==1 && !/^#/ {print $1, $2, $3; exit}' "${OTA_FW_ENV_CONFIG}" 2>/dev/null)
     [ -b "$1" ] || return 1
@@ -130,10 +135,10 @@ fw_env_repair_blob() {
     dd if=/dev/zero of="${fw_env_repair_disk}" \
         bs=1 seek=$((fw_env_repair_off)) count=$((fw_env_repair_sz)) \
         conv=notrunc 2>/dev/null || return 1
-    # crc32(0x7ffc zero bytes) = 0xb52d2b04, little-endian, for the default
-    # 0x8000 blob; other sizes still yield a readable empty env via the
-    # classic bad-CRC fallback, so the constant only needs the common case.
-    printf '\004\053\055\265' | dd of="${fw_env_repair_disk}" \
+    # Redundant layout: crc32(0x7ffb zero bytes) = 0xf28e459b, little-endian,
+    # flags byte 1; other sizes still yield a bad-CRC copy (ignored while the
+    # other copy is intact), so the constant only needs the common case.
+    printf '\233\105\216\362\001' | dd of="${fw_env_repair_disk}" \
         bs=1 seek=$((fw_env_repair_off)) conv=notrunc 2>/dev/null || return 1
     return 0
 }
