@@ -12,6 +12,14 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Fixed
 
+- **Plain U-Boot no longer has any live raw-FIT entry in the env it
+  produces.** Patch `#else`, the env prefill and
+  `fw_env_write_routing_set` write the `*_boot_fit` keys as refusal
+  stubs on plain layouts (keys kept for CRC-rebuild compat); the plain
+  A/B prefill stamps `ab_boot_mode=filesystem`. A loader/OS mismatch
+  on plain stops at env routing (2026-11-20 devkit repro) instead of
+  the initramfs TEE gate. Loader-owned env (NOR) only heals via
+  runtime reconciliation; deliberate plain FIT boots stay manual.
 - **A/B U-Boot rollback state reconciliation.** After retry exhaustion boots
   the last confirmed slot, the firstboot service's post-action records
   `STATUS=rollback` and clears the stale target. An unconfirmed pending state
