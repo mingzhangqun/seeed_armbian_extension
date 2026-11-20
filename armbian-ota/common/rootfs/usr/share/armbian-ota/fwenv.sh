@@ -265,16 +265,17 @@ OTA_ENV_NORMAL_BOOT_FS='setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scrip
 # bootargs. Only the dynamic disk and Rescue-role tokens belong in this script;
 # a second hardcoded copy would override RK_SECURE_BOOT_* customizations.
 OTA_ENV_NORMAL_BOOT_FIT='setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
-# Select routes from the build-stamped layout, not a writable U-Boot variable:
-# plain never falls back to an unsigned raw FIT; secure/raw-FIT has no ext4
-# /boot to try. The unused branch is retained only as inert reference data so
-# full CRC rebuilds remain compatible with older compiled default envs.
+# Select routes from the build-stamped layout, never a writable U-Boot variable:
+# plain FIT keys are refusal stubs, so a foreign reroute boots nothing.
 OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fs'
 OTA_ENV_RESCUE_BOOT_FIT='setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
 OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fs || run distro_bootcmd'
 if [ "$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null)" = "raw-fit" ]; then
     OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fit'
     OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fit'
+else
+    OTA_ENV_NORMAL_BOOT_FIT='echo "PLAIN: raw FIT boot refused"'
+    OTA_ENV_RESCUE_BOOT_FIT='echo "PLAIN: raw FIT boot refused"'
 fi
 OTA_ENV_BOOTCMD='if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
 
