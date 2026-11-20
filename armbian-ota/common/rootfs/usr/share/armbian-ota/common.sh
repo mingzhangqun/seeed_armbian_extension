@@ -186,11 +186,19 @@ ota_check_board_release() {
     sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
     # os-release VERSION_CODENAME is present on every image (base-files) and
     # tracks the actual suite, so the gate is active even on trunk images.
-    [ -n "${sys_release}" ] ||
-        sys_release="$(
-            . /etc/os-release 2>/dev/null
-            echo "${VERSION_CODENAME:-}"
-        )"
+    # Debian sid is the exception: os-release carries the testing codename
+    # there; /etc/debian_version ("trixie/sid") is the suite source.
+    if [ -z "${sys_release}" ]; then
+        case "$(cat /etc/debian_version 2>/dev/null)" in
+            */sid) sys_release="sid" ;;
+            *)
+                sys_release="$(
+                    . /etc/os-release 2>/dev/null
+                    echo "${VERSION_CODENAME:-}"
+                )"
+                ;;
+        esac
+    fi
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"

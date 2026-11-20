@@ -173,6 +173,8 @@ Covers the work against the initial import (merge base `9980aee`,
   falls back to the `/etc/os-release` `VERSION_CODENAME` when
   `/etc/armbian-release` carries no `RELEASE=` (upstream never stamps it),
   so cross-release OTA is refused on every image, not only stamped ones.
+  Debian sid images resolve via `/etc/debian_version` (`trixie/sid`), since
+  os-release carries the testing codename there.
 - **zstd capability is probed, not declared.** `OTA_RUNTIME_FORMATS` lists
   `zst` only when the zstd CLI exists, so a zst package fed to an image
   without zstd is refused at negotiation instead of misreporting
