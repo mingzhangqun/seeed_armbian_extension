@@ -80,6 +80,24 @@ ota_compute_payload_id() {
         sha256sum | awk '{print $1}'
 }
 
+# payload.env identity card (section 4); single writer for staged packages
+# (defensive regen) and backup payloads.
+recovery_write_payload_env() {
+    local dir="$1" id="$2" fmt="$3" board="$4" release="$5" kernel="$6" version="$7"
+
+    {
+        echo "PAYLOAD_ID=${id}"
+        echo "KIND=full"
+        echo "FMT=${fmt}"
+        echo "HAS_ROOTFS=1"
+        echo "BOARD=${board}"
+        echo "RELEASE=${release}"
+        echo "KERNEL=${kernel}"
+        echo "VERSION=${version}"
+        echo "OTA_MODE=recovery"
+    } > "${dir}/payload.env"
+}
+
 # ===== cheap pre-checks (15.2 step 1) ========================================
 
 recovery_check_package_metadata() {
@@ -184,6 +202,7 @@ recovery_stage_payload() {
 
     log_info "Staging payload ${payload_id} (extract + full sha256 verification)"
     extract_ota_package "${package_path}" "${incoming}"
+    ota_assert_dual_payload "${incoming}"
     ota_assert_payload_matches_system "${incoming}"
     ota_verify_payload "${incoming}" \
         "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
@@ -194,17 +213,12 @@ recovery_stage_payload() {
     # payload.env: identity card of the staged directory (section 4). The
     # build stamps it; regenerate defensively if absent.
     if [ ! -f "${incoming}/payload.env" ]; then
-        {
-            echo "PAYLOAD_ID=${payload_id}"
-            echo "KIND=full"
-            echo "FMT=${OTA_PAYLOAD_ROOTFS_TAR##*.}"
-            echo "HAS_ROOTFS=1"
-            echo "BOARD=$(package_env_get_value "BOARD" || true)"
-            echo "RELEASE=$(package_env_get_value "RELEASE" || true)"
-            echo "KERNEL=$(package_env_get_value "KERNEL" || true)"
-            echo "VERSION=$(package_env_get_value "VERSION" || true)"
-            echo "OTA_MODE=recovery"
-        } > "${incoming}/payload.env"
+        recovery_write_payload_env "${incoming}" "${payload_id}" \
+            "${OTA_PAYLOAD_ROOTFS_TAR##*.}" \
+            "$(package_env_get_value "BOARD" || true)" \
+            "$(package_env_get_value "RELEASE" || true)" \
+            "$(package_env_get_value "KERNEL" || true)" \
+            "$(package_env_get_value "VERSION" || true)"
     fi
 
     sync
@@ -391,17 +405,8 @@ recovery_create_backup() {
     fi
 
     # 4) metadata
-    {
-        echo "PAYLOAD_ID=${payload_id}"
-        echo "KIND=full"
-        echo "FMT=zst"
-        echo "HAS_ROOTFS=1"
-        echo "BOARD=${board}"
-        echo "RELEASE=${release}"
-        echo "KERNEL=${kernel}"
-        echo "VERSION=${version}"
-        echo "OTA_MODE=recovery"
-    } > "${work}/payload.env"
+    recovery_write_payload_env "${work}" "${payload_id}" "zst" \
+        "${board}" "${release}" "${kernel}" "${version}"
     {
         echo "# last-good backup of the running system"
         echo "CREATED=$(date -Iseconds)"
@@ -464,16 +469,14 @@ recovery_start_ota() {
     assert_package_mode_matches "${package_path}" "recovery"
 
     # 1) cheap checks, cheapest first: space (df + a du walk of the live
-    # rootfs) and capacity (blockdev reads) are seconds-cheap, while the
-    # dual-payload assertion must stream-decompress the whole multi-GB
-    # package to list its members -- it runs last so a device-side
-    # shortfall (the more common field failure) fails fast.
+    # rootfs) and capacity (blockdev reads) are seconds-cheap. The
+    # dual-payload assertion runs on the extracted staging dir (inside
+    # recovery_stage_payload) so it costs no extra streaming pass.
     recovery_check_package_metadata "${package_path}" "${force}"
     local want_backup="yes"
     [ -n "${no_backup}" ] && want_backup="no"
     recovery_check_space "${package_path}" "${want_backup}"
     recovery_check_capacity
-    ota_assert_dual_payload "${package_path}"
 
     # 2) full verification into staging (fail-fast, zero side effects)
     recovery_stage_payload "${package_path}"
