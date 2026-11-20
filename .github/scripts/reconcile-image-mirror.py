@@ -299,9 +299,16 @@ class Releases:
             if (now - created).days < age_days:
                 print(f"keeping draft {tag}: within the rerun-resume window")
                 continue
-            self.call("release", "delete", tag, "--yes", "--cleanup-tag")
+            # Drafts were never published, so no release-repo tag exists yet;
+            # --cleanup-tag would target a missing ref and, if gh treats that
+            # as failure, abort the run after the draft is already gone and
+            # before the source-tag sweep. The release repo is swept with the
+            # same tolerate-missing loop below instead.
+            self.call("release", "delete", tag, "--yes")
             kernel_repo = kernel_repo_from_notes(body)
-            for repo in [self.workflow_repo] + ([kernel_repo] if kernel_repo else []):
+            for repo in [self.workflow_repo, self.repo] + (
+                [kernel_repo] if kernel_repo else []
+            ):
                 try:
                     self.api("DELETE", f"repos/{repo}/git/refs/tags/{tag}")
                 except ReconcileError:
