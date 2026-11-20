@@ -64,8 +64,8 @@ boot) — see [Build Reference](02-build-reference.md).
 An update rewrites only the root and boot partitions; the writable upper
 layer is never touched, so everything installed or saved survives. On the
 first boot [`armbian-resize-userdata`](../armbian-ota/common/rootfs/usr/lib/armbian/armbian-resize-userdata)
-grows the userdata partition to fill the disk (encrypted images need one
-extra reboot to reopen the LUKS mapping before the filesystem grows).
+grows the userdata partition to fill the disk (encrypted images resize
+the LUKS mapping and the filesystem online in the same boot).
 
 ## 3. Build the update package
 
