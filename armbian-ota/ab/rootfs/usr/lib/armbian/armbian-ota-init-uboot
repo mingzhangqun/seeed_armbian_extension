@@ -36,26 +36,10 @@ log_error() {
     log "ERROR: $@" >&2
 }
 
-# /dev/nvme0n1p1 -> /dev/nvme0n1
+# /dev/nvme0n1p1 -> /dev/nvme0n1 (shared sysfs impl in fwenv.sh via env.sh;
+# whole-disk and unresolvable inputs pass through unchanged)
 get_parent_disk_dev() {
-    local dev="$1" pkname base
-    [ -n "${dev}" ] || return 1
-
-    pkname="$(lsblk -no PKNAME "${dev}" 2>/dev/null | head -n1)"
-    if [ -n "${pkname}" ]; then
-        echo "/dev/${pkname}"
-        return 0
-    fi
-
-    base="$(basename "${dev}")"
-    case "${base}" in
-        mmcblk*p[0-9]*|nvme*n*p[0-9]*)
-            echo "/dev/${base%p[0-9]*}"
-            return 0
-            ;;
-    esac
-
-    echo "${dev}"
+    fw_env_parent_disk "$1" || echo "$1"
 }
 
 # /dev/nvme0n1p1 -> 1
@@ -136,8 +120,8 @@ detect_ab_boot_configuration() {
     # U-Boot DTs order the mmc aliases differently, so Linux mmcblk0 is U-Boot
     # mmc1) - deriving from the name pins the wrong device there and every
     # slot switch dies in ab_select_boot_part's mismatch fallback.
-    BOOT_DEVTYPE="$(sed -n 's/.*[[:space:]]armbian\.bootdev=\([^[:space:]]*\).*/\1/p' /proc/cmdline)"
-    BOOT_DEVNUM="$(sed -n 's/.*[[:space:]]armbian\.bootdevnum=\([^[:space:]]*\).*/\1/p' /proc/cmdline)"
+    BOOT_DEVTYPE="$(fw_env_cmdline_value armbian.bootdev)"
+    BOOT_DEVNUM="$(fw_env_cmdline_value armbian.bootdevnum)"
     if [ -z "${BOOT_DEVTYPE}" ] || [ -z "${BOOT_DEVNUM}" ]; then
         read -r BOOT_DEVTYPE BOOT_DEVNUM <<< "$(get_uboot_bootdev_from_part "${boot_a_dev}" || true)"
     fi
@@ -177,30 +161,8 @@ detect_ab_boot_configuration() {
     log_info "  root_b: ${root_b_uuid:-<not found>}"
 }
 
-# Ask libubootenv which env format the bootloader writes; no parseable
-# copy falls back to single-copy (the legacy-safe read).
-fw_env_probe_redundant() {
-    local fw_env_device="$1" probe_cfg
-
-    probe_cfg="$(mktemp 2>/dev/null)" || return 1
-    printf '%s %s %s\n' "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" \
-        > "${probe_cfg}" 2>/dev/null || {
-        rm -f "${probe_cfg}" 2>/dev/null
-        return 1
-    }
-    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
-        rm -f "${probe_cfg}" 2>/dev/null
-        return 1
-    fi
-    printf '%s %s %s\n' "${fw_env_device}" "${AB_FW_ENV_REDUND_OFFSET}" "${AB_FW_ENV_SIZE}" \
-        >> "${probe_cfg}" 2>/dev/null
-    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
-        rm -f "${probe_cfg}" 2>/dev/null
-        return 0
-    fi
-    rm -f "${probe_cfg}" 2>/dev/null
-    return 1
-}
+# fw_env_probe_redundant is the shared fwenv.sh implementation (sourced via
+# ab/env.sh -> ab/partitions.sh); AB_FW_ENV_* constants match OTA_FW_ENV_*.
 
 ensure_fw_env_config() {
     local boot_part_dev="$1" fw_env_device

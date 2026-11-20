@@ -486,19 +486,17 @@ function ota_report_payload_sources() {
     local boot_partition="$2"
     local boot_size=0
 
-    if [[ "${ota_security_mode}" == "plain" ]]; then
-        if [[ -n "${boot_partition}" ]]; then
-            boot_size="$(blockdev --getsize64 "${boot_partition}" 2>/dev/null || echo 0)"
-        fi
-        display_alert "OTA archive sources" "boot: ${boot_partition:-none} (${boot_size} bytes), rootfs: ${MOUNT}" "info"
-    elif [[ "${ota_security_mode}" == "secure-boot-encrypted-rootfs" ]]; then
+    if [[ "${ota_security_mode}" == "secure-boot-encrypted-rootfs" ]]; then
         display_alert "Secure boot mode active" "Using boot.itb and rootfs: ${MOUNT}" "info"
-    else
-        if [[ -n "${boot_partition}" ]]; then
-            boot_size="$(blockdev --getsize64 "${boot_partition}" 2>/dev/null || echo 0)"
-        fi
-        display_alert "Encrypted auto-decrypt mode active" "Using rootfs: ${MOUNT}, boot: ${boot_partition:-none} (${boot_size} bytes)" "info"
+        return 0
     fi
+    # plain and encrypted auto-decrypt both package the ext4 boot partition
+    if [[ -n "${boot_partition}" ]]; then
+        boot_size="$(blockdev --getsize64 "${boot_partition}" 2>/dev/null || echo 0)"
+    fi
+    local title="OTA archive sources"
+    [[ "${ota_security_mode}" == "encrypted-rootfs" ]] && title="Encrypted auto-decrypt mode active"
+    display_alert "${title}" "rootfs: ${MOUNT}, boot: ${boot_partition:-none} (${boot_size} bytes)" "info"
 }
 
 function ota_archive_directory() {
@@ -692,7 +690,16 @@ EOF
     }
 }
 
+# Wrapper: the staging dirs are removed on EVERY exit path (the impl's early
+# returns used to duplicate the rm six times and miss two failure paths).
 function ota_create_payload_archives() {
+    ota_create_payload_archives_impl "$@"
+    local rc=$?
+    rm -rf "${1}/boot_mount" "${1}/boot_stage"
+    return "${rc}"
+}
+
+function ota_create_payload_archives_impl() {
     local ota_temp_dir="$1"
     local ota_security_mode="$2"
     local boot_partition="$3"
@@ -728,7 +735,6 @@ function ota_create_payload_archives() {
     if [[ -n "${boot_partition}" ]]; then
         if ! mount "${boot_partition}" "${boot_mount}"; then
             display_alert "Failed to mount boot partition" "${boot_partition}" "warn"
-            rm -rf "${boot_mount}" "${boot_stage}"
             return 0
         fi
         (
@@ -738,11 +744,9 @@ function ota_create_payload_archives() {
                 xargs -0 -r cp -a --target-directory="${boot_stage}"
         ) || {
             umount "${boot_mount}" 2>/dev/null || true
-            rm -rf "${boot_mount}" "${boot_stage}"
             return 1
         }
         if ! umount "${boot_mount}"; then
-            rm -rf "${boot_mount}" "${boot_stage}"
             return 1
         fi
     fi
@@ -752,7 +756,6 @@ function ota_create_payload_archives() {
         "${ota_temp_dir}/rootfs.sha256" "rootfs" "err" \
         --one-file-system \
         --exclude="./dev/*" --exclude="./proc/*" --exclude="./sys/*" --exclude="./tmp/*" --exclude="./run/*"; then
-        rm -rf "${boot_mount}" "${boot_stage}"
         return 1
     fi
 
@@ -766,7 +769,6 @@ function ota_create_payload_archives() {
 
     if [[ -n "${boot_partition}" ]]; then
         if ! ota_payload_compress_archive "${boot_stage}" "${ota_temp_dir}/boot.${OTA_PAYLOAD_TAR_SUFFIX}"; then
-            rm -rf "${boot_mount}" "${boot_stage}"
             return 1
         fi
         ota_write_sha256_file "${ota_temp_dir}" "boot.${OTA_PAYLOAD_TAR_SUFFIX}" "${ota_temp_dir}/boot.sha256"
@@ -815,7 +817,6 @@ function ota_create_payload_archives() {
         display_alert "OTA capacity stamps" "boot size measurement failed; BOOT_BYTES stamp omitted" "warn"
     display_alert "OTA capacity stamps" "rootfs=${OTA_ROOTFS_BYTES:-?}B boot=${OTA_BOOT_BYTES:-?}B" "info"
 
-    rm -rf "${boot_mount}" "${boot_stage}"
     display_alert "OTA payload identity" "PAYLOAD_ID=${payload_id}" "info"
 }
 
