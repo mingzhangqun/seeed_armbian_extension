@@ -270,14 +270,15 @@ class Releases:
             return
         self.call("release", "delete", tag, "--yes", "--cleanup-tag")
 
-    def gc_stale_drafts(self, slots, releases, age_days=7):
-        # A cancelled or re-run-all'd attempt can leave a draft Release with
-        # no slots.json pointer: the build's retire flow keys on the pointer,
-        # so nothing ever replaces it. Sweep owned, asset-less drafts that
-        # are past the failed-job-rerun window — together with their source
-        # tags (extension, and the kernel repo named by the notes table) —
-        # so orphaned runs cannot accumulate. A rerun after the window
-        # simply recreates its draft via the create-step replace block.
+    def gc_stale_drafts(self, slots, releases, age_days=90):
+        # A cancelled or re-run-all'd attempt can leave an owned, asset-less
+        # draft Release with no slots.json pointer (retire keys on the
+        # pointer, so nothing replaces it). Sweep those past the failed-job
+        # rerun window — runs stay re-runnable for the whole retention
+        # period (90 days default) and a failed-job rerun never re-runs the
+        # already-successful draft-creation step — together with their
+        # source tags. Re-run-all recreates its draft via the create-step
+        # replace block.
         referenced = references(slots)
         now = datetime.now(timezone.utc)
         for release in releases:

@@ -126,8 +126,11 @@ jobs:
           seen_families=''
           if [[ "${INPUT_BUILD_KERNEL}" == 'true' ]]; then
             kernel_boards=()
+            requested_families=''
             for b in "${boards[@]}"; do
               fam="$(family_of "$b")"
+              [[ "${requested_families}" == *"|${fam}|"* ]] || \
+                requested_families="${requested_families}|${fam}|"
               [[ "${seen_families}" == *"|${fam}|"* ]] && continue
               if gh api "repos/Seeed-Studio/armbian-build/contents/config/boards/${b}.conf?ref=${RESOLVED}" --silent >/dev/null 2>&1 ||
                  gh api "repos/Seeed-Studio/armbian-build/contents/config/boards/${b}.csc?ref=${RESOLVED}" --silent >/dev/null 2>&1; then
@@ -141,6 +144,14 @@ jobs:
               echo "::error::build_kernel requested, but no selected board can host a kernel at ${RESOLVED}."
               exit 1
             fi
+            # Every requested family must be covered: a missing family would
+            # publish without that kernel deb and still report success.
+            for fam in ${requested_families//|/ }; do
+              [[ "${seen_families}" == *"|${fam}|"* ]] || {
+                echo "::error::No ${fam} kernel host board at ${RESOLVED}; refusing to publish without that family's kernel."
+                exit 1
+              }
+            done
             # One kernel matrix entry per family, hosted on its first
             # selected board that exists at the resolved ref.
             for entry in "${kernel_boards[@]}"; do
