@@ -270,7 +270,7 @@ Encrypted A/B (auto-decrypt or secure boot):
 
 ### U-Boot Environment Variables
 
-The persistent U-Boot environment lives at raw offset `0x3f8000` (size `0x8000`) on the boot disk, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`.
+The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy; rk3576 boards), size `0x8000` each, on the boot disk, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`; writes alternate between the copies, so a torn write never destroys the last good copy.
 
 | Variable | Purpose |
 |----------|---------|
@@ -414,7 +414,7 @@ In `ota-support.sh` and `*/build-hooks/*.sh` (ordering matters):
 - Resize userdata service: `pre_umount_final_image__896_*` (`common/build-hooks/userdata-resize.sh`)
 - OTA payload pubkey install: `pre_umount_final_image__897_*` (`common/build-hooks/ota-payload-security.sh`)
 - OTA package creation (incl. payload encryption): `pre_umount_final_image__901_*` (`common/build-hooks/package-create.sh`)
-- Persistent U-Boot env prefill at 0x3f8000: `post_write_uboot_platform__910_*` (`common/build-hooks/uboot-env-prefill.sh`)
+- Persistent U-Boot env prefill at 0x3f8000 + 0x3f0000 (redundant copy): `post_write_uboot_platform__910_*` (`common/build-hooks/uboot-env-prefill.sh`)
 
 ## License
 

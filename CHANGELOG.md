@@ -63,6 +63,19 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Redundant U-Boot environment on rk3576 boards.** A staged U-Boot patch
+  makes `CONFIG_ENV_OFFSET_REDUND` selectable for the vendor block-device
+  env driver (its Kconfig entry was only reachable via ENVF) and defaults
+  it to `0x3f0000` — the 32 KiB directly below the `0x3f8000` primary env,
+  verified free between the sector-64 loader blob and the 8 MiB
+  u-boot.itb. U-Boot and libubootenv (two-entry `fw_env.config`) now
+  alternate writes between the two copies: a `saveenv` power cut leaves
+  the other copy intact, and both-copies-bad falls back to the compiled
+  default env (Rescue) as before. `uboot-env-prefill` stamps both copies
+  (`mkenvimage -r`), `fw_env_write_config`/`armbian-ota-init-uboot` write
+  two-entry configs, and the sanitize fallback stamps the redundant
+  layout. rk3588-devkit stays single-copy until its loader layout is
+  verified the same way.
 - **Env CRC self-heal works on trixie libubootenv.** `fw_env_crc_bad` now
   matches the trixie wording ("Cannot read environment") alongside the
   classic "Bad CRC", and `fw_env_set_multi` sanitizes a bad-CRC blob (zero

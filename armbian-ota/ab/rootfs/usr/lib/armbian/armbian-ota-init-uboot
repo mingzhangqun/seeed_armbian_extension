@@ -17,6 +17,7 @@ AB_ENV_LIB="${OTA_RUNTIME_DIR}/ab/env.sh"
 
 # U-Boot environment location. The device is detected at runtime.
 readonly AB_FW_ENV_OFFSET="0x3f8000"
+readonly AB_FW_ENV_REDUND_OFFSET="0x3f0000"
 readonly AB_FW_ENV_SIZE="0x8000"
 readonly AB_FW_ENV_ERASE_SIZE="0x1000"
 readonly AB_STATE_DIR="/var/lib/armbian-ota"
@@ -185,10 +186,15 @@ ensure_fw_env_config() {
     }
 
     mkdir -p /etc
-    printf '%s %s %s %s\n' \
-        "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}" \
-        > /etc/fw_env.config
-    log_info "Installed fw_env.config: ${fw_env_device} ${AB_FW_ENV_OFFSET} ${AB_FW_ENV_SIZE} ${AB_FW_ENV_ERASE_SIZE}"
+    # Two entries = redundant env mode: libubootenv alternates writes between
+    # the copies, so a torn write never destroys the last good env.
+    {
+        printf '%s %s %s %s\n' \
+            "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}"
+        printf '%s %s %s %s\n' \
+            "${fw_env_device}" "${AB_FW_ENV_REDUND_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}"
+    } > /etc/fw_env.config
+    log_info "Installed fw_env.config: ${fw_env_device} ${AB_FW_ENV_OFFSET}+${AB_FW_ENV_REDUND_OFFSET} ${AB_FW_ENV_SIZE} ${AB_FW_ENV_ERASE_SIZE}"
 }
 
 configure_ab_boot_environment() {
