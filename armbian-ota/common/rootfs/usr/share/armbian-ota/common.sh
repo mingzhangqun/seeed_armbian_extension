@@ -612,7 +612,8 @@ load_package_env_metadata() {
     err_file="$(mktemp 2>/dev/null)" || err_file="/tmp/ota-package-env.err.$$"
 
     listing="$(tar -tf "${package_path}" 2>"${err_file}")" || {
-        log_warn "Cannot list OTA package ${package_path}: $(head -n1 "${err_file}")"
+        # stderr only: this function's stdout is a value channel (see log_info above)
+        log_warn "Cannot list OTA package ${package_path}: $(head -n1 "${err_file}")" >&2
         rm -f "${err_file}"
         return 1
     }
@@ -624,7 +625,7 @@ load_package_env_metadata() {
 
     OTA_PACKAGE_ENV_PATH="${package_path}"
     OTA_PACKAGE_ENV_CONTENT="$(tar -xOf "${package_path}" "${manifest_entry}" 2>"${err_file}")" || {
-        log_warn "Cannot read ${manifest_entry} from ${package_path}: $(head -n1 "${err_file}")"
+        log_warn "Cannot read ${manifest_entry} from ${package_path}: $(head -n1 "${err_file}")" >&2
         rm -f "${err_file}"
         return 1
     }
