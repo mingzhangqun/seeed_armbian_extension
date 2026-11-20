@@ -41,10 +41,13 @@ function post_family_config__seeed_ota_stage_uboot_redundant_env() {
 	local extension_common_root patch_src
 	local boot_patch_dir target_dir target_patch
 
-	if [[ "${BOOT_SOC:-}" != "rk3576" ]]; then
-		display_alert "seeed-ota" "redundant env patch skipped (BOOT_SOC=${BOOT_SOC:-none})" "info"
-		return 0
-	fi
+	case "${BOOT_SOC:-}" in
+		rk3576 | rk3588) ;;
+		*)
+			display_alert "seeed-ota" "redundant env patch skipped (BOOT_SOC=${BOOT_SOC:-none})" "info"
+			return 0
+			;;
+	esac
 
 	extension_common_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 	patch_src="${extension_common_root}/patches/seeed-uboot-redundant-env.patch"

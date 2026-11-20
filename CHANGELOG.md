@@ -63,7 +63,7 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
-- **Redundant U-Boot environment on rk3576 boards.** A staged U-Boot patch
+- **Redundant U-Boot environment on rk3576/rk3588 boards.** A staged U-Boot patch
   makes `CONFIG_ENV_OFFSET_REDUND` selectable for the vendor block-device
   env driver (its Kconfig entry was only reachable via ENVF) and defaults
   it to `0x3f0000` — the 32 KiB directly below the `0x3f8000` primary env,
@@ -73,13 +73,16 @@ Covers the work against the initial import (merge base `9980aee`,
   the other copy intact, and both-copies-bad falls back to the compiled
   default env (Rescue) as before.
   The redundant format is gated everywhere the U-Boot patch is not:
-  `uboot-env-prefill` writes the `-r` dual copy only for `BOOT_SOC ==
-  rk3576` (single-copy boards keep the 4-byte-header blob), and the
+  `uboot-env-prefill` writes the `-r` dual copy only for `BOOT_SOC`
+  `rk3576`/`rk3588` (single-copy boards keep the 4-byte-header blob;
+  rk3588-devkit keeps U-Boot in partition 1, so its raw area below
+  16 MiB holds only idbloader + env, and prefill's assert_layout fails
+  the build if a loader ever crosses the env boundary), and the
   runtime `fw_env_write_config`/`armbian-ota-init-uboot` install the
   second `fw_env.config` entry only when `fw_env_probe_redundant` proves
-  the disk's blob parses as redundant format — so rk3588 boards and
-  devices still running a pre-redundant U-Boot (e.g. after a rootfs-only
-  OTA) stay single-copy instead of diverging from their bootloader.
+  the disk's blob parses as redundant format — so devices still
+  running a pre-redundant U-Boot (e.g. after a rootfs-only OTA) stay
+  single-copy instead of diverging from their bootloader.
   The both-copies-bad rebuild path is hardened: `fw_env_set_multi` no
   longer deletes the script file before the sanitize retry consumes it,
   and the sanitize stamps a build-generated minimal rescue env

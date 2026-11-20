@@ -5,10 +5,11 @@
 OTA_UBOOT_ENV_OFFSET_HEX="0x3f8000"       # CONFIG_ENV_OFFSET (env/Kconfig, ARCH_ROCKCHIP)
 OTA_UBOOT_ENV_REDUND_OFFSET_HEX="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
 OTA_UBOOT_ENV_SIZE_HEX="0x8000"           # CONFIG_ENV_SIZE
-# seeed-uboot-redundant-env.patch stages only for rk3576; other boards
-# need the 4-byte-header single-copy blob or their U-Boot reads bad-CRC.
+# rk3576/rk3588: redundant layout; other boards need the single-copy blob.
 OTA_UBOOT_ENV_REDUNDANT=0
-[[ "${BOOT_SOC:-}" == "rk3576" ]] && OTA_UBOOT_ENV_REDUNDANT=1
+case "${BOOT_SOC:-}" in
+    rk3576 | rk3588) OTA_UBOOT_ENV_REDUNDANT=1 ;;
+esac
 
 # mkenvimage discovery: the build container ships u-boot-tools, but fall back
 # to the binary produced by any local U-Boot compilation so image-only builds
