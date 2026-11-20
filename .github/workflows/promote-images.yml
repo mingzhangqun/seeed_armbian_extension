@@ -5,6 +5,11 @@ name: "Images - Release"
 
 on:
   workflow_dispatch:
+    inputs:
+      history_depth:
+        description: "Mirror history depth: old stable trees kept on OneDrive (0 purges them on promotion)"
+        default: "0"
+        required: false
 
 concurrency:
   group: images-mirror
@@ -34,14 +39,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
           GH_REPO: ${{ github.repository_owner }}/armbian-build
-          RCLONE_CONFIG: ${{ runner.home }}/.config/rclone/rclone.conf
-          HISTORY_DEPTH: "1"
+          # Empty input (API-triggered runs without inputs) falls back to 0.
+          HISTORY_DEPTH: ${{ inputs.history_depth || '0' }}
         run: |
           export RCLONE_CONFIG="$HOME/.config/rclone/rclone.conf"
           python3 .github/scripts/reconcile-image-mirror.py
 
   pages:
-    name: Deploy the images page (build-source repo's Pages)
+    name: Deploy the images page (release repo's gh-pages)
     needs: promote
     # An initialized but unpublished mirror has nothing to deploy; keep the
     # previous page intact until the first candidate pointer exists.
@@ -58,6 +63,9 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.promote.outputs.tag }}
+          # The page lives on the release repo's gh-pages branch (one
+          # site, one writer); the apt repository keeps the extension
+          # repo's own Pages site.
           repo: ${{ needs.promote.outputs.target_repo }}
           release_repo: ${{ needs.promote.outputs.target_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
