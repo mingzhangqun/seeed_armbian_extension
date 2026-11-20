@@ -39,18 +39,22 @@ function post_family_config__seeed_ota_stage_uboot_rescue_default_env() {
 # Stage the redundant-env U-Boot patch for rk3576 boards. The patch makes
 # CONFIG_ENV_OFFSET_REDUND selectable for the block-device env driver and
 # defaults it to 0x3f0000 (the 32 KiB directly below the 0x3f8000 primary
-# env, verified free between the sector-64 loader blob and the 8 MiB
-# u-boot.itb). rk3588-devkit stays single-copy until its image layout is
-# verified the same way. Same BOARD => same staging decision across build
-# flavors, so the U-Boot artifact hash stays stable per board.
+# env; rk3576 keeps u-boot.itb at the 8 MiB raw slot, rk3588 keeps U-Boot
+# in partition 1, so the raw area below holds only idbloader + env, and
+# prefill's assert_layout fails the build if a loader ever crosses the
+# boundary). Same BOARD => same staging decision across build flavors,
+# so the U-Boot artifact hash stays stable per board.
 function post_family_config__seeed_ota_stage_uboot_redundant_env() {
 	local extension_common_root patch_src
 	local boot_patch_dir target_dir target_patch
 
-	if [[ "${BOOT_SOC:-}" != "rk3576" ]]; then
-		display_alert "seeed-ota" "redundant env patch skipped (BOOT_SOC=${BOOT_SOC:-none})" "info"
-		return 0
-	fi
+	case "${BOOT_SOC:-}" in
+		rk3576 | rk3588) ;;
+		*)
+			display_alert "seeed-ota" "redundant env patch skipped (BOOT_SOC=${BOOT_SOC:-none})" "info"
+			return 0
+			;;
+	esac
 
 	extension_common_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 	patch_src="${extension_common_root}/patches/seeed-uboot-redundant-env.patch"
