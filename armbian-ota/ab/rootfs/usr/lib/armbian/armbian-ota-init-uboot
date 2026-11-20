@@ -17,6 +17,7 @@ AB_ENV_LIB="${OTA_RUNTIME_DIR}/ab/env.sh"
 
 # U-Boot environment location. The device is detected at runtime.
 readonly AB_FW_ENV_OFFSET="0x3f8000"
+readonly AB_FW_ENV_REDUND_OFFSET="0x3f0000"
 readonly AB_FW_ENV_SIZE="0x8000"
 readonly AB_FW_ENV_ERASE_SIZE="0x1000"
 readonly AB_STATE_DIR="/var/lib/armbian-ota"
@@ -176,6 +177,31 @@ detect_ab_boot_configuration() {
     log_info "  root_b: ${root_b_uuid:-<not found>}"
 }
 
+# Ask libubootenv which env format the bootloader writes; no parseable
+# copy falls back to single-copy (the legacy-safe read).
+fw_env_probe_redundant() {
+    local fw_env_device="$1" probe_cfg
+
+    probe_cfg="$(mktemp 2>/dev/null)" || return 1
+    printf '%s %s %s\n' "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" \
+        > "${probe_cfg}" 2>/dev/null || {
+        rm -f "${probe_cfg}" 2>/dev/null
+        return 1
+    }
+    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
+        rm -f "${probe_cfg}" 2>/dev/null
+        return 1
+    fi
+    printf '%s %s %s\n' "${fw_env_device}" "${AB_FW_ENV_REDUND_OFFSET}" "${AB_FW_ENV_SIZE}" \
+        >> "${probe_cfg}" 2>/dev/null
+    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
+        rm -f "${probe_cfg}" 2>/dev/null
+        return 0
+    fi
+    rm -f "${probe_cfg}" 2>/dev/null
+    return 1
+}
+
 ensure_fw_env_config() {
     local boot_part_dev="$1" fw_env_device
 
@@ -185,10 +211,19 @@ ensure_fw_env_config() {
     }
 
     mkdir -p /etc
-    printf '%s %s %s %s\n' \
-        "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}" \
-        > /etc/fw_env.config
-    log_info "Installed fw_env.config: ${fw_env_device} ${AB_FW_ENV_OFFSET} ${AB_FW_ENV_SIZE} ${AB_FW_ENV_ERASE_SIZE}"
+    # Two entries = redundant env mode (torn-write safe); the second entry
+    # only when the disk's blob proves the U-Boot reads that format.
+    local env_extra=""
+    {
+        printf '%s %s %s %s\n' \
+            "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}"
+        if fw_env_probe_redundant "${fw_env_device}"; then
+            env_extra=" + ${AB_FW_ENV_REDUND_OFFSET} redundant"
+            printf '%s %s %s %s\n' \
+                "${fw_env_device}" "${AB_FW_ENV_REDUND_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}"
+        fi
+    } > /etc/fw_env.config
+    log_info "Installed fw_env.config: ${fw_env_device} ${AB_FW_ENV_OFFSET}${env_extra} ${AB_FW_ENV_SIZE} ${AB_FW_ENV_ERASE_SIZE}"
 }
 
 configure_ab_boot_environment() {
