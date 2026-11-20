@@ -169,13 +169,10 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### OTA payload security
 
-- **Release gate active on trunk images.** `ota_check_board_release` now
-  falls back to the `/etc/os-release` `VERSION_CODENAME` when
-  `/etc/armbian-release` carries no `RELEASE=` (upstream never stamps it),
-  so cross-release OTA is refused on every image, not only stamped ones.
-  Debian sid images resolve via `/etc/debian_version` (`trixie/sid`), since
-  os-release carries the testing codename there; Ubuntu's inherited
-  `x/sid` debian_version is ignored (`ID=debian` gate).
+- **Release gate on the build-stamped truth.** Image finalize stamps
+  `RELEASE` into `/etc/armbian-image-release` (next to `IMAGE_VARIANT`)
+  and `ota_check_board_release` compares it against `package.env`;
+  unstamped images skip the release check (BOARD always applies).
 - **zstd capability is probed, not declared.** `OTA_RUNTIME_FORMATS` lists
   `zst` only when the zstd CLI exists, so a zst package fed to an image
   without zstd is refused at negotiation instead of misreporting
@@ -184,6 +181,11 @@ Covers the work against the initial import (merge base `9980aee`,
   extraction failures surface their real cause. A/B images now install
   zstd (recovery parity) so `--ota-format zstd` packages decode on every
   A/B device instead of depending on incidental desktop-stack deps.
+- **Image identity stamps consolidated into `armbian-image-release`.**
+  `IMAGE_VARIANT` and `SEEED_EXTENSION_REPO/COMMIT` are stamped at image
+  finalize (after the framework's release snapshot, so they cannot be
+  clobbered); the device variant gate falls back to the legacy
+  `/etc/armbian-ota-image` for pre-existing devices.
 - **Encrypted and signed OTA payloads.** On encrypted-rootfs images the OTA
   packaging encrypts `rootfs.tar.gz` (AES-256-CBC, key derived from the
   LUKS passphrase via HKDF-SHA256) and signs `payload.manifest` (IV, plaintext
@@ -329,7 +331,8 @@ Covers the work against the initial import (merge base `9980aee`,
   compatibility path.
 - **Release provenance.** GitHub Releases target the exact armbian-build
   commit used for the image build, including cross-repository Releases.
-  `/etc/armbian-release` records only the extension commit, not a mutable ref.
+  `/etc/armbian-image-release` records only the extension commit, not a
+  mutable ref.
 
 - **PR #37 hardening: OTA integrity, mirror safety and CI fail-closed
   behavior.** A/B staging now reuses the mounted userdata overlay upper
@@ -471,9 +474,9 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Removed
 
-- **Mutable extension ref in release metadata.** `/etc/armbian-release` keeps
-  the immutable `SEEED_EXTENSION_COMMIT`; `SEEED_EXTENSION_REF` is no longer
-  recorded.
+- **Mutable extension ref in release metadata.** `/etc/armbian-image-release`
+  keeps the immutable `SEEED_EXTENSION_COMMIT`; `SEEED_EXTENSION_REF` is no
+  longer recorded.
 - **Legacy OTA mirror test harness.** The unused
   `.github/scripts/test_image_mirror.py` is removed; mirror coverage checks
   remain in the OCR/publishing pipeline.
