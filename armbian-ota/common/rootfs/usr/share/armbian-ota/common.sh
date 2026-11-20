@@ -169,8 +169,9 @@ ota_assert_payload_matches_system() {
 # FIT, and a cross-release flash silently switches the distro. Requires the
 # package metadata cache (load_package_env_metadata). The package side must
 # carry both fields (package-create.sh always stamps them -- absence means a
-# broken or hand-mangled package); the device side is read from
-# /etc/armbian-release and only enforced when readable. RELEASE honors
+# broken or hand-mangled package); the device side is the build-stamped
+# RELEASE from /etc/armbian-image-release (exact truth). Unstamped images
+# skip the release check. RELEASE honors
 # OTA_CLI_ALLOW_RELEASE_CHANGE (CLI --allow-release-change) as the explicit
 # distro-migration escape hatch; BOARD never gets one.
 ota_check_board_release() {
@@ -182,7 +183,9 @@ ota_check_board_release() {
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
     sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
-    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
+    # Build-stamped truth: the image identity file carries RELEASE= next to
+    # IMAGE_VARIANT (rootfs-install hook, image finalize).
+    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -201,7 +204,10 @@ ota_check_image_variant() {
     local package_variant system_variant
 
     package_variant="$(package_env_get_value "IMAGE_VARIANT" || true)"
-    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
+    # Legacy devices pre-date the armbian-image-release stamp.
+    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    [ -n "${system_variant}" ] ||
+        system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
     if [ -z "${package_variant}" ] || [ -z "${system_variant}" ]; then
         log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping legacy variant gate"
         return 0
@@ -347,8 +353,11 @@ ota_check_payload_capacity() {
 # armbian-ota deb version; bump it whenever OTA_RUNTIME_FORMATS or the apply
 # hook contract changes. Packages declare PAYLOAD_FORMAT / MIN_RUNTIME_VERSION
 # in package.env and phase 1 negotiates against these (docs/10-ota-package-formats.md).
-OTA_RUNTIME_VERSION="1.3"
-OTA_RUNTIME_FORMATS="gz xz zst"
+OTA_RUNTIME_VERSION="1.4"
+# zst is declared only when the zstd CLI exists (tar --zstd depends on it);
+# images without zstd then refuse zst packages at negotiation.
+OTA_RUNTIME_FORMATS="gz xz"
+command -v zstd >/dev/null 2>&1 && OTA_RUNTIME_FORMATS="${OTA_RUNTIME_FORMATS} zst"
 OTA_HOOK_API="1"
 OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
 # Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.
@@ -586,23 +595,36 @@ ota_require_runtime() {
 
 load_package_env_metadata() {
     local package_path="$1"
-    local manifest_entry
+    local manifest_entry err_file listing
 
     if [ "${OTA_PACKAGE_ENV_PATH:-}" = "${package_path}" ] && [ -n "${OTA_PACKAGE_ENV_CONTENT+x}" ]; then
         return 0
     fi
 
     log_info "Reading OTA package metadata from ${package_path}" >&2
-    manifest_entry="$(
-        tar -tf "${package_path}" 2>/dev/null \
-            | awk '/(^|\/)package\.env$/ { print; exit }'
-    )"
+    # Propagate tar's stderr so a failed listing/extraction reports its real
+    # cause (unreadable file, unsupported compression), not "missing package.env".
+    err_file="$(mktemp 2>/dev/null)" || err_file="/tmp/ota-package-env.err.$$"
+
+    listing="$(tar -tf "${package_path}" 2>"${err_file}")" || {
+        # stderr only: this function's stdout is a value channel (see log_info above)
+        log_warn "Cannot list OTA package ${package_path}: $(head -n1 "${err_file}")" >&2
+        rm -f "${err_file}"
+        return 1
+    }
+    manifest_entry="$(printf '%s\n' "${listing}" | awk '/(^|\/)package\.env$/ { print; exit }')"
     if [ -z "${manifest_entry}" ]; then
+        rm -f "${err_file}"
         return 1
     fi
 
     OTA_PACKAGE_ENV_PATH="${package_path}"
-    OTA_PACKAGE_ENV_CONTENT="$(tar -xOf "${package_path}" "${manifest_entry}" 2>/dev/null)" || return 1
+    OTA_PACKAGE_ENV_CONTENT="$(tar -xOf "${package_path}" "${manifest_entry}" 2>"${err_file}")" || {
+        log_warn "Cannot read ${manifest_entry} from ${package_path}: $(head -n1 "${err_file}")" >&2
+        rm -f "${err_file}"
+        return 1
+    }
+    rm -f "${err_file}"
 }
 
 package_env_get_value() {

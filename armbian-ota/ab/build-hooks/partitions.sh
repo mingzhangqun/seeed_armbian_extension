@@ -1,9 +1,12 @@
 # A/B partition layout and policy
 
 function extension_prepare_config__install_overlayroot_userdata() {
-    display_alert "A/B partition OTA" "install overlayroot, busybox-static and libubootenv-tool" "info"
+    display_alert "A/B partition OTA" "install overlayroot, busybox-static, libubootenv-tool and zstd" "info"
     ota_install_overlayroot_dependencies
-    add_packages_to_image libubootenv-tool
+    # Mirror recovery: zstd backs the zst payload decode (ab target.sh) and
+    # the OTA_RUNTIME_FORMATS capability probe; without it zst packages built
+    # with --ota-format zstd would be refused on every A/B device.
+    add_packages_to_image libubootenv-tool zstd
 }
 
 function pre_prepare_partitions__ab_part_ota() {
