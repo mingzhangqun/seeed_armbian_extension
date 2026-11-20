@@ -75,7 +75,12 @@ Covers the work against the initial import (merge base `9980aee`,
   (`mkenvimage -r`), `fw_env_write_config`/`armbian-ota-init-uboot` write
   two-entry configs, and the sanitize fallback stamps the redundant
   layout. rk3588-devkit stays single-copy until its loader layout is
-  verified the same way.
+  verified the same way. The recovery initramfs also stages
+  `/etc/u-boot-initial-env` (same image, same U-Boot build) as the
+  libubootenv merge base: a both-copies-bad rebuild then writes
+  directly instead of hitting the write refusal (which was the real
+  trixie root cause — no default file, not the CRC itself), keeping the
+  sanitize fallback as the last resort only.
 - **Env CRC self-heal works on trixie libubootenv.** `fw_env_crc_bad` now
   matches the trixie wording ("Cannot read environment") alongside the
   classic "Bad CRC", and `fw_env_set_multi` sanitizes a bad-CRC blob (zero
