@@ -63,6 +63,33 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Redundant U-Boot environment on rk3576 boards.** A staged U-Boot patch
+  makes `CONFIG_ENV_OFFSET_REDUND` selectable for the vendor block-device
+  env driver (its Kconfig entry was only reachable via ENVF) and defaults
+  it to `0x3f0000` — the 32 KiB directly below the `0x3f8000` primary env,
+  verified free between the sector-64 loader blob and the 8 MiB
+  u-boot.itb. U-Boot and libubootenv (two-entry `fw_env.config`) then
+  alternate writes between the two copies: a `saveenv` power cut leaves
+  the other copy intact, and both-copies-bad falls back to the compiled
+  default env (Rescue) as before.
+  The redundant format is gated everywhere the U-Boot patch is not:
+  `uboot-env-prefill` writes the `-r` dual copy only for `BOOT_SOC ==
+  rk3576` (single-copy boards keep the 4-byte-header blob), and the
+  runtime `fw_env_write_config`/`armbian-ota-init-uboot` install the
+  second `fw_env.config` entry only when `fw_env_probe_redundant` proves
+  the disk's blob parses as redundant format — so rk3588 boards and
+  devices still running a pre-redundant U-Boot (e.g. after a rootfs-only
+  OTA) stay single-copy instead of diverging from their bootloader.
+  The both-copies-bad rebuild path is hardened: `fw_env_set_multi` no
+  longer deletes the script file before the sanitize retry consumes it,
+  and the sanitize stamps a build-generated minimal rescue env
+  (`env-sanitize-{redundant,single}.bin`, filtered from the same
+  compiled default env this image's U-Boot ships, staged into the
+  recovery initramfs as required files) instead of a valid-CRC empty
+  blob, so a power cut between sanitize and the rewrite boots into
+  Rescue instead of hanging autoboot at the prompt. The recovery build
+  also installs `/etc/u-boot-initial-env` into the recovery rootfs as
+  the native fw_setenv merge base for rootfs-side rebuilds.
 - **Env CRC self-heal works on trixie libubootenv.** `fw_env_crc_bad` now
   matches the trixie wording ("Cannot read environment") alongside the
   classic "Bad CRC", and `fw_env_set_multi` sanitizes a bad-CRC blob (zero

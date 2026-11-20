@@ -11,8 +11,9 @@
 # which would silently drop every other variable).
 
 OTA_FW_ENV_CONFIG="${OTA_FW_ENV_CONFIG:-/etc/fw_env.config}"
-OTA_FW_ENV_OFFSET="0x3f8000"   # CONFIG_ENV_OFFSET (vendor env_blk)
-OTA_FW_ENV_SIZE="0x8000"       # CONFIG_ENV_SIZE
+OTA_FW_ENV_OFFSET="0x3f8000"        # CONFIG_ENV_OFFSET (vendor env_blk)
+OTA_FW_ENV_REDUND_OFFSET="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
+OTA_FW_ENV_SIZE="0x8000"            # CONFIG_ENV_SIZE
 
 # Whole-disk device backing partition device $1, via sysfs parent walk.
 # /dev/mmcblk0p3 -> /dev/mmcblk0, /dev/nvme0n1p3 -> /dev/nvme0n1.
@@ -62,14 +63,44 @@ fw_env_boot_disk() {
     [ -n "${anchor_dev}" ] && fw_env_parent_disk "${anchor_dev}"
 }
 
-# (Re)write /etc/fw_env.config for boot disk $1. Idempotent.
+# Ask libubootenv which format the bootloader writes: single-entry and
+# two-entry probe configs parse the CRC spans mutually exclusively.
+fw_env_probe_redundant() {
+    probe_disk="$1"
+
+    probe_cfg="$(mktemp 2>/dev/null)" || return 1
+    printf '%s\t%s\t%s\n' "${probe_disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}" \
+        > "${probe_cfg}" 2>/dev/null || {
+        rm -f "${probe_cfg}" 2>/dev/null || true
+        return 1
+    }
+    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
+        rm -f "${probe_cfg}" 2>/dev/null || true
+        return 1
+    fi
+    printf '%s\t%s\t%s\n' "${probe_disk}" "${OTA_FW_ENV_REDUND_OFFSET}" "${OTA_FW_ENV_SIZE}" \
+        >> "${probe_cfg}" 2>/dev/null
+    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
+        rm -f "${probe_cfg}" 2>/dev/null || true
+        return 0
+    fi
+    rm -f "${probe_cfg}" 2>/dev/null || true
+    return 1
+}
+
+# (Re)write /etc/fw_env.config for boot disk $1. Idempotent; the second
+# (redundant) entry only when the disk's blob proves the U-Boot reads it.
 fw_env_write_config() {
     disk="$1"
 
     [ -b "${disk}" ] || return 1
     mkdir -p "$(dirname "${OTA_FW_ENV_CONFIG}")" 2>/dev/null || return 1
-    printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}" \
-        > "${OTA_FW_ENV_CONFIG}" || return 1
+    {
+        printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}"
+        if fw_env_probe_redundant "${disk}"; then
+            printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_REDUND_OFFSET}" "${OTA_FW_ENV_SIZE}"
+        fi
+    } > "${OTA_FW_ENV_CONFIG}" || return 1
     return 0
 }
 
@@ -117,9 +148,10 @@ fw_env_crc_bad() {
     [ -z "${env_list}" ]
 }
 
-# Sanitize a bad-CRC env blob: zero it and stamp the CRC32 of the zeroed
-# data (a valid EMPTY env). trixie libubootenv refuses to write a bad-CRC
-# env outright, so fw_setenv needs this before any rebuild write.
+# Sanitize a bad-CRC copy: dd the build-generated minimal rescue blob
+# (from this image's compiled default env; valid CRC, boots into Rescue
+# if power is lost before the rewrite). Blob choice by config layout:
+# second entry = redundant, otherwise single-copy.
 fw_env_repair_blob() {
     set -- $(awk 'NR==1 && !/^#/ {print $1, $2, $3; exit}' "${OTA_FW_ENV_CONFIG}" 2>/dev/null)
     [ -b "$1" ] || return 1
@@ -127,14 +159,17 @@ fw_env_repair_blob() {
     fw_env_repair_off="${2:-${OTA_FW_ENV_OFFSET}}"
     fw_env_repair_sz="${3:-${OTA_FW_ENV_SIZE}}"
 
-    dd if=/dev/zero of="${fw_env_repair_disk}" \
-        bs=1 seek=$((fw_env_repair_off)) count=$((fw_env_repair_sz)) \
-        conv=notrunc 2>/dev/null || return 1
-    # crc32(0x7ffc zero bytes) = 0xb52d2b04, little-endian, for the default
-    # 0x8000 blob; other sizes still yield a readable empty env via the
-    # classic bad-CRC fallback, so the constant only needs the common case.
-    printf '\004\053\055\265' | dd of="${fw_env_repair_disk}" \
-        bs=1 seek=$((fw_env_repair_off)) conv=notrunc 2>/dev/null || return 1
+    [ "${fw_env_repair_sz}" = "0x8000" ] || return 1
+
+    if [ -n "$(sed -n '2,$p' "${OTA_FW_ENV_CONFIG}" 2>/dev/null | grep -v '^[[:space:]]*#' | grep -m1 '[^[:space:]]')" ]; then
+        fw_env_repair_bin="/usr/share/armbian-ota/env-sanitize-redundant.bin"
+    else
+        fw_env_repair_bin="/usr/share/armbian-ota/env-sanitize-single.bin"
+    fi
+    [ -s "${fw_env_repair_bin}" ] || return 1
+
+    dd if="${fw_env_repair_bin}" of="${fw_env_repair_disk}" \
+        bs=512 seek=$((fw_env_repair_off / 512)) conv=notrunc 2>/dev/null || return 1
     return 0
 }
 
@@ -180,18 +215,18 @@ fw_env_set_multi() {
 
     set_err="${TMPDIR:-/tmp}/fwenv.set.$$.err"
     fw_setenv -s "${script_file}" 2>"${set_err}" || {
-        rm -f "${script_file}" 2>/dev/null || true
+        # script_file must survive until the retry below consumes it.
         if [ "${full_set}" -eq 0 ] || \
            ! { grep -qiE "bad crc|cannot read environment|failed to read environment" "${set_err}" || fw_env_crc_bad; }; then
             # Partial writers, and any failure that is not a confirmed
             # bad-CRC refusal, fail with the blob untouched.
             cat "${set_err}" >&2
-            rm -f "${set_err}" 2>/dev/null || true
+            rm -f "${set_err}" "${script_file}" 2>/dev/null || true
             return 1
         fi
         rm -f "${set_err}" 2>/dev/null || true
         # trixie libubootenv refuses to write a bad-CRC env; sanitize the
-        # blob to a valid empty env and retry once (full-set callers only).
+        # blob to a valid rescue env and retry once (full-set callers only).
         echo "fwenv: WARNING sanitizing env blob (bad CRC) before full-set rewrite" >&2
         fw_env_repair_blob 2>/dev/null || true
         fw_setenv -s "${script_file}" || {
@@ -202,8 +237,7 @@ fw_env_set_multi() {
             return 1
         }
     }
-    rm -f "${set_err}" 2>/dev/null || true
-    rm -f "${script_file}" 2>/dev/null || true
+    rm -f "${set_err}" "${script_file}" 2>/dev/null || true
 
     for kv in "$@"; do
         key="${kv%%=*}"
