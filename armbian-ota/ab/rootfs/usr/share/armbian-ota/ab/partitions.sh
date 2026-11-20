@@ -1,4 +1,11 @@
 # A/B slot topology and partition discovery helpers.
+# fwenv.sh provides the shared POSIX boot-disk/parent-disk primitives.
+
+[ -r "${OTA_RUNTIME_DIR}/fwenv.sh" ] || {
+    echo "ERROR: fw_env helper not found: ${OTA_RUNTIME_DIR}/fwenv.sh" >&2
+    return 1
+}
+. "${OTA_RUNTIME_DIR}/fwenv.sh"
 
 BOOT_A_LABEL="armbi_boota"
 BOOT_B_LABEL="armbi_bootb"
@@ -90,35 +97,12 @@ ab_resolve_physical_part_dev() {
     echo "${dev}"
 }
 
-# Disk U-Boot actually loaded the boot image from, passed on the kernel
-# command line by the bootcmd common prefix (armbian.bootdev/bootdevnum).
-# Identical cloned A/B images on several disks expose duplicate filesystem
-# LABELs and PARTLABELs, so a first blkid match may address the wrong disk;
-# partition discovery below prefers partitions of this disk when the tokens
-# are present. Missing tokens (single disk, legacy bootcmd) keep first-match.
+# Disk U-Boot actually loaded the boot image from (cmdline tokens, shared
+# impl in fwenv.sh). Identical cloned A/B images on several disks expose
+# duplicate filesystem LABELs and PARTLABELs, so the discovery below prefers
+# partitions of this disk; missing tokens keep first-match.
 ab_boot_disk() {
-    local token devtype devnum
-
-    for token in $(cat /proc/cmdline 2>/dev/null); do
-        case "${token}" in
-            armbian.bootdev=*) devtype="${token#armbian.bootdev=}" ;;
-            armbian.bootdevnum=*) devnum="${token#armbian.bootdevnum=}" ;;
-        esac
-    done
-
-    case "${devtype:-}" in
-        mmc)
-            [ -b "/dev/mmcblk${devnum:-}" ] || return 1
-            echo "/dev/mmcblk${devnum}"
-            ;;
-        nvme)
-            [ -b "/dev/nvme${devnum:-}n1" ] || return 1
-            echo "/dev/nvme${devnum}n1"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    fw_env_boot_disk ""
 }
 
 # First blkid device match for KEY=value, restricted to partitions of $disk

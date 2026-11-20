@@ -607,7 +607,7 @@ ota_patch_config() {
 
     # fallback UUID detection (just in case), anchored to the boot disk so a
     # clone disk with duplicate labels does not answer for the boot device
-    _ota_disk="$(recovery_boot_disk || true)"
+    _ota_disk="$(fw_env_boot_disk || true)"
     if [ "${AUTO_DECRYPT_MODE}" -eq 1 ]; then
         [ -z "$ROOT_UUID" ] && ROOT_UUID="$(get_luks_uuid_for_root)"
     else
