@@ -17,8 +17,11 @@ ab_get_security_part() {
     root_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
     [ -n "${root_src}" ] || root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
     part="$(ab_resolve_physical_part_dev "${root_src:-}" 2>/dev/null || true)"
-    if [ -n "${part}" ]; then
+    if [ -n "${part}" ] && [ -e "${part}" ]; then
         disk="$(lsblk -no PKNAME "${part}" 2>/dev/null | head -n1 || true)"
+        # lsblk PKNAME emits bare kernel names; the blkid filter matches
+        # /dev/ paths, so re-prefix
+        [ -n "${disk}" ] && disk="/dev/${disk}"
     fi
     if [ -n "${disk}" ]; then
         dev="$(blkid -t PARTLABEL=security -o device 2>/dev/null |

@@ -759,11 +759,16 @@ ota_get_security_part() {
     part="${root_src}"
     case "${root_src}" in
         /dev/mapper/*|/dev/dm-*)
+            # lsblk PKNAME emits bare kernel names (mmcblk0p5, no /dev/);
+            # lsblk itself rejects those as inputs, so re-prefix them.
             part="$(lsblk -snro PKNAME "${root_src}" 2>/dev/null | head -n1 || true)"
+            [ -n "${part}" ] && part="/dev/${part}"
             ;;
     esac
-    if [ -n "${part}" ]; then
+    if [ -n "${part}" ] && [ -e "${part}" ]; then
         disk="$(lsblk -no PKNAME "${part}" 2>/dev/null | head -n1 || true)"
+        # same bare-name rule: the blkid filter below matches /dev/ paths
+        [ -n "${disk}" ] && disk="/dev/${disk}"
     fi
     if [ -n "${disk}" ]; then
         dev="$(blkid -t PARTLABEL=security -o device 2>/dev/null |
