@@ -5,13 +5,16 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from image_mirror_common import (
     ImageMirrorError,
     command,
     decode,
+    kernel_repo_from_notes,
     parse_slots,
+    pipeline_owned,
     references,
 )
 
@@ -154,7 +157,7 @@ class Mirror:
                 continue
             if self.slots() != expected:
                 raise ReconcileError("slots.json changed during GC; stopping before legacy purge")
-            self.call("purge", f"{self.base}/{directory}")
+            self.purge(f"{self.base}/{directory}")
         for tag in self.dirs("trees"):
             if tag in references(current):
                 continue
@@ -163,7 +166,13 @@ class Mirror:
                     f"slots.json changed during GC; preserving tree {tag}"
                 )
             print(f"purging expired mirror tree {tag}; retaining its GitHub Release")
-            self.call("purge", f"{self.base}/trees/{tag}")
+            self.purge(f"{self.base}/trees/{tag}")
+
+    def purge(self, path):
+        # OneDrive keeps purged items in the recycle bin, still counted
+        # against quota. --onedrive-hard-delete (rclone >= 1.67, drive_type
+        # business) issues a Graph permanentDelete so the space is freed.
+        self.call("purge", path, "--onedrive-hard-delete")
 
 
 class Releases:
@@ -255,13 +264,49 @@ class Releases:
         if state["isDraft"] or not state["isPrerelease"] or state["assets"]:
             print(f"keeping {tag}: draft, stable, or has assets")
             return
-        owned = re.search(
-            rf"{re.escape(self.workflow_repo)}/actions/runs/\d+\b", state["body"] or ""
-        )
+        owned = pipeline_owned(state["body"] or "", self.workflow_repo)
         if not owned:
             print(f"keeping {tag}: not owned by this pipeline")
             return
         self.call("release", "delete", tag, "--yes", "--cleanup-tag")
+
+    def gc_stale_drafts(self, slots, releases, age_days=90):
+        # A cancelled or re-run-all'd attempt can leave an owned, asset-less
+        # draft Release with no slots.json pointer (retire keys on the
+        # pointer, so nothing replaces it). Sweep those past the failed-job
+        # rerun window — runs stay re-runnable for the whole retention
+        # period (90 days default) and a failed-job rerun never re-runs the
+        # already-successful draft-creation step — together with their
+        # source tags. Re-run-all recreates its draft via the create-step
+        # replace block.
+        referenced = references(slots)
+        now = datetime.now(timezone.utc)
+        for release in releases:
+            tag = release["tagName"]
+            if not release["isDraft"] or tag in referenced:
+                continue
+            state = self.view(tag, ["createdAt", "assets", "body"])
+            if state["assets"]:
+                print(f"keeping draft {tag}: it holds assets")
+                continue
+            body = state["body"] or ""
+            if not pipeline_owned(body, self.workflow_repo):
+                print(f"keeping draft {tag}: not owned by this pipeline")
+                continue
+            created = datetime.fromisoformat(
+                state["createdAt"].replace("Z", "+00:00")
+            )
+            if (now - created).days < age_days:
+                print(f"keeping draft {tag}: within the rerun-resume window")
+                continue
+            self.call("release", "delete", tag, "--yes", "--cleanup-tag")
+            kernel_repo = kernel_repo_from_notes(body)
+            for repo in [self.workflow_repo] + ([kernel_repo] if kernel_repo else []):
+                try:
+                    self.api("DELETE", f"repos/{repo}/git/refs/tags/{tag}")
+                except ReconcileError:
+                    pass  # the ref is already absent (or not ours to touch)
+            print(f"gc: removed stale draft {tag} and its source tags")
 
     def reconcile_history(self, slots, releases):
         referenced = references(slots)
@@ -299,7 +344,7 @@ class Releases:
             print(f"marked expired mirror retention on retained Release {tag}")
 
 
-def reconcile(mirror, releases, depth=1):
+def reconcile(mirror, releases, depth=0):
     if depth < 0:
         raise ReconcileError("HISTORY_DEPTH must be >= 0")
     old = mirror.slots()
@@ -399,7 +444,7 @@ def reconcile(mirror, releases, depth=1):
         # Clean legacy directories independently of whether a stable exists.
         for directory in mirror.dirs(""):
             if directory in ("pre-release", "stable", "previous"):
-                mirror.call("purge", f"{mirror.base}/{directory}")
+                mirror.purge(f"{mirror.base}/{directory}")
         mirror.gc(desired)
         releases.remove_dangling(repaired, release_list)
         releases.reconcile_history(desired, release_list)
@@ -411,6 +456,7 @@ def reconcile(mirror, releases, depth=1):
         releases.mark_latest(stable)
     mirror.gc(desired)
     releases.reconcile_history(desired, releases.list())
+    releases.gc_stale_drafts(desired, releases.list())
     return {"tag": stable or "", "mode": mode}
 
 
@@ -423,7 +469,7 @@ def main():
     releases = Releases(repo, os.environ["GITHUB_REPOSITORY"])
     result = reconcile(
         mirror, releases,
-        int(os.environ.get("HISTORY_DEPTH", "1")),
+        int(os.environ.get("HISTORY_DEPTH", "0")),
     )
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
