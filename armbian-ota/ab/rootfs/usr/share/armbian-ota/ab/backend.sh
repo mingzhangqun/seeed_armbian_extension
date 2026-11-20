@@ -137,7 +137,6 @@ ab_start_ota() {
     target_boot_label="$(ab_get_slot_boot_label "${target_slot}")"
     target_root_label="$(ab_get_slot_root_label "${target_slot}")"
     ab_check_capacity "${target_root_label}" "${target_boot_label}"
-    ota_assert_dual_payload "${package_path}"
 
     # Stage in the existing userdata overlay upper. Never open or mount its
     # backing ext4 a second time: it is already live at /media/root-rw.
@@ -146,6 +145,7 @@ ab_start_ota() {
 
     temp_work="$(make_ota_work_dir "ab-package")"
     extract_ota_package "${package_path}" "${temp_work}"
+    ota_assert_dual_payload "${temp_work}"
     ota_assert_payload_matches_system "${temp_work}"
     ota_verify_payload "${temp_work}" \
         "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
