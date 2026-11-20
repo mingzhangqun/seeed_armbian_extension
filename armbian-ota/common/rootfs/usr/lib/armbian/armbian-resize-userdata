@@ -5,6 +5,7 @@ set -euo pipefail
 SERVICE_NAME="armbian-resize-userdata.service"
 USERDATA_PARTLABEL="userdata"
 USERDATA_FSLABEL="armbi_usrdata"
+LUKS_PASSPHRASE_FILE="/run/armbian-luks-passphrase"
 ALIGN_BYTES=$((16 * 1024 * 1024))
 RETRY_EXIT_STATUS=75
 
@@ -150,12 +151,14 @@ resize_ext4_filesystem() {
 
 resize_luks_mapping() {
     local userdata_part="$1" mapper_name="$2"
-    local table table_size target_type data_offset userdata_size target_size new_table
+    local table table_size target_type data_offset userdata_size target_size
 
     command -v blockdev >/dev/null 2>&1 ||
         fail "blockdev is required to resize encrypted userdata"
     command -v dmsetup >/dev/null 2>&1 ||
         fail "dmsetup is required to resize encrypted userdata"
+    command -v cryptsetup >/dev/null 2>&1 ||
+        fail "cryptsetup is required to resize encrypted userdata"
 
     table="$(dmsetup table "${mapper_name}" 2>/dev/null)" ||
         fail "failed to read LUKS mapping ${mapper_name}"
@@ -181,16 +184,18 @@ resize_luks_mapping() {
         return 0
     fi
 
-    new_table="$(printf '%s\n' "${table}" | awk -v size="${target_size}" 'NR == 1 { $2 = size } { print }')"
+    # dmsetup table reload re-feeds the (masked) key and always fails on
+    # LUKS2; cryptsetup resize grows the mapping online via the kernel key.
     log "resizing LUKS mapping ${mapper_name} to ${target_size} sectors"
-    dmsetup suspend "${mapper_name}" ||
-        fail "failed to suspend LUKS mapping ${mapper_name}"
-    if ! printf '%s\n' "${new_table}" | dmsetup load "${mapper_name}"; then
-        dmsetup resume "${mapper_name}" || warn "failed to resume ${mapper_name} after loading error"
-        fail "failed to load resized LUKS mapping ${mapper_name}"
+    # No TTY in the service: without a key source cryptsetup dies with
+    # "Nothing to read on input". Use the initramfs-stashed passphrase.
+    if [ -r "${LUKS_PASSPHRASE_FILE}" ]; then
+        cryptsetup resize "${mapper_name}" --key-file "${LUKS_PASSPHRASE_FILE}" ||
+            fail "failed to resize LUKS mapping ${mapper_name}"
+    else
+        cryptsetup resize "${mapper_name}" ||
+            fail "failed to resize LUKS mapping ${mapper_name}"
     fi
-    dmsetup resume "${mapper_name}" ||
-        fail "failed to resume resized LUKS mapping ${mapper_name}"
 }
 
 find_userdata_partition() {
@@ -398,10 +403,8 @@ main() {
             resize_ext4_filesystem "${userdata_part}"
             ;;
         crypto_LUKS)
-            if [ "${resize_status}" -eq 0 ]; then
-                warn "encrypted userdata partition resized; reboot is required to reopen the LUKS mapper before resizing its ext4 filesystem"
-                return 0
-            fi
+            # One stage: cryptsetup resize grows the mapping online in the
+            # same boot the partition grew; no mapper-reopen reboot needed.
             resize_luks_userdata "${userdata_part}"
             ;;
         *)
