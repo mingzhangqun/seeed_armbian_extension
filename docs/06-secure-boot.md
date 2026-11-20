@@ -234,8 +234,8 @@ The subtlety: U-Boot's FIT signature check only guards the `bootm` path.
 boot.img are unverified launch paths, and the env blob that selects
 between them lives **unsigned on the OS disk** — a plain image's blob
 steers whichever loader reads it. Enforcement therefore has to remove
-the launch commands from the verifying binary, not just script the good
-path. Three pieces do that:
+the launch commands from the binary whose trust level forbids them, not
+just script the good path. Four pieces do that:
 
 1. **Secure U-Boot Kconfig fragments** disable every unverified launch
    command:
@@ -249,10 +249,28 @@ path. Three pieces do that:
    patch](../armbian-ota/common/patches/seeed-ota-rescue-default-env.patch)):
    `DISTRO_DEFAULTS` `select`s `CMD_BOOTI` on ARM64, so it cannot be
    Kconfig-disabled; `do_booti` returns failure on `FIT_SIGNATURE`
-   builds instead. Plain builds compile both the command and the full
-   rescue chain unchanged. The same patch compiles the default-env
+   builds instead. Plain builds keep the command and the booti-based
+   rescue chain. The same patch compiles the default-env
    rescue dispatcher down to the signed recovery-FIT branch only.
-3. **The initramfs refuses the raw passphrase without OP-TEE**
+3. **Plain U-Boot keeps every boot command; FIT entry is env-gated in
+   the persistent env only.** The layout stamp keeps the persistent env
+   producers (fwenv routing set, uboot-env-prefill) on the ext4 fs
+   path (`ota_rescue_boot=run ota_rescue_boot_fs || run
+   distro_bootcmd`). The compiled default env is gated by
+   `CONFIG_FIT_SIGNATURE` at compile time, not by the layout stamp:
+   its plain branch keeps the `|| run ota_rescue_boot_fit ||`
+   fallback, so an ext4-branch failure on plain (CRC-lost env, an
+   A/B build without `/recovery` assets, or a plain loader with a
+   raw-FIT disk) can still call `boot_fit` automatically. The final
+   backstop is the TEE gate, not this routing. Manual FIT boot on
+   plain is a plain env edit: point
+   `ota_normal_boot` at `run ota_normal_boot_fit`, or call `boot_fit`
+   at the prompt. The loader/disk mismatch (plain loader + raw-FIT
+   disk) backstops at the TEE gate: a secure rootfs cannot complete
+   boot under a plain loader (no BL32, SSKR unavailable), it fails
+   late in the initramfs instead of at U-Boot. `BOOT_RAW_MODE=yes`
+   builds need a verifying U-Boot.
+4. **The initramfs refuses the raw passphrase without OP-TEE**
    ([`decryption-disk.sh`](../rk_secure-disk-encryption/initramfs/decryption-disk.sh)):
    every auto-decrypt image carries BL32 in its U-Boot FIT, so a genuine
    boot always has `/dev/tee*`. A plain U-Boot provides no BL32 — before
@@ -271,6 +289,10 @@ Residual gaps (all require the §7 OTP step to close):
 - The env blob is still unsigned; on secure builds it can now only
   route to verified-FIT launches, but it can still pick *which* signed
   FIT (e.g. force the recovery partition).
+- Plain builds still launch ext4 assets (`boot.scr`/extlinux) with no
+  verification — the plain tier's contract; only the raw FIT path is
+  closed. Closing the fs path means converging the tiers (the rootfs
+  secret stays LUKS-protected either way).
 - An **unsigned OP-TEE-chain loader** (the `secure-rootfs` tier's
   U-Boot, which carries BL32 but verifies nothing) still passes the
   TEE gate and can launch the secure kernel unverified — software
