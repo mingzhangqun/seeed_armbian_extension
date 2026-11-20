@@ -20,4 +20,7 @@ function ota_sync_rootfs() {
 function ota_install_common_runtime_to_rootfs() {
     ota_sync_rootfs "OTA runtime" "${OTA_COMMON_ROOTFS}" "$1" || return 1
     printf 'IMAGE_VARIANT=%s\n' "${OTA_IMAGE_VARIANT}" > "$1/etc/armbian-ota-image"
+    # Required before the initramfs hooks (99-copy-tools) run: they stage
+    # the sanitize blobs fw_env_repair_blob dd's on both-bad rebuilds.
+    ota_build_env_sanitize_blobs "$1" || return 1
 }
