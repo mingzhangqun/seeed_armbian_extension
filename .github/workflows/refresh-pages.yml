@@ -22,9 +22,14 @@ jobs:
         id: probe
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+          PAGES_TARGET_TOKEN: ${{ secrets.PAGES_TARGET_TOKEN }}
         run: |
           if [ -z "$RCLONE_CONFIG" ]; then
             echo "::error::RCLONE_CONFIG is not set — a refresh would strip all file links from the page; aborting."
+            exit 1
+          fi
+          if [ -z "$PAGES_TARGET_TOKEN" ]; then
+            echo "::error::PAGES_TARGET_TOKEN is not set — a refresh cannot update the page; aborting instead of reporting a false success."
             exit 1
           fi
 
