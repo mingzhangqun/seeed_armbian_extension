@@ -45,6 +45,33 @@ function ota_uboot_env_prefill_mkenvimage() {
     return 1
 }
 
+# Machine-verify the hand-sync surface between the U-Boot default-env patch
+# (compiled into $1) and the fwenv.sh routing constants: the rescue keys the
+# patch carries must stay byte-identical to what fw_env_write_routing_set
+# rebuilds at runtime. Absent keys are skipped (the patch's plain/secure
+# variants each carry only their dispatchable subset; bootcmd is
+# intentionally different -- patch boots Rescue unconditionally, the routing
+# set is transactional). The rescue fs root always compares as LABEL: the C
+# side has no encryption knowledge; the encrypted root is a routing-set splice.
+function ota_uboot_env_prefill_check_sync() {
+    local default_env="$1" key patch_val ours
+    local -a sync_keys=(ota_rescue_boot_fs ota_rescue_boot_fit ota_rescue_boot)
+
+    for key in "${sync_keys[@]}"; do
+        patch_val="$(grep -m1 "^${key}=" "${default_env}" 2>/dev/null | cut -d= -f2- || true)"
+        [[ -n "${patch_val}" ]] || continue
+        case "${key}" in
+            ota_rescue_boot_fs)  ours="$(fw_env_splice_root "LABEL=armbi_root")" ;;
+            ota_rescue_boot_fit) ours="${OTA_ENV_RESCUE_BOOT_FIT}" ;;
+            ota_rescue_boot)     ours="${OTA_ENV_RESCUE_BOOT}" ;;
+        esac
+        [[ "${patch_val}" = "${ours}" ]] ||
+            exit_with_error "OTA routing env desync" \
+                "${key} differs between the U-Boot default env and fwenv.sh; sync common/patches/seeed-ota-rescue-default-env.patch with common/rootfs/usr/share/armbian-ota/fwenv.sh"
+    done
+    display_alert "OTA routing env sync" "default-env patch <-> fwenv.sh rescue keys verified" "info"
+}
+
 # Assemble the final env text for the image being built. AB images reuse the
 # merged initial env written into the rootfs by pre_update_initramfs__895;
 # recovery images merge the compiled default env with a bootcmd override that
@@ -87,6 +114,18 @@ function ota_uboot_env_prefill_compose() {
     [[ -f "${default_env}" ]] ||
         exit_with_error "U-Boot default env not packaged" "${default_env} missing; rebuild u-boot (./seeed-build.sh --uboot) so the deb carries u-boot-default.env"
 
+    # Single source of the routing strings: the device-side fwenv.sh. Sourced
+    # with the layout/root overrides so this blob and the runtime CRC rebuild
+    # are identical by construction (see fwenv.sh "routing set").
+    OTA_BOOT_MODE="filesystem"
+    ota_raw_boot_enabled && OTA_BOOT_MODE="raw-fit"
+    OTA_RESCUE_ROOT_DEFAULT="LABEL=armbi_root"
+    ota_encrypted_rootfs_enabled && OTA_RESCUE_ROOT_DEFAULT="/dev/mapper/armbian-root"
+    # shellcheck source=/dev/null
+    source "${OTA_SUPPORT_DIR}/common/rootfs/usr/share/armbian-ota/fwenv.sh"
+
+    ota_uboot_env_prefill_check_sync "${default_env}"
+
     # v0.8 routing env (design section 3.2): transaction flags + the p1
     # anchored boot pair + a bootcmd that (a) saves ota_boot_next=recovery
     # BEFORE booting a candidate, (b) routes to Rescue on every normal
@@ -94,37 +133,16 @@ function ota_uboot_env_prefill_compose() {
     # carries the armbian.bootdev tokens in its own bootargs, and the rescue
     # branches inject them directly, so no bootargs prefixing is needed here.
     routing_env="$(mktemp)" || exit_with_error "mktemp failed"
-    # Plain uses ext4 only; secure/raw-FIT uses the signed boot/recovery FIT
-    # directly. Do not make FIT a fallback for plain: on plain the FIT keys
-    # are refusal stubs (keys kept for CRC-rebuild compatibility).
-    local rescue_root="LABEL=armbi_root" normal_boot rescue_boot fit_normal fit_rescue
-    if ota_raw_boot_enabled; then
-        normal_boot='run ota_normal_boot_fit'
-        rescue_boot='run ota_rescue_boot_fit'
-        fit_normal='setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
-        fit_rescue='setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
-    else
-        normal_boot='run ota_normal_boot_fs'
-        rescue_boot='run ota_rescue_boot_fs || run distro_bootcmd'
-        fit_normal='echo "PLAIN: raw FIT boot refused"'
-        fit_rescue='echo "PLAIN: raw FIT boot refused"'
-    fi
-    if ota_encrypted_rootfs_enabled; then
-        rescue_root="/dev/mapper/armbian-root"
-    fi
-    # The FIT DTB is the source of truth for configured console/root/extra
-    # bootargs. Do not replace them with a second hardcoded copy: append only
-    # the dynamic boot-disk tokens and the recovery role before boot_fit.
     {
         printf '%s\n' 'ota_in_progress=0'
         printf '%s\n' 'ota_boot_next=recovery'
-        printf '%s\n' 'ota_normal_boot_fs=setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scriptaddr} /boot.scr && source ${scriptaddr}'
-        printf 'ota_normal_boot_fit=%s\n' "${fit_normal}"
-        printf 'ota_normal_boot=%s\n' "${normal_boot}"
-        printf '%s\n' "ota_rescue_boot_fs=ext4load \${devtype} \${devnum}:1 \${kernel_addr_r} /recovery/Image && ext4load \${devtype} \${devnum}:1 \${ramdisk_addr_r} /recovery/uInitrd && ext4load \${devtype} \${devnum}:1 \${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=${rescue_root} rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=\${devtype} armbian.bootdevnum=\${devnum} armbian.ota_role=recovery\" && booti \${kernel_addr_r} \${ramdisk_addr_r} \${fdt_addr_r}"
-        printf 'ota_rescue_boot_fit=%s\n' "${fit_rescue}"
-        printf 'ota_rescue_boot=%s\n' "${rescue_boot}"
-        printf '%s\n' 'bootcmd=if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
+        printf 'ota_normal_boot_fs=%s\n' "${OTA_ENV_NORMAL_BOOT_FS}"
+        printf 'ota_normal_boot_fit=%s\n' "${OTA_ENV_NORMAL_BOOT_FIT}"
+        printf 'ota_normal_boot=%s\n' "${OTA_ENV_NORMAL_BOOT}"
+        printf 'ota_rescue_boot_fs=%s\n' "$(fw_env_splice_root "${OTA_RESCUE_ROOT_DEFAULT}")"
+        printf 'ota_rescue_boot_fit=%s\n' "${OTA_ENV_RESCUE_BOOT_FIT}"
+        printf 'ota_rescue_boot=%s\n' "${OTA_ENV_RESCUE_BOOT}"
+        printf '%s\n' "bootcmd=${OTA_ENV_BOOTCMD}"
     } > "${routing_env}"
 
     ota_ab_merge_uboot_env_files "${final_env}" "${default_env}" "${routing_env}"
