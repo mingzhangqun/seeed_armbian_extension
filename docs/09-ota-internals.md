@@ -47,7 +47,7 @@ Recovery prepare (`recovery_start_ota`, runs in the live system):
 | 3 | transaction store mounted (`/media/root-rw`) | `mountpoint` | userdata overlay backing |
 | 4 | `extract_ota_package` → `ota_resolve_payload_names` → `ota_assert_dual_payload` (on the extracted dir; no extra streaming pass) | `tar -xf` | stages into `<userdata>/ota-recovery/ota_work`; resolver binds `OTA_PAYLOAD_ROOTFS_TAR`/`BOOT_TAR` to the files present (`.tar.xz` preferred over `.tar.gz`) |
 | 5 | `ota_verify_payload`: sha256 per archive; encrypted packages verify + decrypt `*.enc` first | `sha256sum`, `openssl` | |
-| 6 | `state_mark_prepared recovery prepared` | — | state file on userdata |
+| 6 | `state_begin_campaign <PAYLOAD_ID>` (atomic multi-key write) | — | state file on userdata |
 | 7 | print reboot hint | — | phase 2 owns everything after |
 
 AB prepare (`ab_start_ota`, runs in the live system, **flashes the target slot
