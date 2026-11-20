@@ -12,12 +12,13 @@ from image_mirror_common import ImageMirrorError, decode, parse_slots
 DeployError = ImageMirrorError
 
 
-def rcat(path, retries=1):
+def rcall(what, args, retries=1):
+    """Run one rclone invocation; retry once on error, return its stdout."""
     result = None
     for attempt in range(retries + 1):
         try:
             result = subprocess.run(
-                ["rclone", "cat", path, "--contimeout", "15s"],
+                ["rclone", *args, "--contimeout", "15s"],
                 capture_output=True, text=True, timeout=120,
             )
         except subprocess.TimeoutExpired:
@@ -28,48 +29,33 @@ def rcat(path, retries=1):
         if attempt < retries:
             time.sleep(5)
     error = result.stderr.strip() if result is not None else "exceeded 120 seconds"
-    raise DeployError(f"rclone cat failed for {path}: {error}")
+    raise DeployError(f"rclone failed for {what}: {error}")
+
+
+def rcat(path, retries=1):
+    return rcall(path, ["cat", path], retries=retries)
 
 
 def tree_dirs(base):
-    result = None
-    for attempt in range(2):
-        try:
-            result = subprocess.run(
-                ["rclone", "lsjson", "--dirs-only", f"{base}/trees",
-                 "--contimeout", "15s"],
-                capture_output=True, text=True, timeout=120,
-            )
-        except subprocess.TimeoutExpired:
-            result = None
-        else:
-            if result.returncode == 0:
-                listing = decode(result.stdout, "trees/")
-                if (not isinstance(listing, list)
-                        or any(not isinstance(entry, dict)
-                               or not isinstance(entry.get("Path"), str)
-                               or not entry["Path"] or "/" in entry["Path"]
-                               for entry in listing)):
-                    raise DeployError("trees/: invalid directory listing")
-                return {entry["Path"] for entry in listing}
-        if attempt == 0:
-            time.sleep(5)
-    error = result.stderr.strip() if result is not None else "exceeded 120 seconds"
-    raise DeployError(f"rclone lsjson failed for {base}/trees: {error}")
+    listing = decode(
+        rcall(f"{base}/trees", ["lsjson", "--dirs-only", f"{base}/trees"]),
+        "trees/",
+    )
+    if (not isinstance(listing, list)
+            or any(not isinstance(entry, dict)
+                   or not isinstance(entry.get("Path"), str)
+                   or not entry["Path"] or "/" in entry["Path"]
+                   for entry in listing)):
+        raise DeployError("trees/: invalid directory listing")
+    return {entry["Path"] for entry in listing}
 
 
 def tree_file_sizes(base, tag):
     """Read download sizes without changing the immutable per-tag manifest."""
-    result = subprocess.run(
-        ["rclone", "lsjson", "-R", "--files-only", f"{base}/trees/{tag}",
-         "--contimeout", "15s"],
-        capture_output=True, text=True, timeout=120,
+    listing = decode(
+        rcall(f"trees/{tag}", ["lsjson", "-R", "--files-only", f"{base}/trees/{tag}"]),
+        f"trees/{tag}/",
     )
-    if result.returncode != 0:
-        raise DeployError(
-            f"rclone lsjson failed for trees/{tag}: {result.stderr.strip()}"
-        )
-    listing = decode(result.stdout, f"trees/{tag}/")
     if not isinstance(listing, list):
         raise DeployError(f"trees/{tag}: invalid file listing")
     sizes = {}

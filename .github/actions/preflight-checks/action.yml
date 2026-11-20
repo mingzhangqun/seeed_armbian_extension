@@ -27,6 +27,7 @@ runs:
   using: "composite"
   steps:
     - name: Setup rclone (seeed-storage OneDrive remote)
+      id: onedrive
       uses: ./.github/actions/setup-onedrive
       with:
         rclone_config: ${{ inputs.rclone_config }}
@@ -35,6 +36,7 @@ runs:
       shell: bash
       env:
         RCLONE_CONFIG_CONTENT: ${{ inputs.rclone_config }}
+        REMOTE: ${{ steps.onedrive.outputs.remote }}
       run: |
         set -euo pipefail
         [ -n "$RCLONE_CONFIG_CONTENT" ] \
@@ -45,13 +47,13 @@ runs:
         # Reachability gate only — the per-owner namespace
         # (armbian/<owner>/images) may not exist yet on a fresh mirror;
         # the build's uploads create it.
-        if ! error="$(rclone lsf seeed-storage: --dirs-only --contimeout 15s 2>&1 >/dev/null)"; then
-          echo "::error::rclone cannot reach seeed-storage: — refresh the RCLONE_CONFIG token or check the remote."
+        if ! error="$(rclone lsf "${REMOTE}:" --dirs-only --contimeout 15s 2>&1 >/dev/null)"; then
+          echo "::error::rclone cannot reach ${REMOTE}: — refresh the RCLONE_CONFIG token or check the remote."
           printf '%s\n' "$error" >&2
           exit 1
         fi
         echo "OneDrive remote OK. Quota:"
-        rclone about seeed-storage: 2>/dev/null | grep -E 'Total:|Free:|Trashed:' || true
+        rclone about "${REMOTE}:" 2>/dev/null | grep -E 'Total:|Free:|Trashed:' || true
 
     - name: Validate secure-boot secrets
       if: inputs.secure_boot == 'true'
