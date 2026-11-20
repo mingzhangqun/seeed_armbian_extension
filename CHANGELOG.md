@@ -180,7 +180,9 @@ Covers the work against the initial import (merge base `9980aee`,
   without zstd is refused at negotiation instead of misreporting
   `missing package.env` (runtime version bumped 1.3 → 1.4);
   `load_package_env_metadata` now propagates tar's stderr so listing or
-  extraction failures surface their real cause.
+  extraction failures surface their real cause. A/B images now install
+  zstd (recovery parity) so `--ota-format zstd` packages decode on every
+  A/B device instead of depending on incidental desktop-stack deps.
 - **Image identity stamps consolidated into `armbian-image-release`.**
   `IMAGE_VARIANT` and `SEEED_EXTENSION_REPO/COMMIT` are stamped at image
   finalize (after the framework's release snapshot, so they cannot be
