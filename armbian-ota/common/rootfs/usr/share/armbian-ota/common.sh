@@ -354,17 +354,6 @@ OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
 # Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.
 OTA_HOOK_LEGACY_NAME="ota-apply-hook.sh"
 
-# Single format map mirrored in package-create.sh (build side) and the
-# initramfs payload lib: fmt -> tar extract flag.
-ota_format_tar_extract_flag() {
-    case "${1}" in
-        *.tar.gz|*.tgz) echo "-xzf" ;;
-        *.tar.xz)       echo "-xJf" ;;
-        *.tar.zst)      echo "--zstd" ;;
-        *)              echo "" ;;
-    esac
-}
-
 # Magic-byte sniff: the payload's first bytes must match its suffix so a
 # renamed archive cannot bypass format negotiation.
 ota_verify_tar_magic() {
