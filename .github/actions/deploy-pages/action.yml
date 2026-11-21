@@ -1,12 +1,12 @@
 name: "Deploy images page"
-description: "Bundle the mirror manifest into data.json, stage the static page, and deploy"
+description: "Bundle the mirror manifest into data.json, stage the static page, and deploy to the release repo's gh-pages"
 
 inputs:
   tag:
     description: "Release tag (used in commit message)"
     required: true
   repo:
-    description: "Target repo for the page (owner/repo)"
+    description: "Target repo for the page (owner/armbian-build)"
     required: true
   release_repo:
     description: "Repo where the release lives (owner/repo)"
@@ -24,12 +24,7 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # The page ALWAYS lives on the build-source repo (owner/armbian-build
-    # — the callers pass release_repo as the push target), pushed via the
-    # gh-pages API with PAGES_TARGET_TOKEN. A same-repo actions-mode
-    # deployment path used to exist but was unreachable by construction
-    # (release_repo is an armbian-build repo, never this extension repo)
-    # and was removed 2026-11-07.
+    # One site, one writer: images on the release repo's gh-pages, apt on this repo's site.
     - name: Resolve deploy gate
       id: gate
       shell: bash
@@ -185,11 +180,11 @@ runs:
             print(f"blob {path}: {sha}")
             return sha
 
-        # Two files: the static shell + the data bundle it fetches.
-        entries = [{"path": "images/index.html", "mode": "100644", "type": "blob",
-                    "sha": put_blob("images.html", "images/index.html")},
-                   {"path": "images/data.json", "mode": "100644", "type": "blob",
-                    "sha": put_blob("data.json", "images/data.json")}]
+        # Root = shell + data bundle; no base_tree, so the push replaces the whole tree.
+        entries = [{"path": "index.html", "mode": "100644", "type": "blob",
+                    "sha": put_blob("images.html", "index.html")},
+                   {"path": "data.json", "mode": "100644", "type": "blob",
+                    "sha": put_blob("data.json", "data.json")}]
 
         tree = gh("--method", "POST", f"repos/{repo}/git/trees", "--input", "-",
                   "--jq", ".sha",

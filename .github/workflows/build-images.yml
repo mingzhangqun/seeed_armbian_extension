@@ -7,10 +7,18 @@ on:
     inputs:
       # ── Build source (which armbian-build branch to build from).
       armbian_build_repo:
-        description: "armbian-build source (repo:branch; repo must be <owner>/armbian-build)"
+        description: "[owner/]armbian-build:branch"
         required: false
         type: string
         default: "armbian-build:main"
+
+      # ── Kernel source override; "default" = whatever armbian-build pins.
+      # Branch must stay on the vendor slot's version line (checked in plan).
+      linux_rockchip_repo:
+        description: "[owner/]linux-rockchip:branch"
+        required: false
+        type: string
+        default: "default"
 
       # Board input names are the matrix board ids.
       recomputer-rk3576-devkit:
@@ -102,6 +110,10 @@ jobs:
       tag: ${{ steps.gen.outputs.tag }}
       ab_repo: ${{ steps.gen.outputs.ab_repo }}
       ab_commit: ${{ steps.source.outputs.ab_commit }}
+      lr_repo: ${{ steps.kernel.outputs.lr_repo }}
+      lr_commit: ${{ steps.kernel.outputs.lr_commit }}
+      lr_override: ${{ steps.gen.outputs.lr_repo }}
+      kver: ${{ steps.kernel.outputs.kver }}
       release_repo: ${{ steps.gen.outputs.release_repo }}
     steps:
       - name: Generate matrix JSON from checkbox inputs
@@ -147,6 +159,25 @@ jobs:
               raise SystemExit(
                   f"ERROR: build source repo must be {expected_repo}, got {repo}; "
                   "promote and page deployment share that repository contract")
+
+          # Kernel override: fixed repo, branch required; "default" keeps the build pin.
+          lr_repo = os.environ.get("LR_REPO", "").strip()
+          if lr_repo.lower() == "default":
+              lr_repo = ""
+          if lr_repo:
+              lr_repo_part, sep, lr_branch = lr_repo.partition(":")
+              if not sep:
+                  raise SystemExit(
+                      "ERROR: linux_rockchip_repo must be repo:branch")
+              if "/" not in lr_repo_part:
+                  lr_repo_part = f"{os.environ['GITHUB_REPOSITORY_OWNER']}/{lr_repo_part}"
+              if lr_repo_part.rsplit("/", 1)[-1] != "linux-rockchip":
+                  raise SystemExit(
+                      f"ERROR: linux_rockchip_repo must point at a linux-rockchip "
+                      f"repo, got {lr_repo_part}")
+              if not lr_branch:
+                  raise SystemExit("ERROR: linux_rockchip_repo branch is empty")
+              lr_repo = f"{lr_repo_part}:{lr_branch}"
 
           def board_exists(board):
               headers = {"Accept": "application/vnd.github+json"}
@@ -215,6 +246,7 @@ jobs:
               f.write(f"boards={json.dumps(boards_unique)}\n")
               f.write(f"count={len(entries)}\n")
               f.write(f"ab_repo={ab_repo}\n")
+              f.write(f"lr_repo={lr_repo}\n")
               f.write(f"release_repo={release_repo}\n")
           PY
         env:
@@ -222,15 +254,8 @@ jobs:
           OTA_AB:       ${{ inputs.ota_ab }}
           SECURE_BOOT:  ${{ inputs.secure_boot }}
           AB_REPO:      ${{ inputs.armbian_build_repo }}
+          LR_REPO:      ${{ inputs.linux_rockchip_repo }}
           GH_TOKEN:     ${{ github.token }}
-
-      - name: Print summary
-        run: |
-          echo "Total matrix entries: ${{ steps.gen.outputs.count }}"
-          echo "Boards to release: ${{ steps.gen.outputs.boards }}"
-          echo "Release tag: ${{ steps.gen.outputs.tag }}"
-          echo "Release target: ${{ steps.gen.outputs.release_repo }}"
-          echo "armbian-build: ${{ steps.gen.outputs.ab_repo }}"
 
       - name: Resolve immutable build-source revision
         id: source
@@ -243,6 +268,54 @@ jobs:
           [[ "$ab_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid armbian-build commit"; exit 1; }
           echo "ab_commit=$ab_commit" >> "$GITHUB_OUTPUT"
           echo "Pinned armbian-build source: ${AB_REPO%:*}@$ab_commit"
+
+      - name: Resolve immutable kernel source revision
+        # Always pin the kernel to a commit — no branch-floating window.
+        id: kernel
+        env:
+          AB_REPO: ${{ steps.gen.outputs.ab_repo }}
+          AB_COMMIT: ${{ steps.source.outputs.ab_commit }}
+          LR_REPO: ${{ steps.gen.outputs.lr_repo }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          inc_body="$(gh api "repos/${AB_REPO%:*}/contents/config/sources/families/include/rockchip_vendor_common.inc?ref=${AB_COMMIT}" --jq .content | base64 --decode)"
+          [[ -n "$inc_body" ]] || { echo "::error::rockchip_vendor_common.inc unreadable at ${AB_COMMIT}"; exit 1; }
+          if [[ -z "$LR_REPO" ]]; then
+            slot_source="$(grep -oP "declare -g KERNELSOURCE='\K[^']+" <<<"$inc_body" | head -1)"
+            slot_branch="$(grep -A3 'vendor)' <<<"$inc_body" | grep -oP "KERNELBRANCH='branch:\K[^']+" | head -1)"
+            [[ -n "$slot_source" && -n "$slot_branch" ]] \
+              || { echo "::error::cannot parse the vendor slot pin from rockchip_vendor_common.inc"; exit 1; }
+            lr_repo_part="${slot_source#https://github.com/}"
+            lr_repo_part="${lr_repo_part%.git}"
+            lr_repo="${lr_repo_part}:${slot_branch}"
+          else
+            lr_repo="$LR_REPO"
+          fi
+          lr_commit="$(gh api "repos/${lr_repo%:*}/git/refs/heads/${lr_repo##*:}" --jq .object.sha)"
+          [[ "$lr_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid linux-rockchip commit for ${lr_repo}"; exit 1; }
+          makefile_body="$(gh api "repos/${lr_repo%:*}/contents/Makefile?ref=${lr_commit}" --jq .content | base64 --decode)"
+          kver="$(grep -E '^(VERSION|PATCHLEVEL) = ' <<<"$makefile_body" | awk '{print $3}' | paste -sd.)"
+          if [[ -n "$LR_REPO" ]]; then
+            slot_ver="$(grep -A3 'vendor)' <<<"$inc_body" | grep -oP "KERNEL_MAJOR_MINOR=['\"]?\K[0-9]+\.[0-9]+" | head -1)"
+            [[ -n "$kver" && "$kver" == "$slot_ver" ]] || {
+              echo "::error::kernel ${lr_repo%:*} is linux ${kver:-unknown}, but the vendor slot pins ${slot_ver:-unknown}; only same-version-line branches are supported"
+              exit 1
+            }
+          fi
+          echo "lr_repo=$lr_repo" >> "$GITHUB_OUTPUT"
+          echo "lr_commit=$lr_commit" >> "$GITHUB_OUTPUT"
+          echo "kver=$kver" >> "$GITHUB_OUTPUT"
+          echo "Pinned kernel source: ${lr_repo%:*}@$lr_commit (linux ${kver})"
+
+      - name: Print summary
+        run: |
+          echo "Total matrix entries: ${{ steps.gen.outputs.count }}"
+          echo "Boards to release: ${{ steps.gen.outputs.boards }}"
+          echo "Release tag: ${{ steps.gen.outputs.tag }}"
+          echo "Release target: ${{ steps.gen.outputs.release_repo }}"
+          echo "armbian-build: ${{ steps.gen.outputs.ab_repo }}@${{ steps.source.outputs.ab_commit }}"
+          echo "linux-rockchip: ${{ steps.kernel.outputs.lr_repo }}@${{ steps.kernel.outputs.lr_commit }} (linux ${{ steps.kernel.outputs.kver }})"
 
   # Create one draft Release and reset this run's mirror tree.
   init-release:
@@ -269,8 +342,18 @@ jobs:
           # Enumerate the parent rather than treating every cat error as a fresh
           # namespace. Network/permission failures must stop initialization.
           if ! listing="$(rclone lsjson "$IBASE" --contimeout 15s 2>slots-list.error)"; then
-            cat slots-list.error >&2
-            exit 1
+            # Missing dir = first dispatch for a new namespace; create and continue.
+            if ! grep -qi 'not found' slots-list.error; then
+              cat slots-list.error >&2
+              exit 1
+            fi
+            rclone mkdir "$IBASE" --contimeout 15s
+            echo "Created missing image namespace $IBASE"
+            # Re-list: a transient "not found" must not zero the pointer file.
+            if ! listing="$(rclone lsjson "$IBASE" --contimeout 15s 2>>slots-list.error)"; then
+              cat slots-list.error >&2
+              exit 1
+            fi
           fi
           if [ "$(jq '[.[] | select(.Path == "slots.json")] | length' <<<"$listing")" -eq 0 ]; then
             printf '%s\n' '{"stable":null,"pre-release":null,"history":[]}' |
@@ -305,6 +388,7 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: retire-${{ needs.plan.outputs.tag }}
+          # Images page: release repo's gh-pages (one writer); apt: this repo's site.
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
@@ -324,7 +408,7 @@ jobs:
           if [ -n "$OLD_TAG" ]; then
             [[ "$OLD_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
               { echo "::error::invalid retired mirror tag; refusing tree cleanup"; exit 1; }
-            rclone purge "$IBASE/trees/$OLD_TAG" --contimeout 15s
+            rclone purge "$IBASE/trees/$OLD_TAG" --contimeout 15s --onedrive-hard-delete
           fi
           if ! rclone lsd "$IBASE/trees/$TAG" --contimeout 15s > tree.check 2> tree.error; then
             if grep -qi 'not found' tree.error; then
@@ -335,7 +419,7 @@ jobs:
               exit 1
             fi
           else
-            rclone purge "$IBASE/trees/$TAG" --contimeout 15s
+            rclone purge "$IBASE/trees/$TAG" --contimeout 15s --onedrive-hard-delete
           fi
 
       - name: Remove the retired candidate Release
@@ -349,7 +433,13 @@ jobs:
           if ! state="$(gh release view "$OLD_TAG" --repo "$TARGET_REPO" \
             --json isDraft,isPrerelease,assets,body --jq '[.isDraft,.isPrerelease,(.assets|length),.body]|@json' 2>&1)"; then
             grep -qi 'release not found' <<<"$state" \
-              && { echo "retired candidate Release $OLD_TAG is already absent"; exit 0; }
+              && {
+                echo "retired candidate Release $OLD_TAG is already absent"
+                # Out-of-band Release removal can leave source tags behind;
+                # sweep the one whose repo name is known without the notes.
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
+                exit 0
+              }
             echo "::error::cannot read retired Release $OLD_TAG; refusing cleanup: $state"
             exit 1
           fi
@@ -360,6 +450,78 @@ jobs:
           jq -r '.[3]' <<<"$state" | grep -qE "${GITHUB_REPOSITORY}/actions/runs/[0-9]+" \
             || { echo "::error::$OLD_TAG is not owned by this pipeline; refusing to delete it"; exit 1; }
           gh release delete "$OLD_TAG" --repo "$TARGET_REPO" --yes --cleanup-tag
+          # Retired candidate's tags go with its Release: extension
+          # here, kernel in the notes-named repo.
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
+          old_kernel_repo="$(jq -r '.[3]' <<<"$state" | python3 .github/scripts/notes-meta.py kernel-repo)"
+          if [[ -n "$old_kernel_repo" ]]; then
+            gh api --method DELETE "repos/${old_kernel_repo}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
+            echo "swept kernel tag ${OLD_TAG} from ${old_kernel_repo} (if present)"
+          fi
+
+      - name: Tag build sources and write the Release notes
+        # One tag per run (extension + owned kernel); reruns replace only own refs.
+        id: sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_TOKEN: ${{ secrets.RELEASE_GH_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          AB_REPO: ${{ needs.plan.outputs.ab_repo }}
+          AB_COMMIT: ${{ needs.plan.outputs.ab_commit }}
+          LR_REPO: ${{ needs.plan.outputs.lr_repo }}
+          LR_COMMIT: ${{ needs.plan.outputs.lr_commit }}
+          OVERRIDE: ${{ needs.plan.outputs.lr_override }}
+          KVER: ${{ needs.plan.outputs.kver }}
+          RELEASE_REPO: ${{ needs.plan.outputs.release_repo }}
+        run: |
+          set -euo pipefail
+          lr_repo_part="${LR_REPO%:*}"
+          lr_branch="${LR_REPO##*:}"
+          lr_owner="${lr_repo_part%/*}"
+          lr_tag=""
+          if [[ "${lr_owner,,}" == "${GITHUB_REPOSITORY_OWNER,,}" ]]; then
+            lr_tag="${TAG}"
+            [[ -n "$REL_TOKEN" ]] \
+              || { echo "::error::RELEASE_GH_TOKEN is required to tag the kernel fork ${lr_repo_part}"; exit 1; }
+            GH_TOKEN="$REL_TOKEN" gh api --method DELETE "repos/${lr_repo_part}/git/refs/tags/${lr_tag}" >/dev/null 2>&1 || true
+            GH_TOKEN="$REL_TOKEN" gh api --method POST "repos/${lr_repo_part}/git/refs" -f ref="refs/tags/${lr_tag}" -f sha="${LR_COMMIT}" >/dev/null
+            echo "Tagged ${lr_repo_part}@${LR_COMMIT} as ${lr_tag}"
+          else
+            echo "Kernel source ${lr_repo_part} is not owned by ${GITHUB_REPOSITORY_OWNER}; recorded in the notes without a tag"
+          fi
+          # The extension tag rides this run's workflow revision.
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
+          echo "Tagged ${GITHUB_REPOSITORY}@${GITHUB_SHA} as ${TAG}"
+
+          # The download page is the release repo's own Pages site root
+          # (one site, one writer; the page push lands on its gh-pages).
+          page_repo="${RELEASE_REPO,,}"
+          pages_url="https://${page_repo%/*}.github.io/${page_repo#*/}/"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [[ -n "$lr_tag" ]]; then
+            lr_tag_cell="[${lr_tag}](https://github.com/${lr_repo_part}/releases/tag/${lr_tag})"
+          else
+            lr_tag_cell="- (not owned, no tag)"
+          fi
+          if [[ -z "$OVERRIDE" ]]; then kernel_line="Kernel: linux ${KVER} (vendor slot pin)"; else kernel_line="Kernel: linux ${KVER} (override; version line matched the vendor slot at plan time)"; fi
+          cat > release-notes.md <<NOTES
+          Binaries live only in the OneDrive mirror; this Release carries version metadata.
+          Download page: ${pages_url}
+
+          ## Build sources (pinned at run start)
+
+          | repo | branch | revision | tag |
+          |---|---|---|---|
+          | [${GITHUB_REPOSITORY}](https://github.com/${GITHUB_REPOSITORY}) | [${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}) | [${GITHUB_SHA:0:12}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) | [${TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}) |
+          | [${AB_REPO%:*}](https://github.com/${AB_REPO%:*}) | [${AB_REPO##*:}](https://github.com/${AB_REPO%:*}/tree/${AB_REPO##*:}) | [${AB_COMMIT:0:12}](https://github.com/${AB_REPO%:*}/commit/${AB_COMMIT}) | [${TAG}](https://github.com/${AB_REPO%:*}/releases/tag/${TAG}) |
+          | [${lr_repo_part}](https://github.com/${lr_repo_part}) | [${lr_branch}](https://github.com/${lr_repo_part}/tree/${lr_branch}) | [${LR_COMMIT:0:12}](https://github.com/${lr_repo_part}/commit/${LR_COMMIT}) | ${lr_tag_cell} |
+
+          ${kernel_line}
+          Run: ${run_url}
+          NOTES
+          echo "=== release notes ==="
+          cat release-notes.md
 
       - name: Create draft release ${{ needs.plan.outputs.tag }}
         env:
@@ -372,7 +534,7 @@ jobs:
           MATRIX: ${{ needs.plan.outputs.matrix }}
         run: |
           set -euo pipefail
-          # Re-run all replaces this run's owned prerelease.
+          # Replace-block for a re-run regenerating the same tag.
           if ! state="$(gh release view "$TAG" --repo "$TARGET_REPO" \
             --json isDraft,isPrerelease,body --jq '[.isDraft,.isPrerelease,.body]|@json' 2>&1)"; then
             grep -qi 'release not found' <<<"$state" || {
@@ -406,7 +568,7 @@ jobs:
             --prerelease \
             --title "$title" \
             "${target_args[@]}" \
-            --notes "Binaries are published only in the OneDrive mirror; this Release carries version metadata. Downloads are on the images page. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --notes-file release-notes.md
 
   # Re-run failed jobs resumes the candidate; re-run all rebuilds it.
 
@@ -494,6 +656,29 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           echo "Verified armbian-build checkout: $SOURCE_SHA"
+
+      - name: Pin the vendor kernel source to its plan commit
+        # Pin the vendor KERNELBRANCH to the plan-resolved commit so Release = built.
+        if: ${{ needs.plan.outputs.lr_commit != '' }}
+        env:
+          LR_REPO: ${{ needs.plan.outputs.lr_repo }}
+          LR_COMMIT: ${{ needs.plan.outputs.lr_commit }}
+        run: |
+          set -euo pipefail
+          cd armbian-build
+          inc="config/sources/families/include/rockchip_vendor_common.inc"
+          [[ -f "$inc" ]] || { echo "::error::$inc not found in armbian-build"; exit 1; }
+          grep -q "declare -g KERNELSOURCE=" "$inc" \
+            || { echo "::error::KERNELSOURCE line not found in $inc"; exit 1; }
+          sed -i "s|declare -g KERNELSOURCE=.*|declare -g KERNELSOURCE='https://github.com/${LR_REPO%:*}.git'\n\tdeclare -g KERNELBRANCH='commit:${LR_COMMIT}'|" "$inc"
+          # Must be the LAST KERNELBRANCH assignment, or a later one overrides it.
+          tail_branch="$(grep "declare -g KERNELBRANCH=" "$inc" | tail -1)"
+          [[ "$tail_branch" == *"commit:${LR_COMMIT}"* ]] || {
+            echo "::error::KERNELBRANCH pin is not the last assignment in $inc; armbian-build layout changed."
+            exit 1
+          }
+          echo "=== kernel source override in $inc ==="
+          grep -n "KERNELSOURCE=\|KERNELBRANCH=" "$inc"
 
       - name: Add trailing blank line to vendor defconfigs
         run: |
@@ -686,14 +871,14 @@ jobs:
           dest="seeed-storage:armbian/${GITHUB_REPOSITORY_OWNER,,}/images/trees/$TAG/$BOARD/$sec_dir/$PROFILE"
           echo "Uploading to $dest"
           rclone mkdir "$dest" 2>/dev/null || true
+          # "/" anchors to the transfer root; bare "*.img.xz" would match nested loaders.
           rclone copy output/images/ "$dest" \
-            --include "*.img.xz" --include "*.img.xz.sha256" --include "*.img.sha" --include "*.img.txt" \
+            --include "/*.img.xz" --include "/*.img.xz.sha256" --include "/*.img.sha" --include "/*.img.txt" \
             --transfers 4 --stats-one-line --stats 30s
-          if [ ${#ota_files[@]} -gt 0 ]; then
-            rclone mkdir "$dest/ota" 2>/dev/null || true
-            rclone copy "output/images/$BOARD/ota/" "$dest/ota" \
-              --transfers 4 --stats-one-line --stats 30s
-          fi
+          # ota_files non-emptiness is asserted above; this upload is unconditional.
+          rclone mkdir "$dest/ota" 2>/dev/null || true
+          rclone copy "output/images/$BOARD/ota/" "$dest/ota" \
+            --transfers 4 --stats-one-line --stats 30s
 
       - name: Upload production loaders to this tag's tree
         # Loaders are board/security-scoped, so only cli/trixie/recovery uploads.
@@ -902,11 +1087,12 @@ jobs:
 
   # Render the page from the current mirror manifests.
   pages:
-    name: Deploy images page (template sync)
+    name: Deploy images page (release repo's gh-pages)
     needs: [plan, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    # PAGES_TARGET_TOKEN pushes gh-pages; GITHUB_TOKEN reads Releases.
+    # GITHUB_TOKEN reads Releases; the page push itself rides
+    # PAGES_TARGET_TOKEN to the release repo's gh-pages.
     permissions:
       contents: read
     timeout-minutes: 10
@@ -918,7 +1104,7 @@ jobs:
         uses: ./.github/actions/deploy-pages
         with:
           tag: ${{ needs.plan.outputs.tag }}
-          # Push the page to the build-source repo's gh-pages.
+          # Images page: release repo's gh-pages (one writer); apt: this repo's site.
           repo: ${{ needs.plan.outputs.release_repo }}
           release_repo: ${{ needs.plan.outputs.release_repo }}
           rclone_config: ${{ secrets.RCLONE_CONFIG }}
@@ -939,6 +1125,34 @@ jobs:
       TARGET_REPO: ${{ needs.plan.outputs.release_repo }}
       TAG: ${{ needs.plan.outputs.tag }}
     steps:
+      - name: Delete this run's source tags
+        # Sweep this run's source tags when initialization did not complete.
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN || github.token }}
+          KERNEL_FORK_TOKEN: ${{ secrets.RELEASE_GH_TOKEN }}
+          LR_REPO: ${{ needs.plan.outputs.lr_repo }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "plan produced no tag — no source tags to clean"
+            exit 0
+          fi
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+          echo "swept extension tag ${TAG} (if present)"
+          lr_repo_part="${LR_REPO%:*}"
+          lr_owner="${lr_repo_part%/*}"
+          if [[ "${lr_owner,,}" != "${GITHUB_REPOSITORY_OWNER,,}" ]]; then
+            echo "kernel source ${lr_repo_part} is not owned; no kernel tag to clean"
+          elif [ -z "${KERNEL_FORK_TOKEN}" ]; then
+            # github.token is repository-scoped and cannot delete refs in the
+            # kernel fork; leave the tag for reconcile's stale-draft GC.
+            echo "::notice::RELEASE_GH_TOKEN is not set; kernel tag ${TAG} in ${lr_repo_part} left for reconcile GC."
+          else
+            gh api --method DELETE "repos/${lr_repo_part}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+            echo "swept kernel tag ${TAG} from ${lr_repo_part} (if present)"
+          fi
+
       - name: Delete draft after unfinished initialization
         # Delete only a confirmed owned draft after failed initialization.
         run: |
@@ -948,6 +1162,12 @@ jobs:
             exit 0
           fi
           echo "::notice::initialization did not complete; preserving any mirror tree for repair"
+          if [ -z "${TARGET_REPO:-}" ]; then
+            # A failed plan propagates empty outputs; gh release view would
+            # then misfire on git-repo detection instead of the API.
+            echo "::notice::plan failed before the release repo was resolved; no draft to inspect"
+            exit 0
+          fi
           if ! state="$(gh release view "$TAG" --repo "$TARGET_REPO" \
             --json isDraft,isPrerelease,body --jq '[.isDraft,.isPrerelease,.body]|@json' 2>&1)"; then
             grep -qi 'release not found' <<<"$state" \
