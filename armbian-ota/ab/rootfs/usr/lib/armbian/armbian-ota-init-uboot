@@ -39,7 +39,14 @@ log_error() {
 # /dev/nvme0n1p1 -> /dev/nvme0n1 (shared sysfs impl in fwenv.sh via env.sh;
 # whole-disk and unresolvable inputs pass through unchanged)
 get_parent_disk_dev() {
-    fw_env_parent_disk "$1" || echo "$1"
+    local parent
+    # Use $1 only when empty; two device lines break fw_env.config.
+    parent="$(fw_env_parent_disk "$1")"
+    if [ -n "${parent}" ]; then
+        echo "${parent}"
+    else
+        echo "$1"
+    fi
 }
 
 # /dev/nvme0n1p1 -> 1
