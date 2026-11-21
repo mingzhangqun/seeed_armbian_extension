@@ -286,7 +286,7 @@ function rk_secure_boot_rebuild_spi_loader() {
     fi
 }
 
-function rk_secure_boot_minimize_spl_fit_key() {
+function rk_secure_boot_verify_spl_fit_key_complete() {
     # Do not reduce the key material. RK3588 SPL FIT verification needs the
     # complete RSA public key; clearing rsa,r-squared or rsa,c leaves the DTB
     # node present but makes SPL report "No RSA key found" at boot.
@@ -343,26 +343,8 @@ function rk_secure_boot_sign_uboot_fit() {
     grep -qx 'CONFIG_SPL_FIT_SIGNATURE=y' .config || exit_with_error "CONFIG_SPL_FIT_SIGNATURE must be enabled for full secure boot" ".config"
     grep -Eq 'rsa(2048|4096)' u-boot.its || exit_with_error "U-Boot ITS has no supported RSA signature node" "u-boot.its"
 
-    # With CONFIG_FIT_ENABLE_RSASSA_PSS_SUPPORT the generated U-Boot ITS is
-    # signed with padding = "pss", and the SPL/U-Boot verifiers in this tree
-    # only accept maximum-salt PSS signatures.  A tree-built mkimage linked
-    # against OpenSSL >= 3.5 signs with digest-length salt, which SPL rejects
-    # on the device.  Sign with the Rockchip prebuilt mkimage instead: it is
-    # statically linked, so its maximum-salt behaviour is frozen into the
-    # binary regardless of the build container's OpenSSL.  The tree-built
-    # fit_check_sign below uses the same verify code as SPL, so any salt
-    # drift in the signing tool fails the build instead of the boot.
-    rk_secure_boot_resolve_mkimage
-
-    # The USBPLUG postprocess rebuilds host tools with its temporary config,
-    # leaving mkimage without FIT-signature support. Restore the host tools
-    # from the final secure U-Boot configuration before signing the FIT.
-    if tools/mkimage -h 2>&1 | grep -q 'Signing / verified boot not supported'; then
-        make -B tools-only || exit_with_error "Failed to rebuild FIT-signing U-Boot host tools" "${PWD}/tools"
-    fi
-
-    fit_padding=0x1000
-    grep -qx 'CONFIG_FIT_ENABLE_RSA4096_SUPPORT=y' .config && fit_padding=0x1200
+    # Shared prep: prebuilt mkimage + USBPLUG-clobbered host tools + padding.
+    fit_padding="$(rk_secure_boot_prepare_signing_toolchain "$(pwd)")"
     mkdir -p fit || exit_with_error "Failed to create FIT output directory" "${PWD}/fit"
     rm -f fit/uboot.itb data2sign.bin
 
@@ -390,7 +372,7 @@ function rk_secure_boot_sign_uboot_fit() {
     tools/fit_check_sign -f u-boot.itb -k spl/u-boot-spl.dtb -s ||
         exit_with_error "Signed U-Boot FIT verification failed" "u-boot.itb"
 
-    rk_secure_boot_minimize_spl_fit_key
+    rk_secure_boot_verify_spl_fit_key_complete
     rk_secure_boot_repack_signed_spl
     rk_secure_boot_rebuild_idbloader
     rk_secure_boot_sign_loader_artifacts "${rk_sign_tool}" "${platform}" "${keys_dir}"

@@ -63,6 +63,16 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   `SEEED_*` land in `/etc/armbian-image-release`; the release gate compares
   build-stamped truth (unstamped images skip with a warning). zstd
   capability is probed, not declared — A/B images install zstd for parity.
+- **secure-disk-encryption redundancy cleanup.** FIT-signing toolchain prep
+  (prebuilt mkimage + USBPLUG tool rebuild + RSA4096 padding) is one helper
+  shared by the U-Boot FIT and boot FIT paths (was two ~40-line copies).
+  `get_luks_device_by_partlabel` drops a second pass that was identical to
+  the first when no anchor disk is set. Dead weight removed: the
+  `SECURE_STORAGE_SECURITY_FS_TYPE` mkfs knob (never set, security partition
+  stays raw), the unreachable `BOOTSIZE=256` fallback in the RAW-boot
+  capture hook, fstab debug scaffolding (full-file cat dumps, `.bak`), and
+  `rk_secure_boot_minimize_spl_fit_key` is renamed to
+  `rk_secure_boot_verify_spl_fit_key_complete` to match what it does.
 
 ## 2026-11-13 ([f76cd2d3](https://github.com/Seeed-Studio/seeed_armbian_extension/commit/f76cd2d3))
 
