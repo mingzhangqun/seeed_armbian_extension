@@ -274,7 +274,7 @@ OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fs || run distro_bootcmd'
 if [ -n "${OTA_BOOT_MODE:-}" ]; then
     ota_fw_layout="${OTA_BOOT_MODE}"
 else
-    ota_fw_layout="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null)"
+    ota_fw_layout="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null || true)"
 fi
 if [ "${ota_fw_layout}" = "raw-fit" ]; then
     OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fit'
