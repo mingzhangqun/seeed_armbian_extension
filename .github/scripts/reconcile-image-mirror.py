@@ -12,7 +12,7 @@ from image_mirror_common import (
     ImageMirrorError,
     command,
     decode,
-    kernel_repo_from_notes,
+    owned_kernel_repo,
     parse_slots,
     pipeline_owned,
     references,
@@ -190,7 +190,11 @@ class Releases:
         if payload is not None:
             args += ["--input", "-"]
             input = json.dumps(payload)
-        return decode(self.call(*args, input=input), endpoint)
+        raw = self.call(*args, input=input)
+        # DELETE succeeds with 204 and an empty body; nothing to decode.
+        if not raw.strip():
+            return None
+        return decode(raw, endpoint)
 
     def view(self, tag, fields):
         return decode(
@@ -267,6 +271,14 @@ class Releases:
             print(f"keeping {tag}: not owned by this pipeline")
             return
         self.call("release", "delete", tag, "--yes", "--cleanup-tag")
+        # --cleanup-tag covers only the release repo; sweep the extension
+        # and owned kernel source tags the same way gc_stale_drafts does.
+        kernel_repo = owned_kernel_repo(state["body"] or "", self.workflow_repo)
+        for repo in [self.workflow_repo] + ([kernel_repo] if kernel_repo else []):
+            try:
+                self.api("DELETE", f"repos/{repo}/git/refs/tags/{tag}")
+            except ReconcileError as exc:
+                print(f"reconcile: WARNING source tag {tag} not swept on {repo}: {exc}")
 
     def gc_stale_drafts(self, slots, releases, age_days=90):
         # GC owned asset-less drafts (no pointer) past the
@@ -293,15 +305,21 @@ class Releases:
                 continue
             # Unpublished drafts have no tag yet; skip --cleanup-tag, sweep below instead.
             self.call("release", "delete", tag, "--yes")
-            kernel_repo = kernel_repo_from_notes(body)
+            # Only kernel forks owned by this pipeline's owner are swept:
+            # the build never tags third-party repos the notes may name.
+            kernel_repo = owned_kernel_repo(body, self.workflow_repo)
+            swept, kept = [], []
             for repo in [self.workflow_repo, self.repo] + (
                 [kernel_repo] if kernel_repo else []
             ):
                 try:
                     self.api("DELETE", f"repos/{repo}/git/refs/tags/{tag}")
-                except ReconcileError:
-                    pass  # the ref is already absent (or not ours to touch)
-            print(f"gc: removed stale draft {tag} and its source tags")
+                    swept.append(repo)
+                except ReconcileError as exc:
+                    kept.append(f"{repo}: {exc}")
+            print(f"gc: removed stale draft {tag}; swept source tags on: {', '.join(swept) or 'none'}")
+            for entry in kept:
+                print(f"gc: WARNING source tag {tag} not swept on {entry}")
 
     def reconcile_history(self, slots, releases):
         referenced = references(slots)
@@ -349,6 +367,9 @@ def reconcile(mirror, releases, depth=0):
         # first upload. Treat that state as a no-op: promotion cannot create a
         # Release from nothing and must never use emptiness as a GC license.
         print("mirror has no published pointers; nothing to reconcile")
+        # Stale-draft GC keys on ownership/age/assets, never on pointer
+        # emptiness; an empty mirror still collects cancelled drafts.
+        releases.gc_stale_drafts(old, releases.list())
         return {"tag": "", "mode": "empty"}
     release_list = releases.list()
     available = {release["tagName"] for release in release_list}
@@ -432,6 +453,7 @@ def reconcile(mirror, releases, depth=0):
         if stable:
             releases.publish_stable(stable)
             releases.mark_latest(stable)
+        releases.gc_stale_drafts(desired, releases.list())
         return {"tag": stable or "", "mode": "reconcile"}
     if repaired:
         if desired != old:
@@ -443,6 +465,7 @@ def reconcile(mirror, releases, depth=0):
         mirror.gc(desired)
         releases.remove_dangling(repaired, release_list)
         releases.reconcile_history(desired, release_list)
+        releases.gc_stale_drafts(desired, releases.list())
         return {"tag": stable or "", "mode": mode}
     if desired != old:
         mirror.write_slots(old, desired)
