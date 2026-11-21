@@ -65,7 +65,7 @@ fw_env_boot_disk() {
 
 # Clean read = exit 0, no bad-CRC warning, non-empty list.
 fw_env_read_clean() {
-    err_file="${TMPDIR:-/tmp}/fwenv.probe.$$"
+    err_file="$(mktemp 2>/dev/null)" || return 1
 
     env_out="$(fw_printenv -c "$1" 2> "${err_file}")" || {
         rm -f "${err_file}" 2>/dev/null || true
@@ -80,11 +80,13 @@ fw_env_read_clean() {
 }
 
 # Residue at 0x3f0000 proves a redundant U-Boot (single-copy never writes it).
+# Strip NUL too: busybox grep matches NUL with ".", so all-0x00 image-gap
+# padding would otherwise read as residue (a written blob has a nonzero CRC).
 fw_env_redund_area_written() {
     [ -b "$1" ] || return 1
     dd if="$1" bs=512 skip=$((OTA_FW_ENV_REDUND_OFFSET / 512)) \
         count=$((OTA_FW_ENV_SIZE / 512)) 2>/dev/null \
-        | tr -d '\377' | grep -q .
+        | tr -d '\000\377' | grep -q .
 }
 
 # Probe env format via exclusive CRC spans; never default to single.
@@ -153,7 +155,7 @@ fw_env_get() {
 
 # Bad CRC = stderr warning (wording varies); empty blob also counts as bad.
 fw_env_crc_bad() {
-    err_file="${TMPDIR:-/tmp}/fwenv.crc.$$"
+    err_file="$(mktemp 2>/dev/null)" || return 0
 
     env_list="$(fw_printenv 2> "${err_file}")" || true
     if grep -qiE "bad crc|cannot read environment|failed to read environment" "${err_file}"; then
@@ -221,7 +223,7 @@ fw_env_set_multi() {
         printf '%s\n' "${kv}" >> "${script_file}"
     done
 
-    set_err="${TMPDIR:-/tmp}/fwenv.set.$$.err"
+    set_err="$(mktemp 2>/dev/null)" || set_err="${TMPDIR:-/tmp}/fwenv.set.$$.err"
     fw_setenv -s "${script_file}" 2>"${set_err}" || {
         # script_file must survive until the retry below consumes it.
         if [ "${full_set}" -eq 0 ] || \
