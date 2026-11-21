@@ -49,6 +49,9 @@ bsw_classify() { # $1=rel $2=fdtfile $3=overlay_prefix
         initrd.img*)                        echo skip ;;
         boot.scr|boot.bmp)                  echo normal ;;
         uInitrd|uInitrd-*)                  echo critical ;;
+        # Health check compares /boot/payload-id to CANDIDATE_ID; flip it last
+        # so the marker only turns new after all boot files are new.
+        payload-id)                         echo critical ;;
         Image|vmlinuz*)                     echo normal ;;
         dtb)                                echo normal ;;
         dtb-*/"$2")                        echo normal ;;
