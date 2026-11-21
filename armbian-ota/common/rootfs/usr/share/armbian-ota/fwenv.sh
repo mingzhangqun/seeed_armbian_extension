@@ -296,11 +296,13 @@ OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fs || run distro_bootcmd'
 
 # Layout selector: OTA_BOOT_MODE (build-host override, set by
 # uboot-env-prefill before sourcing this file) wins over the on-device
-# boot-mode stamp.
+# boot-mode stamp. Sourced by set -e callers (init-uboot via env.sh ->
+# partitions.sh); the stamp only exists on Recovery images, so a failed
+# read must stay exit-0 or A/B init dies at source time.
 if [ -n "${OTA_BOOT_MODE:-}" ]; then
     ota_fw_layout="${OTA_BOOT_MODE}"
 else
-    ota_fw_layout="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null)"
+    ota_fw_layout="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null || true)"
 fi
 if [ "${ota_fw_layout}" = "raw-fit" ]; then
     OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fit'
