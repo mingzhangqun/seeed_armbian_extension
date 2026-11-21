@@ -19,5 +19,19 @@ function ota_sync_rootfs() {
 
 function ota_install_common_runtime_to_rootfs() {
     ota_sync_rootfs "OTA runtime" "${OTA_COMMON_ROOTFS}" "$1" || return 1
-    printf 'IMAGE_VARIANT=%s\n' "${OTA_IMAGE_VARIANT}" > "$1/etc/armbian-ota-image"
+    # Stamp into the framework image identity file (written earlier, during
+    # rootfs prep; this hook runs at image finalize). Idempotent append.
+    local image_release="$1/etc/armbian-image-release"
+    if [[ ! -f "${image_release}" ]]; then
+        display_alert "OTA runtime" "Missing ${image_release}; cannot stamp image identity" "err"
+        return 1
+    fi
+    sed -i '/^IMAGE_VARIANT=/d;/^RELEASE=/d' "${image_release}"
+    printf 'IMAGE_VARIANT=%s\n' "${OTA_IMAGE_VARIANT}" >> "${image_release}"
+    # Build-time truth for the release gate: stamped images never infer the
+    # suite from distro files at runtime.
+    printf 'RELEASE=%s\n' "${RELEASE}" >> "${image_release}"
+    # Required before the initramfs hooks (99-copy-tools) run: they stage
+    # the sanitize blobs fw_env_repair_blob dd's on both-bad rebuilds.
+    ota_build_env_sanitize_blobs "$1" || return 1
 }

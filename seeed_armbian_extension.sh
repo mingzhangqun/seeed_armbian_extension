@@ -128,19 +128,22 @@ function post_customize_image__010_disable_pcie_aspm() {
 	display_alert "PCIe ASPM" "Added pcie_aspm=off to armbianEnv.txt" "info"
 }
 
-# Traceability: append the extension revision to /etc/armbian-release
-# (matches BUILD_REPOSITORY_COMMIT there). Falls back to the checkout when
-# the wrapper did not run.
-function post_family_tweaks__999_seeed_extension_release_info() {
-	declare commit="${SEEED_EXTENSION_COMMIT:-}"
-	if [[ -z "${commit}" && -d "${SRC}/cache/sources/seeed_armbian_extension/.git" ]]; then
-		commit="$(git -C "${SRC}/cache/sources/seeed_armbian_extension" rev-parse HEAD 2>/dev/null || true)"
+# Stamp the extension repo/revision into the image identity file.
+function pre_update_initramfs__998_seeed_extension_release_info() {
+	declare repo="${SEEED_EXTENSION_REPO:-}" commit="${SEEED_EXTENSION_COMMIT:-}"
+	if [[ -d "${SRC}/cache/sources/seeed_armbian_extension/.git" ]]; then
+		[[ -z "${commit}" ]] && commit="$(git -C "${SRC}/cache/sources/seeed_armbian_extension" rev-parse HEAD 2>/dev/null || true)"
+		[[ -z "${repo}" ]] && repo="$(git -C "${SRC}/cache/sources/seeed_armbian_extension" remote get-url origin 2>/dev/null || true)"
 	fi
-	if [[ -f "${SDCARD}/etc/armbian-release" ]]; then
-		cat <<- EOF >> "${SDCARD}"/etc/armbian-release
+	[[ -z "${repo}" ]] && repo="${SRC}/cache/sources/seeed_armbian_extension"
+	local image_release="${MOUNT}/etc/armbian-image-release"
+	if [[ -f "${image_release}" ]]; then
+		sed -i '/^SEEED_EXTENSION_/d' "${image_release}"
+		cat <<- EOF >> "${image_release}"
+			SEEED_EXTENSION_REPO=${repo:-unknown}
 			SEEED_EXTENSION_COMMIT=${commit:-unknown}
 		EOF
 	else
-		display_alert "seeed-extension" "cannot record revision: /etc/armbian-release missing" "warn"
+		display_alert "seeed-extension" "cannot record revision: ${image_release} missing" "warn"
 	fi
 }
