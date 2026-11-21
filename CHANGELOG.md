@@ -11,6 +11,13 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **Secure FIT packaging survives a debs-cache hit.** With the kernel
+  deb restored from cache (kernel never compiled), the worktree has no
+  built DTB and no `resource.img`, so all secure-boot builds died at
+  "Board DTB not found" (exit 43) — or would have shipped an empty
+  `resource.img`. The board DTB now falls back to the rootfs
+  `/boot/dtb` tree (linux-dtb deb) and `resource.img` is rebuilt at
+  image time from the resolved DTB.
 - **Boot-swap hook swaps the payload marker.** `bsw_classify` left
   `payload-id` at `skip`, so every hook-mode OTA failed health check 6
   and rolled back its own successful apply; it now flips last
