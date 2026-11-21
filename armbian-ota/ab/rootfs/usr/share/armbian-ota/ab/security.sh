@@ -8,10 +8,24 @@ AB_OTA_TEE_PID=""
 AB_OTA_BYNAME_DIR="/dev/block/by-name"
 
 # ===== security partition discovery =====
+# Anchor to the root's disk; clones duplicate PARTLABEL=security.
 ab_get_security_part() {
-    local dev
+    local dev disk part root_src
 
-    dev="$(blkid -t PARTLABEL=security -o device 2>/dev/null | head -n1)"
+    root_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
+    [ -n "${root_src}" ] || root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    part="$(ab_resolve_physical_part_dev "${root_src:-}" 2>/dev/null || true)"
+    if [ -n "${part}" ] && [ -e "${part}" ]; then
+        disk="$(lsblk -no PKNAME "${part}" 2>/dev/null | head -n1 || true)"
+        # lsblk PKNAME emits bare kernel names; the blkid filter matches
+        # /dev/ paths, so re-prefix
+        [ -n "${disk}" ] && disk="/dev/${disk}"
+    fi
+    if [ -n "${disk}" ]; then
+        dev="$(blkid -t PARTLABEL=security -o device 2>/dev/null |
+            grep -E "^${disk}p[0-9]+$" | head -n1 || true)"
+    fi
+    [ -z "${dev}" ] && dev="$(blkid -t PARTLABEL=security -o device 2>/dev/null | head -n1)"
     if [ -z "${dev}" ]; then
         dev="$(blkid -t LABEL=security -o device 2>/dev/null | head -n1)"
     fi

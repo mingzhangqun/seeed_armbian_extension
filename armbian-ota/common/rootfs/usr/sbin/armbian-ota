@@ -11,7 +11,10 @@ export OTA_RUNTIME_DIR
 HAS_BACKEND=""
 for _mode in ab recovery; do
     if [ -f "${OTA_RUNTIME_DIR}/${_mode}/backend.sh" ]; then
-        . "${OTA_RUNTIME_DIR}/${_mode}/backend.sh"
+        . "${OTA_RUNTIME_DIR}/${_mode}/backend.sh" || {
+            echo "ERROR: failed to load the ${_mode} OTA backend" >&2
+            exit 1
+        }
         HAS_BACKEND="${_mode}"
         break
     fi
@@ -41,18 +44,8 @@ detect_device_encryption() {
         done
         echo "no"
     else
-        # Recovery: answer from the root filesystem this system actually runs
-        # from. A system-wide crypto_LUKS scan would let a LUKS partition on an
-        # attached second disk answer for the boot device and reject valid
-        # plain packages (and vice versa).
-        local root_src
-        root_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-        [ -n "${root_src}" ] || root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-        [ -n "${root_src}" ] || root_src="$(df / | awk 'NR==2 {print $1}')"
-        case "${root_src}" in
-            /dev/mapper/*|/dev/dm-*) echo "yes" ;;
-            *) [ "$(blkid -o value -s TYPE "${root_src}" 2>/dev/null || true)" = "crypto_LUKS" ] && echo "yes" || echo "no" ;;
-        esac
+        # Recovery: only the running root answers; a global blkid could hit another disk.
+        ota_system_encrypted && echo "yes" || echo "no"
     fi
 }
 

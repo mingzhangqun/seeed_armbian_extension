@@ -174,9 +174,10 @@ ota_check_board_release() {
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
     sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
-    # Build-stamped truth: the image identity file carries RELEASE= next to
-    # IMAGE_VARIANT (rootfs-install hook, image finalize).
+    # Release truth: identity-file stamp; legacy falls back to /etc/armbian-release.
     sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    [ -n "${sys_release}" ] ||
+        sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -207,68 +208,38 @@ ota_check_image_variant() {
         error_exit "OTA package IMAGE_VARIANT mismatch: package=${package_variant}, device=${system_variant}; CLI and Desktop images cannot cross-upgrade"
 }
 
-# KIND=full implies BOTH the rootfs archive and a boot payload exist and are
-# covered by their checksum files. This is an explicit assertion, not a side
-# effect of checksum verification: a broken build can drop the boot member
-# together with its checksum entry and still verify green -- which would
-# apply "new rootfs + old boot" and leave the device unbootable. Shared by
-# both modes (A/B had no equivalent check at all before this).
-# Payload shapes by layout/tier:
-#   boot: dual tar (boot.tar.<fmt>, ext4 layouts) or signed boot.itb
-#         (raw-FIT/secure, written by write_raw_boot_itb)
-#   rootfs: rootfs.tar.<fmt>, or rootfs.tar.<fmt>.enc on encrypted builds --
-#         encryption is mandatory for secure boot, so demanding the plaintext
-#         member there refused every secure package at start time
+# KIND=full must carry both payloads; a missing boot member bricks the device.
 ota_assert_dual_payload() {
-    local package_path="$1"
-    local fmt member root_member
+    local work_dir="$1"
+    local root_member boot_member
 
-    fmt="$(package_env_get_value "PAYLOAD_FORMAT" || echo "gz")"
-    case "${fmt}" in
-        xz)   fmt="xz" ;;
-        zstd) fmt="zst" ;;
-        zst)  fmt="zst" ;;
-        gz)   fmt="gz" ;;
-        *) error_exit "Unknown PAYLOAD_FORMAT: ${fmt}" ;;
-    esac
-
-    local listing boot_member
-    listing="$(tar -tf "${package_path}" 2>/dev/null)" ||
-        error_exit "Cannot list OTA package: ${package_path}"
-
-    if printf '%s\n' "${listing}" | grep -qxE '(\./)?boot\.itb'; then
+    if [ -f "${work_dir}/boot.itb" ]; then
         boot_member="boot.itb"
+    elif [ -n "${OTA_PAYLOAD_BOOT_TAR}" ] && [ -f "${work_dir}/${OTA_PAYLOAD_BOOT_TAR}" ]; then
+        boot_member="${OTA_PAYLOAD_BOOT_TAR}"
     else
-        boot_member="boot.tar.${fmt}"
+        error_exit "KIND=full package has no boot payload (dual-payload assertion failed)"
     fi
-    if printf '%s\n' "${listing}" | grep -qxE "(\./)?rootfs\.tar\.${fmt//./\\.}"; then
-        root_member="rootfs.tar.${fmt}"
+    if [ -f "${work_dir}/${OTA_PAYLOAD_ROOTFS_TAR}" ]; then
+        root_member="${OTA_PAYLOAD_ROOTFS_TAR}"
     else
         # encrypted builds ship only the blob; the plaintext materializes on
         # device during staging (ota_process_encrypted_payload)
-        root_member="rootfs.tar.${fmt}.enc"
+        root_member="${OTA_PAYLOAD_ROOTFS_ENC}"
     fi
+    [ -f "${work_dir}/${root_member}" ] ||
+        error_exit "KIND=full package is missing ${root_member} (dual-payload assertion failed)"
 
-    # final tarball members carry no ./ prefix (find -printf '%P'), but be
-    # liberal and accept both spellings
-    for member in "${root_member}" "${boot_member}"; do
-        printf '%s\n' "${listing}" | grep -qxE "(\./)?${member//./\\.}" ||
-            error_exit "KIND=full package is missing ${member} (dual-payload assertion failed)"
-    done
+    # rootfs.sha256 covers the plaintext tar name, even when only the .enc blob ships.
+    local member
     for member in "rootfs.sha256" "boot.sha256"; do
-        printf '%s\n' "${listing}" | grep -qxE "(\./)?${member//./\\.}" ||
+        [ -f "${work_dir}/${member}" ] ||
             error_exit "OTA package is missing checksum file ${member} (dual-payload assertion failed)"
     done
-
-    # each checksum file must actually cover its payload member. rootfs.sha256
-    # is written at build time against the PLAINTEXT tar name, before the
-    # encryption step replaces it, so it covers rootfs.tar.<fmt> even when the
-    # package ships only the .enc blob.
-    local root_sha boot_sha
-    root_sha="$(tar -xOf "${package_path}" "rootfs.sha256" 2>/dev/null | grep -c "rootfs.tar.${fmt}" || true)"
-    [ "${root_sha:-0}" -ge 1 ] || error_exit "rootfs.sha256 does not cover rootfs.tar.${fmt}"
-    boot_sha="$(tar -xOf "${package_path}" "boot.sha256" 2>/dev/null | grep -c "${boot_member}" || true)"
-    [ "${boot_sha:-0}" -ge 1 ] || error_exit "boot.sha256 does not cover ${boot_member}"
+    grep -q "${OTA_PAYLOAD_ROOTFS_TAR}" "${work_dir}/rootfs.sha256" ||
+        error_exit "rootfs.sha256 does not cover ${OTA_PAYLOAD_ROOTFS_TAR}"
+    grep -q "${boot_member}" "${work_dir}/boot.sha256" ||
+        error_exit "boot.sha256 does not cover ${boot_member}"
 }
 
 # ===== partition capacity gate =================================================
@@ -353,17 +324,6 @@ OTA_HOOK_API="1"
 OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
 # Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.
 OTA_HOOK_LEGACY_NAME="ota-apply-hook.sh"
-
-# Single format map mirrored in package-create.sh (build side) and the
-# initramfs payload lib: fmt -> tar extract flag.
-ota_format_tar_extract_flag() {
-    case "${1}" in
-        *.tar.gz|*.tgz) echo "-xzf" ;;
-        *.tar.xz)       echo "-xJf" ;;
-        *.tar.zst)      echo "--zstd" ;;
-        *)              echo "" ;;
-    esac
-}
 
 # Magic-byte sniff: the payload's first bytes must match its suffix so a
 # renamed archive cannot bypass format negotiation.
@@ -512,7 +472,8 @@ ota_source_library() {
         echo "ERROR: ${library_name} not found: ${library_path}" >&2
         return 1
     }
-    . "${library_path}"
+    # Propagate the library's own load-time guard (missing dependency).
+    . "${library_path}" || return 1
 }
 
 init_logging() {
@@ -773,11 +734,16 @@ ota_get_security_part() {
     part="${root_src}"
     case "${root_src}" in
         /dev/mapper/*|/dev/dm-*)
+            # lsblk PKNAME emits bare kernel names (mmcblk0p5, no /dev/);
+            # lsblk itself rejects those as inputs, so re-prefix them.
             part="$(lsblk -snro PKNAME "${root_src}" 2>/dev/null | head -n1 || true)"
+            [ -n "${part}" ] && part="/dev/${part}"
             ;;
     esac
-    if [ -n "${part}" ]; then
+    if [ -n "${part}" ] && [ -e "${part}" ]; then
         disk="$(lsblk -no PKNAME "${part}" 2>/dev/null | head -n1 || true)"
+        # same bare-name rule: the blkid filter below matches /dev/ paths
+        [ -n "${disk}" ] && disk="/dev/${disk}"
     fi
     if [ -n "${disk}" ]; then
         dev="$(blkid -t PARTLABEL=security -o device 2>/dev/null |

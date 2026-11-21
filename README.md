@@ -2,52 +2,41 @@
 
 Armbian board-support extensions for Seeed reComputer RK3576/RK3588 devices:
 
-- **OTA updates** — Recovery (single system, initramfs-applied) and A/B (dual slot with health checks and automatic rollback)
-- **Disk encryption** — LUKS rootfs with unattended automatic unlock (security partition + OP-TEE)
-- **Secure boot** — Rockchip signed bootchain: loader → SPL → U-Boot FIT (ATF + OP-TEE) → signed kernel FIT
-- **Robustness extras** — SSH power-loss recovery, multi-disk boot anchoring, PCIe ASPM off (`extraargs=pcie_aspm=off`)
+- **OTA updates** — Recovery (single system, initramfs-applied) and A/B
+  (dual slot, health checks, automatic rollback)
+- **Disk encryption** — LUKS rootfs with unattended unlock (security
+  partition + OP-TEE)
+- **Secure boot** — Rockchip signed bootchain: loader → SPL → U-Boot FIT
+  (ATF + OP-TEE) → signed kernel FIT
+- **Robustness extras** — SSH power-loss recovery, multi-disk boot
+  anchoring, PCIe ASPM off (`extraargs=pcie_aspm=off`)
 
-> New here? Follow the step-by-step guides under [`docs/`](docs/README.md) —
-> from environment setup to your first OTA update.
+> New here? Start with the step-by-step guides under [`docs/`](docs/README.md).
 
 ## Prebuilt Images
 
-Want a ready-made image without building anything? Download it here:
-
-**<https://github.com/Seeed-Studio/armbian-build/releases>**
-
-1. Open the **newest** release (it is rebuilt on every CI run).
-2. Find your board in the download table: **rk3576-devkit**, **rk3588-devkit**
-   or **rk3576-module-devkit**.
-3. Pick a row — Debian 13 / Ubuntu 26.04, Gnome / Minimal (CLI), AB / Recovery —
-   and click **IMAGE** for the flashable system image (`.img.xz`, `.sha256`
-   next to it on OneDrive for verification). **OTA** in the same row is the
-   update package matching that image.
-4. Flash it as shown in [docs/01-getting-started.md §5](docs/01-getting-started.md#5-flash-and-boot).
+Download from **<https://github.com/Seeed-Studio/armbian-build/releases>**
+(newest release, rebuilt on every CI run): pick your board's row —
+Debian 13 / Ubuntu 26.04 × Gnome / Minimal (CLI) × AB / Recovery — then
+**IMAGE** to flash (`.img.xz` + `.sha256`) or **OTA** for the matching
+update package. Flashing steps: [docs/01-getting-started.md §5](docs/01-getting-started.md#5-flash-and-boot).
 
 ## Quick Start
 
-Builds run from an Armbian build tree with this extension cloned alongside.
-The `scripts/build.sh` wrapper must be staged next to `compile.sh` (see
-[docs/01-getting-started.md](docs/01-getting-started.md); full reference in
-[docs/02-build-reference.md](docs/02-build-reference.md)):
+Builds run from an Armbian build tree with this extension cloned alongside
+and `scripts/build.sh` staged next to `compile.sh` (see
+[docs/01-getting-started.md](docs/01-getting-started.md);
+full reference in [docs/02-build-reference.md](docs/02-build-reference.md)):
 
 ```bash
 cd <armbian-build>    # scripts/build.sh staged next to compile.sh
 
-# Recovery OTA image
-./build.sh recovery -b recomputer-rk3576-devkit
+./build.sh recovery -b recomputer-rk3576-devkit     # Recovery OTA image
+./build.sh ab -b recomputer-rk3576-devkit           # A/B OTA image
 
-# A/B OTA image
-./build.sh ab -b recomputer-rk3576-devkit
-
-# Encrypted + signed recovery image (64-char passphrase!)
+# Encrypted + signed (passphrase must be exactly 64 chars)
 CRYPTROOT_PASSPHRASE='<64-char-passphrase>' \
 ./build.sh recovery secure-boot --minimal -b recomputer-rk3576-devkit
-
-# Encrypted + signed A/B image
-CRYPTROOT_PASSPHRASE='<64-char-passphrase>' \
-./build.sh ab secure-boot -b recomputer-rk3576-devkit
 ```
 
 Images land in `output/images/`, logs in `output/logs/`.
@@ -61,7 +50,7 @@ armbian-ota status                        # check state after reboot
 armbian-ota switch-slot [a|b]             # A/B firmware only
 ```
 
-Details and troubleshooting: [docs/03-ota-recovery.md](docs/03-ota-recovery.md),
+Details: [docs/03-ota-recovery.md](docs/03-ota-recovery.md),
 [docs/04-ota-ab.md](docs/04-ota-ab.md).
 
 ## Feature Matrix
@@ -74,22 +63,21 @@ Details and troubleshooting: [docs/03-ota-recovery.md](docs/03-ota-recovery.md),
 | Secure rootfs | `RK_OPTEE_BOOT_ENABLE=yes` | LUKS + OP-TEE/SSKR automatic unlock, unsigned bootchain |
 | Secure boot | `RK_SECURE_UBOOT_ENABLE=yes` | Secure rootfs plus Rockchip signed boot flow |
 
-OTA flags combine freely with the encryption tiers (plain / secure-rootfs / secure-boot).
+OTA flags combine freely with the encryption tiers (plain / secure-rootfs /
+secure-boot).
 
 ## Documentation
 
-| Guide | What you will learn |
-|---|---|
-| [docs/01-getting-started.md](docs/01-getting-started.md) | Prepare the environment, stage the wrapper, run your first build |
-| [docs/02-build-reference.md](docs/02-build-reference.md) | Every `build.sh` profile/option and every environment variable, linked to source |
-| [docs/03-ota-recovery.md](docs/03-ota-recovery.md) | Recovery OTA end to end: build → flash → update → troubleshoot |
-| [docs/04-ota-ab.md](docs/04-ota-ab.md) | A/B OTA end to end: slots, rollback layers, slot switching |
-| [docs/05-encryption.md](docs/05-encryption.md) | LUKS + automatic unlock: how the secret flows, what to guard |
-| [docs/06-secure-boot.md](docs/06-secure-boot.md) | Signed bootchain, signing keys, the mkimage/PSS salt pitfall |
-| [docs/07-tools-and-ci.md](docs/07-tools-and-ci.md) | Offline FIT re-signing, deb release chain, CI builds |
-| [docs/08-hardening.md](docs/08-hardening.md) | Always-on image hardening: brute-force defense layers, ssh-protect |
-| [`armbian-ota/README.md`](armbian-ota/README.md) | OTA internals reference (developer-oriented) |
-| [`CHANGELOG.md`](CHANGELOG.md) | Notable changes |
+- [docs/01](docs/01-getting-started.md) setup and first build ·
+  [docs/02](docs/02-build-reference.md) every profile and variable
+- [docs/03](docs/03-ota-recovery.md) / [docs/04](docs/04-ota-ab.md)
+  Recovery and A/B OTA end to end
+- [docs/05](docs/05-encryption.md) LUKS + automatic unlock ·
+  [docs/06](docs/06-secure-boot.md) signed bootchain and keys
+- [docs/07](docs/07-tools-and-ci.md) re-signing, deb chain, CI ·
+  [docs/08](docs/08-hardening.md) image hardening
+- [`armbian-ota/README.md`](armbian-ota/README.md) OTA internals ·
+  [`CHANGELOG.md`](CHANGELOG.md) versioned changes
 
 ## Repository Layout
 
@@ -107,21 +95,22 @@ seeed_armbian_extension/
 ```
 
 Board U-Boot defconfigs live in the Armbian build tree
-(`patch/u-boot/legacy/u-boot-radxa-rk35xx/defconfig/`); secure-boot fragments,
-kernel FIT ITS templates, and the ATF+OP-TEE FIT generator live in
-`rk_secure-disk-encryption/u-boot/`.
+(`patch/u-boot/legacy/u-boot-radxa-rk35xx/defconfig/`); secure-boot
+fragments, kernel FIT ITS templates and the ATF+OP-TEE FIT generator live
+in `rk_secure-disk-encryption/u-boot/`.
 
 ## Entry-Script Rules
 
 `seeed_armbian_extension.sh` only composes flags — it implements nothing:
 
-1. `RK_SECURE_UBOOT_ENABLE` and `RK_OPTEE_BOOT_ENABLE` are mutually exclusive.
-2. Either one auto-enables `CRYPTROOT_ENABLE=yes` + `RK_AUTO_DECRYP=yes`.
-3. `RK_AUTO_DECRYP=yes` without one of them is rejected.
-4. Auto-decrypt forces `CRYPTROOT_SSH_UNLOCK=no` — the unlock passphrase has
-   exactly one source, no SSH side channel.
-5. `OTA_ENABLE=yes` enables the OTA hooks (mode selected by `AB_PART_OTA`).
+1. `RK_SECURE_UBOOT_ENABLE` and `RK_OPTEE_BOOT_ENABLE` are mutually
+   exclusive; either one auto-enables `CRYPTROOT_ENABLE=yes` +
+   `RK_AUTO_DECRYP=yes`, and `RK_AUTO_DECRYP` alone is rejected.
+2. Auto-decrypt forces `CRYPTROOT_SSH_UNLOCK=no` — the unlock passphrase
+   has exactly one source, no SSH side channel.
+3. `OTA_ENABLE=yes` enables the OTA hooks (mode selected by
+   `AB_PART_OTA`).
 
-The passphrase is validated **non-empty only** at build time; use 64
-characters — that is the exact byte count the initramfs reads back at unlock
+The passphrase is validated **non-empty only** at build time; use exactly 64
+characters — the byte count the initramfs reads back at unlock
 ([docs/05-encryption.md](docs/05-encryption.md)).
