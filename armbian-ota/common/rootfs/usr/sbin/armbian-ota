@@ -11,7 +11,10 @@ export OTA_RUNTIME_DIR
 HAS_BACKEND=""
 for _mode in ab recovery; do
     if [ -f "${OTA_RUNTIME_DIR}/${_mode}/backend.sh" ]; then
-        . "${OTA_RUNTIME_DIR}/${_mode}/backend.sh"
+        . "${OTA_RUNTIME_DIR}/${_mode}/backend.sh" || {
+            echo "ERROR: failed to load the ${_mode} OTA backend" >&2
+            exit 1
+        }
         HAS_BACKEND="${_mode}"
         break
     fi

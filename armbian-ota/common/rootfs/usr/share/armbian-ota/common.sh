@@ -184,8 +184,12 @@ ota_check_board_release() {
 
     sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
     # Build-stamped truth: the image identity file carries RELEASE= next to
-    # IMAGE_VARIANT (rootfs-install hook, image finalize).
+    # IMAGE_VARIANT (rootfs-install hook, image finalize). Legacy devices
+    # pre-date the stamp; their /etc/armbian-release RELEASE is the static
+    # build artifact to gate on instead of skipping the release check.
     sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    [ -n "${sys_release}" ] ||
+        sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -498,7 +502,8 @@ ota_source_library() {
         echo "ERROR: ${library_name} not found: ${library_path}" >&2
         return 1
     }
-    . "${library_path}"
+    # Propagate the library's own load-time guard (missing dependency).
+    . "${library_path}" || return 1
 }
 
 init_logging() {

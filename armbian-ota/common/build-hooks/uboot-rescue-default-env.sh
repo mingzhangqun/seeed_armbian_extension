@@ -36,7 +36,7 @@ function post_family_config__seeed_ota_stage_uboot_rescue_default_env() {
 	display_alert "seeed-ota" "staged rescue-default-env U-Boot patch -> ${target_dir}" "info"
 }
 
-# Stage the redundant-env U-Boot patch for rk3576 boards. The patch makes
+# Stage the redundant-env U-Boot patch for rk3576/rk3588 boards. The patch makes
 # CONFIG_ENV_OFFSET_REDUND selectable for the block-device env driver and
 # defaults it to 0x3f0000 (the 32 KiB directly below the 0x3f8000 primary
 # env; rk3576 keeps u-boot.itb at the 8 MiB raw slot, rk3588 keeps U-Boot
