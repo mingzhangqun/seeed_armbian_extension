@@ -259,6 +259,12 @@ function rk_secure_storage_write_passphrase() {
         return 0
     fi
 
+    # Initramfs reads a fixed 64 bytes (decryption-disk.sh dd count=64);
+    # a non-64-char passphrase makes first boot unlock with NUL padding.
+    if [[ "${#CRYPTROOT_PASSPHRASE}" -ne 64 ]]; then
+        exit_with_error "secure-storage" "CRYPTROOT_PASSPHRASE must be exactly 64 characters (got ${#CRYPTROOT_PASSPHRASE})"
+    fi
+
     display_alert "secure-storage" "Writing CRYPTROOT_PASSPHRASE to security partition" "info"
     wait_for_disk_sync "before writing to security partition"
 
@@ -272,7 +278,7 @@ function rk_secure_storage_write_passphrase() {
     if [[ "${read_back}" == "${CRYPTROOT_PASSPHRASE}" ]]; then
         display_alert "secure-storage" "Password written and verified successfully" "info"
     else
-        display_alert "secure-storage" "Password write verification failed" "warn"
+        exit_with_error "secure-storage" "Password write verification failed (security partition corrupt)"
     fi
 
     sync

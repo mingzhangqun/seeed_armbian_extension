@@ -33,7 +33,7 @@ function pre_update_initramfs__300_optee_inject() {
 
     [[ -d "${root_dir}" ]] || {
         display_alert "optee" "root_dir does not exist: ${root_dir}" "err"
-        return 0
+        return 1
     }
 
     rk_autodecrypt_install_optee_client "${root_dir}" "${RK_AUTODECRYPT_SDK_TOOLS}" || return 1
