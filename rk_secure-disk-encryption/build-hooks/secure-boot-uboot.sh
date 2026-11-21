@@ -344,7 +344,8 @@ function rk_secure_boot_sign_uboot_fit() {
     grep -Eq 'rsa(2048|4096)' u-boot.its || exit_with_error "U-Boot ITS has no supported RSA signature node" "u-boot.its"
 
     # Shared prep: prebuilt mkimage + USBPLUG-clobbered host tools + padding.
-    fit_padding="$(rk_secure_boot_prepare_signing_toolchain "$(pwd)")"
+    rk_secure_boot_prepare_signing_toolchain "$(pwd)"
+    local fit_padding="${RK_SECURE_BOOT_FIT_PADDING}"
     mkdir -p fit || exit_with_error "Failed to create FIT output directory" "${PWD}/fit"
     rm -f fit/uboot.itb data2sign.bin
 
