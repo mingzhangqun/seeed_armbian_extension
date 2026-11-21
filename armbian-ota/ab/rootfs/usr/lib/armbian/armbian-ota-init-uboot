@@ -190,6 +190,12 @@ ensure_fw_env_config() {
 
 configure_ab_boot_environment() {
     ensure_fw_env_config "${boot_a_dev}" || return 1
+    # trixie libubootenv refuses to write a bad-CRC env; sanitize the blob
+    # from this image's compiled default env so ab_env_* can rebuild on top.
+    if fw_env_crc_bad; then
+        log_info "U-Boot env blob bad CRC; sanitizing before A/B env init"
+        fw_env_repair_blob || log_error "sanitize blob unavailable; fw_setenv must rebuild"
+    fi
     ab_env_initialize_default "${CURRENT_SLOT}" || return 1
     ab_env_repair_defaults "${CURRENT_SLOT}" || return 1
     ab_env_set \
