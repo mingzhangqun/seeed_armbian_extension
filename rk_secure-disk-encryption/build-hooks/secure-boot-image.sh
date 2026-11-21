@@ -211,9 +211,10 @@ function rk_secure_boot_resolve_mkimage() {
 }
 
 # Shared FIT-signing prep: prebuilt mkimage, tool rebuild, fit padding.
+# Must run in the parent shell: it resolves RK_SECURE_BOOT_MKIMAGE (lost in a
+# $(...) subshell) and sets RK_SECURE_BOOT_FIT_PADDING instead of stdout.
 function rk_secure_boot_prepare_signing_toolchain() {
     local uboot_dir="$1"
-    local fit_padding="0x1000"
 
     # Sign with the static Rockchip prebuilt only; tree-built salt breaks verifiers.
     [[ -x "${RK_SECURE_BOOT_MKIMAGE:-}" ]] || rk_secure_boot_resolve_mkimage
@@ -221,14 +222,14 @@ function rk_secure_boot_prepare_signing_toolchain() {
     # USBPLUG can clobber tools/mkimage; rebuild from the final config.
     if [[ -x "${uboot_dir}/tools/mkimage" ]] &&
         "${uboot_dir}/tools/mkimage" -h 2>&1 | grep -q 'Signing / verified boot not supported'; then
-        make -C "${uboot_dir}" -B tools-only ||
+        make -C "${uboot_dir}" -B tools-only >&2 ||
             exit_with_error "FIT signing failed: unable to rebuild U-Boot host tools" "${uboot_dir}/tools"
     fi
 
+    RK_SECURE_BOOT_FIT_PADDING="0x1000"
     if grep -q '^CONFIG_FIT_ENABLE_RSA4096_SUPPORT=y' "${uboot_dir}/.config" 2>/dev/null; then
-        fit_padding="0x1200"
+        RK_SECURE_BOOT_FIT_PADDING="0x1200"
     fi
-    printf '%s\n' "${fit_padding}"
 }
 
 function rk_secure_boot_prepare_fit_workdir() {
@@ -305,7 +306,8 @@ function rk_secure_boot_run_secondary_fit_signing() {
         return 0
     fi
 
-    fit_padding="$(rk_secure_boot_prepare_signing_toolchain "${uboot_dir}")"
+    rk_secure_boot_prepare_signing_toolchain "${uboot_dir}"
+    local fit_padding="${RK_SECURE_BOOT_FIT_PADDING}"
 
     display_alert "fit-post-initrd" "Signing final FIT from boot-final.its" "info"
     (
