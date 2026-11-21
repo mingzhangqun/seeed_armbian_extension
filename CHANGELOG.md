@@ -11,6 +11,32 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **Boot-swap hook swaps the payload marker.** `bsw_classify` left
+  `payload-id` at `skip`, so every hook-mode OTA failed health check 6
+  and rolled back its own successful apply; it now flips last
+  (`critical`), after all boot files.
+- **Preserved `recovery/` counts toward boot capacity.** The rescue-asset
+  measurement ran after the boot partition was unmounted (condition
+  always false); it now runs while mounted.
+- **Passphrase length is enforced at build time.** Initramfs reads a
+  fixed 64 bytes; a non-64-char `CRYPTROOT_PASSPHRASE` (only CI
+  preflight checked) unlocked with NUL padding and bricked first boot.
+  Write-verification mismatch is now a hard error too.
+- **Missing `root_dir` hard-fails the OP-TEE initramfs install** instead
+  of shipping an image that dies at the TEE gate.
+- **FIT signing prep runs in the parent shell.** The `$(...)` capture
+  forked away `RK_SECURE_BOOT_MKIMAGE` and let the `make tools-only` log
+  pollute `fit_padding`; full secure builds failed at U-Boot FIT signing.
+  Padding now travels in `RK_SECURE_BOOT_FIT_PADDING`.
+- **Env residue detection strips NUL.** busybox grep matches NUL bytes,
+  so all-0x00 image-gap padding read as redundant residue in the
+  initramfs probe and single-copy devices were misrepaired as redundant
+  (persistent bad CRC, Rescue loop).
+- **fwenv temp files use `mktemp`** instead of predictable `/tmp` paths
+  written by root.
+- **Security-part scan anchor accepts `sdX`/`vdX` partitions** (`p?[0-9]+`);
+  those disks previously fell back to the unanchored first PARTLABEL hit.
+
 - **A/B init survives a missing boot-mode stamp.** Sourcing fwenv.sh ran the
   on-device layout probe at load time; on A/B images the stamp never exists
   (Recovery-only producer), so the failed `cat` aborted set -e callers at
