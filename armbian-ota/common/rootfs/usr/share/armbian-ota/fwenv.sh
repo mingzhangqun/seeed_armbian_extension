@@ -63,8 +63,31 @@ fw_env_boot_disk() {
     [ -n "${anchor_dev}" ] && fw_env_parent_disk "${anchor_dev}"
 }
 
-# Ask libubootenv which format the bootloader writes: single-entry and
-# two-entry probe configs parse the CRC spans mutually exclusively.
+# Clean read = exit 0, no bad-CRC warning, non-empty list.
+fw_env_read_clean() {
+    err_file="${TMPDIR:-/tmp}/fwenv.probe.$$"
+
+    env_out="$(fw_printenv -c "$1" 2> "${err_file}")" || {
+        rm -f "${err_file}" 2>/dev/null || true
+        return 1
+    }
+    if grep -qiE "bad crc|cannot read environment|failed to read environment" "${err_file}"; then
+        rm -f "${err_file}" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "${err_file}" 2>/dev/null || true
+    [ -n "${env_out}" ]
+}
+
+# Residue at 0x3f0000 proves a redundant U-Boot (single-copy never writes it).
+fw_env_redund_area_written() {
+    [ -b "$1" ] || return 1
+    dd if="$1" bs=512 skip=$((OTA_FW_ENV_REDUND_OFFSET / 512)) \
+        count=$((OTA_FW_ENV_SIZE / 512)) 2>/dev/null \
+        | tr -d '\377' | grep -q .
+}
+
+# Probe env format via exclusive CRC spans; never default to single.
 fw_env_probe_redundant() {
     probe_disk="$1"
 
@@ -74,18 +97,18 @@ fw_env_probe_redundant() {
         rm -f "${probe_cfg}" 2>/dev/null || true
         return 1
     }
-    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
+    if fw_env_read_clean "${probe_cfg}"; then
         rm -f "${probe_cfg}" 2>/dev/null || true
         return 1
     fi
     printf '%s\t%s\t%s\n' "${probe_disk}" "${OTA_FW_ENV_REDUND_OFFSET}" "${OTA_FW_ENV_SIZE}" \
         >> "${probe_cfg}" 2>/dev/null
-    if fw_printenv -c "${probe_cfg}" >/dev/null 2>&1; then
+    if fw_env_read_clean "${probe_cfg}"; then
         rm -f "${probe_cfg}" 2>/dev/null || true
         return 0
     fi
     rm -f "${probe_cfg}" 2>/dev/null || true
-    return 1
+    fw_env_redund_area_written "${probe_disk}"
 }
 
 # (Re)write /etc/fw_env.config for boot disk $1. Idempotent; the second
