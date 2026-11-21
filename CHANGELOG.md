@@ -11,6 +11,34 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **A/B init survives a missing boot-mode stamp.** Sourcing fwenv.sh ran the
+  on-device layout probe at load time; on A/B images the stamp never exists
+  (Recovery-only producer), so the failed `cat` aborted set -e callers at
+  the source line — fw_env.config generation and every A/B OTA start died.
+  The read is now failure-tolerant.
+- **Env-format probe cannot misread dual bad-CRC disks.** fw_printenv exits
+  0 on a bad-CRC read on some libubootenv builds, and two failed reads
+  defaulted to single-entry config; on a redundant U-Boot those writes are
+  CRC-valid but never read back. Clean reads now require no bad-CRC warning
+  and a non-empty list; unreadable disks fall back to erased-area evidence
+  (a single-copy U-Boot never writes 0x3f0000).
+- **A/B gets the bad-CRC self-heal entry.** init-uboot sanitizes the env
+  blob from the image's compiled default env before the first A/B write, so
+  trixie libubootenv's refuse-to-write cannot wedge init at every boot.
+- **`get_parent_disk_dev` emits one device line.** The `|| echo` fallback
+  stacked the derived parent and the raw partition into the fw_env.config.
+- **Library load guards propagate.** env.sh/ota_source_library/CLI no longer
+  swallow a missing-fwenv `return 1`; the A/B CLI exits cleanly instead of
+  failing later on undefined functions.
+- **Release gate falls back to `/etc/armbian-release`** on images without
+  the identity stamp: the cross-release gate is no longer silently skipped
+  on legacy devices.
+- **Mirror reconcile sweeps only owned repos and reports honestly.** Kernel
+  source tags are deleted only when the fork belongs to the pipeline's
+  owner (stale-draft GC and the retire step); a 204 DELETE response is no
+  longer decoded as an error; stale-draft GC runs on every reconcile exit
+  path; dangling-candidate cleanup also sweeps extension/kernel source tags.
+
 - **Security-partition discovery now anchors to the boot disk.** `lsblk -no
   PKNAME` emits bare kernel names (no `/dev/` prefix) and rejects bare names
   as inputs, so the disk filter never matched and every pick fell through to
@@ -30,6 +58,12 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   `STATUS=rollback`; an unconfirmed pending state records `failed`, never
   `success`. Manual `switch-slot` starts a pending boot trial with the same
   health confirmation as OTA.
+
+### Security
+
+- **Plan outputs are charset-validated.** A newline in a dispatch repo input
+  could inject or override other `GITHUB_OUTPUT` keys (matrix, tag) and
+  steer the build matrix.
 
 ### Added
 
