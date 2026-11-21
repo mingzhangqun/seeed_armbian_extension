@@ -93,6 +93,16 @@ def kernel_repo_from_notes(body):
     return match.group(1) if match else None
 
 
+def owned_kernel_repo(body, workflow_repo):
+    """Kernel repo from the notes table, only when its owner matches this
+    pipeline's owner: the build only tags kernel forks it owns, so a
+    third-party repo named in the notes must never be swept."""
+    repo = kernel_repo_from_notes(body)
+    if repo and repo.split("/", 1)[0] == workflow_repo.split("/", 1)[0]:
+        return repo
+    return None
+
+
 def pipeline_owned(body, repo):
     """True when the Release body links a run of this pipeline's repository."""
     return bool(re.search(rf"{re.escape(repo)}/actions/runs/\d+\b", body or ""))

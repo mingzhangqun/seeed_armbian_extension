@@ -182,6 +182,15 @@ jobs:
                   raise SystemExit("ERROR: linux_rockchip_repo branch is empty")
               lr_repo = f"{lr_repo_part}:{lr_branch}"
 
+          # GITHUB_OUTPUT parses one key=value per line; a newline inside
+          # these repo refs would inject or override other outputs.
+          import re
+          safe_repo_ref = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]+$")
+          for name, value in (("ab_repo", ab_repo), ("lr_repo", lr_repo)):
+              if value and not safe_repo_ref.fullmatch(value):
+                  raise SystemExit(
+                      f"ERROR: {name} contains characters outside owner/repo:branch: {value!r}")
+
           def board_exists(board):
               headers = {"Accept": "application/vnd.github+json"}
               tok = os.environ.get("GH_TOKEN", "").strip()
@@ -470,7 +479,10 @@ jobs:
           # (nonexistent) old tags untouched.
           gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
           old_kernel_repo="$(jq -r '.[3]' <<<"$state" | python3 .github/scripts/notes-meta.py kernel-repo)"
-          if [[ -n "$old_kernel_repo" ]]; then
+          # Ownership gate matching the build's tagging step: only kernel
+          # repos owned by this run's owner were ever tagged, so a
+          # third-party repo named in the notes is never swept.
+          if [[ -n "$old_kernel_repo" && "${old_kernel_repo%%/*}" == "${GITHUB_REPOSITORY_OWNER}" ]]; then
             gh api --method DELETE "repos/${old_kernel_repo}/git/refs/tags/${OLD_TAG}" >/dev/null 2>&1 || true
             echo "swept kernel tag ${OLD_TAG} from ${old_kernel_repo} (if present)"
           fi
