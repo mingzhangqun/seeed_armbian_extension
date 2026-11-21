@@ -77,7 +77,8 @@ function resolve_kernel_dtb_path() {
     # Priority:
     # 1) RK_SECURE_KERNEL_DTB absolute path
     # 2) RK_SECURE_KERNEL_DTB filename under the kernel DTB directory
-    # 3) BOOT_FDT_FILE selected by the active board and kernel branch
+    # 3) BOOT_FDT_FILE in the kernel worktree, then in the rootfs /boot/dtb
+    #    (debs-cache hit: kernel not built in this run, dtb deb only)
     # 4) Legacy board + platform based candidate list
     local kernel_src="$1"
     local dtb_dir platform board candidate override board_dtb
@@ -107,10 +108,19 @@ function resolve_kernel_dtb_path() {
         board_dtb="${BOOT_FDT_FILE#/}"
         [[ "${board_dtb}" == *.dtb ]] ||
             exit_with_error "BOOT_FDT_FILE must name a DTB" "${BOOT_FDT_FILE}"
-        [[ -f "${kernel_src}/arch/arm64/boot/dts/${board_dtb}" ]] ||
-            { exit_with_error "Board DTB not found for FIT packaging" "${BOOT_FDT_FILE}; kernel=${kernel_src}"; return 1; }
-        echo "${kernel_src}/arch/arm64/boot/dts/${board_dtb}"
-        return 0
+        if [[ -f "${kernel_src}/arch/arm64/boot/dts/${board_dtb}" ]]; then
+            echo "${kernel_src}/arch/arm64/boot/dts/${board_dtb}"
+            return 0
+        fi
+        # Cache-hit builds never compile the kernel, so the worktree has no
+        # built DTBs; the linux-dtb deb installed in the rootfs does.
+        if [[ -f "${MOUNT:-}/boot/dtb/${board_dtb}" ]]; then
+            echo "${MOUNT}/boot/dtb/${board_dtb}"
+            return 0
+        fi
+        exit_with_error "Board DTB not found for FIT packaging" \
+            "${BOOT_FDT_FILE}; kernel=${kernel_src} rootfs=${MOUNT:-<not mounted>}"
+        return 1
     fi
 
     platform="$(rk_detect_platform)"
