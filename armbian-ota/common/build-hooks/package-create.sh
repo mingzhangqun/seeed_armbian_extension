@@ -727,6 +727,14 @@ function ota_create_payload_archives_impl() {
             umount "${boot_mount}" 2>/dev/null || true
             return 1
         }
+        # Recovery preserves its rescuer on the target ext4 boot partition
+        # while excluding it from the payload tar; measure it while the
+        # partition is still mounted so the capacity stamp covers it.
+        if [[ -d "${boot_mount}/recovery" ]]; then
+            rescue_bytes="$(du --apparent-size -sb "${boot_mount}/recovery" 2>/dev/null | tail -n1 | cut -f1)"
+            [[ "${rescue_bytes:-}" =~ ^[0-9]+$ ]] ||
+                exit_with_error "OTA capacity stamps" "cannot measure preserved recovery/ assets"
+        fi
         if ! umount "${boot_mount}"; then
             return 1
         fi
@@ -783,13 +791,7 @@ function ota_create_payload_archives_impl() {
     OTA_BOOT_BYTES="$(
         cd "${boot_stage}" 2>/dev/null && du --apparent-size -sb . | tail -n1 | cut -f1
     )"
-    # Recovery preserves its rescuer on the target ext4 boot partition while
-    # deliberately excluding it from the payload tar. Capacity must cover both
-    # the incoming payload and the assets that remain after the update.
-    if [[ "${AB_PART_OTA:-no}" != "yes" && -n "${boot_partition}" && -d "${boot_mount}/recovery" ]]; then
-        rescue_bytes="$(du --apparent-size -sb "${boot_mount}/recovery" 2>/dev/null | tail -n1 | cut -f1)"
-        [[ "${rescue_bytes:-}" =~ ^[0-9]+$ ]] ||
-            exit_with_error "OTA capacity stamps" "cannot measure preserved recovery/ assets"
+    if [[ "${AB_PART_OTA:-no}" != "yes" && -n "${boot_partition}" && -n "${rescue_bytes:-}" ]]; then
         OTA_BOOT_BYTES=$(( ${OTA_BOOT_BYTES:-0} + rescue_bytes ))
     fi
     [[ "${OTA_ROOTFS_BYTES:-}" =~ ^[0-9]+$ ]] ||
