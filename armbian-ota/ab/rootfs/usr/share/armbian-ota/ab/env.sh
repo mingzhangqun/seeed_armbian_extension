@@ -7,7 +7,9 @@ AB_PARTITIONS_LIB="${OTA_RUNTIME_DIR}/ab/partitions.sh"
     echo "ERROR: A/B partition helper not found: ${AB_PARTITIONS_LIB}" >&2
     return 1
 }
-. "${AB_PARTITIONS_LIB}"
+# The || propagates partitions.sh's missing-fwenv guard through callers
+# without set -e (CLI bare source, health-check's ota_source_library).
+. "${AB_PARTITIONS_LIB}" || return 1
 
 # fw_env_* helpers: shared with recovery via the common runtime.
 FW_ENV_LIB="${OTA_RUNTIME_DIR}/fwenv.sh"
