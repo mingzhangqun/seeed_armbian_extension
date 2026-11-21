@@ -436,13 +436,17 @@ function rk_secure_boot_create_resource_img() {
         return 0
     fi
 
+    # $1 = DTB path (default: resolved from the kernel worktree)
+    # $2 = output path (default: kernel worktree resource.img)
     local kernel_src="${SRC}/cache/sources/${LINUXSOURCEDIR}"
     local uboot_src="${SRC}/cache/sources/${BOOTSOURCEDIR}"
-    local dtb_path
-    dtb_path="$(resolve_kernel_dtb_path "${kernel_src}")"
+    local dtb_path="${1:-}"
+    local output_resource_img="${2:-${kernel_src}/resource.img}"
+    if [[ -z "${dtb_path}" ]]; then
+        dtb_path="$(resolve_kernel_dtb_path "${kernel_src}")"
+    fi
     display_alert "Creating resource.img" "Using DTB: ${dtb_path:-<not found>}" "info"
     local resource_tool="${uboot_src}/tools/resource_tool"
-    local output_resource_img="${kernel_src}/resource.img"
 
     # Check necessary files and tools
     [[ -f "${dtb_path}" ]] ||
@@ -526,6 +530,7 @@ function rk_secure_boot_package_final_fit() {
     local kernel_src="${SRC}/cache/sources/${LINUXSOURCEDIR}"
     local kernel_img_path
     local resource_path="${kernel_src}/resource.img"
+    local resource_tmp=""
     local fit_work="${TMPDIR:-/tmp}/fit-final-$$"
     local dtb_path
 
@@ -541,6 +546,16 @@ function rk_secure_boot_package_final_fit() {
     [[ -f "${kernel_img_path}" ]] || exit_with_error "FIT packaging failed: kernel image missing" "${kernel_img_path}"
     [[ -f "${dtb_path}" ]] || exit_with_error "FIT packaging failed: DTB missing" "${dtb_path}"
 
+    if [[ ! -f "${resource_path}" ]]; then
+        # Cache-hit builds never run pre_package_kernel_image, so the
+        # worktree resource.img does not exist; build it from the resolved DTB.
+        resource_tmp="${TMPDIR:-/tmp}/fit-resource-$$"
+        display_alert "fit-post-initrd" "Worktree resource.img missing; building at image time" "info"
+        rk_secure_boot_create_resource_img "${dtb_path}" "${resource_tmp}" ||
+            exit_with_error "FIT packaging failed: image-time resource.img build failed" "${resource_tmp}"
+        resource_path="${resource_tmp}"
+    fi
+
     rk_secure_boot_resolve_mkimage
     rk_secure_boot_prepare_fit_workdir "${fit_work}" "${kernel_img_path}" "${dtb_path}" "${resource_path}" "${RK_SECURE_BOOT_RAMDISK_PATH}"
     rk_secure_boot_apply_fit_template "${fit_work}"
@@ -550,6 +565,7 @@ function rk_secure_boot_package_final_fit() {
     rk_secure_boot_stage_final_fit "${fit_work}" "${RK_SECURE_BOOT_UBOOT_DIR}"
 
     rm -rf "${fit_work}" 2>/dev/null || true
+    [[ -n "${resource_tmp}" ]] && rm -f "${resource_tmp}" 2>/dev/null || true
     rk_secure_boot_remove_boot_fstab_entries
 }
 
