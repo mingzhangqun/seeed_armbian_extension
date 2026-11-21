@@ -57,7 +57,8 @@ Notes:
   (512 MiB) — an A/B image needs roughly twice the plain Recovery space.
 - The persistent U-Boot environment is stored at raw offset `0x3f8000`
   with a redundant copy at `0x3f0000` (size `0x8000` each) on the boot
-  disk, pre-filled at build time by
+  disk (redundant layout on rk3576/rk3588 only; other SoCs carry the
+  single `0x3f8000` copy), pre-filled at build time by
   [`uboot-env-prefill.sh`](../armbian-ota/common/build-hooks/uboot-env-prefill.sh)
   so a fresh image boots with working slot logic before Linux ever runs.
 
