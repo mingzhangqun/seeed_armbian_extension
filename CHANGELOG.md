@@ -58,6 +58,8 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   `SEEED_*` land in `/etc/armbian-image-release`; the release gate compares
   build-stamped truth (unstamped images skip with a warning). zstd
   capability is probed, not declared — A/B images install zstd for parity.
+- **secure-disk-encryption redundancy cleanup.** FIT-signing prep deduped
+  into one helper; dead knobs and debug scaffolding removed.
 
 ## 2026-11-13 ([f76cd2d3](https://github.com/Seeed-Studio/seeed_armbian_extension/commit/f76cd2d3))
 
