@@ -5,6 +5,7 @@ set -euo pipefail
 SERVICE_NAME="armbian-resize-userdata.service"
 USERDATA_PARTLABEL="userdata"
 USERDATA_FSLABEL="armbi_usrdata"
+LUKS_PASSPHRASE_FILE="/run/armbian-luks-passphrase"
 ALIGN_BYTES=$((16 * 1024 * 1024))
 RETRY_EXIT_STATUS=75
 
@@ -21,6 +22,10 @@ fail() {
     exit 1
 }
 
+# Shared POSIX parent-disk/userdata discovery (sysfs walk, clone-disk safe).
+# shellcheck source=/dev/null
+source /usr/share/armbian-ota/find-userdata.sh
+
 require_commands() {
     local command
 
@@ -31,20 +36,7 @@ require_commands() {
 }
 
 get_parent_disk_dev() {
-    local partdev="$1" pkname base
-
-    pkname="$(lsblk -dno PKNAME "${partdev}" 2>/dev/null || true)"
-    if [ -n "${pkname}" ]; then
-        echo "/dev/${pkname}"
-        return 0
-    fi
-
-    base="$(basename "${partdev}")"
-    case "${base}" in
-        nvme*n*p[0-9]*|mmcblk*p[0-9]*) echo "/dev/${base%p[0-9]*}" ;;
-        sd*[0-9]*) echo "/dev/${base%%[0-9]*}" ;;
-        *) return 1 ;;
-    esac
+    find_user_data__parent_disk "$1"
 }
 
 get_partition_number() {
@@ -150,12 +142,14 @@ resize_ext4_filesystem() {
 
 resize_luks_mapping() {
     local userdata_part="$1" mapper_name="$2"
-    local table table_size target_type data_offset userdata_size target_size new_table
+    local table table_size target_type data_offset userdata_size target_size
 
     command -v blockdev >/dev/null 2>&1 ||
         fail "blockdev is required to resize encrypted userdata"
     command -v dmsetup >/dev/null 2>&1 ||
         fail "dmsetup is required to resize encrypted userdata"
+    command -v cryptsetup >/dev/null 2>&1 ||
+        fail "cryptsetup is required to resize encrypted userdata"
 
     table="$(dmsetup table "${mapper_name}" 2>/dev/null)" ||
         fail "failed to read LUKS mapping ${mapper_name}"
@@ -181,16 +175,18 @@ resize_luks_mapping() {
         return 0
     fi
 
-    new_table="$(printf '%s\n' "${table}" | awk -v size="${target_size}" 'NR == 1 { $2 = size } { print }')"
+    # dmsetup table reload re-feeds the (masked) key and always fails on
+    # LUKS2; cryptsetup resize grows the mapping online via the kernel key.
     log "resizing LUKS mapping ${mapper_name} to ${target_size} sectors"
-    dmsetup suspend "${mapper_name}" ||
-        fail "failed to suspend LUKS mapping ${mapper_name}"
-    if ! printf '%s\n' "${new_table}" | dmsetup load "${mapper_name}"; then
-        dmsetup resume "${mapper_name}" || warn "failed to resume ${mapper_name} after loading error"
-        fail "failed to load resized LUKS mapping ${mapper_name}"
+    # No TTY in the service: without a key source cryptsetup dies with
+    # "Nothing to read on input". Use the initramfs-stashed passphrase.
+    if [ -r "${LUKS_PASSPHRASE_FILE}" ]; then
+        cryptsetup resize "${mapper_name}" --key-file "${LUKS_PASSPHRASE_FILE}" ||
+            fail "failed to resize LUKS mapping ${mapper_name}"
+    else
+        cryptsetup resize "${mapper_name}" ||
+            fail "failed to resize LUKS mapping ${mapper_name}"
     fi
-    dmsetup resume "${mapper_name}" ||
-        fail "failed to resume resized LUKS mapping ${mapper_name}"
 }
 
 find_userdata_partition() {
@@ -202,7 +198,7 @@ find_userdata_partition() {
     # partition so the parent-disk walk works for encrypted images too.
     root_part="$(_resize_userdata__find_root_lower_dev)"
     if [ -n "${root_part}" ]; then
-        anchor_disk="$(_resize_userdata__parent_disk "${root_part}" 2>/dev/null || true)"
+        anchor_disk="$(find_user_data__parent_disk "${root_part}" 2>/dev/null || true)"
     fi
 
     # 1) Whatever overlayroot already mounted at /media/root-rw. On encrypted
@@ -217,7 +213,7 @@ find_userdata_partition() {
         if [ -n "${dev}" ]; then
             dev_raw="$(_resize_userdata__raw_partition_of "${dev}" 2>/dev/null || true)"
             if [ -n "${dev_raw}" ] && [ -b "${dev_raw}" ]; then
-                dev_disk="$(_resize_userdata__parent_disk "${dev_raw}" 2>/dev/null || true)"
+                dev_disk="$(find_user_data__parent_disk "${dev_raw}" 2>/dev/null || true)"
                 if [ -z "${anchor_disk}" ] || [ "${dev_disk}" = "${anchor_disk}" ]; then
                     echo "${dev_raw}"
                     return 0
@@ -246,7 +242,7 @@ find_userdata_partition() {
     #    on encrypted images.
     if [ -n "${anchor_disk}" ]; then
         for cand in $(blkid -t PARTLABEL="${USERDATA_PARTLABEL}" -o device 2>/dev/null); do
-            dev_disk="$(_resize_userdata__parent_disk "${cand}" 2>/dev/null)" || continue
+            dev_disk="$(find_user_data__parent_disk "${cand}" 2>/dev/null)" || continue
             if [ "${dev_disk}" = "${anchor_disk}" ]; then
                 echo "${cand}"
                 return 0
@@ -298,28 +294,6 @@ _resize_userdata__raw_partition_of() {
     fi
 
     return 1
-}
-
-# Echo the parent disk of a partition using sysfs (no lsblk dep, so this
-# also works in restricted environments).
-_resize_userdata__parent_disk() {
-    local partdev="$1" resolved base parent_sys parent_name
-    case "${partdev}" in
-        /dev/*) ;;
-        *) partdev="/dev/${partdev}" ;;
-    esac
-    # Resolve symlinks (e.g. /dev/disk/by-label/... -> /dev/mmcblk1p1) so
-    # the sysfs lookup below uses the real node name.
-    resolved="$(readlink -f "${partdev}" 2>/dev/null || true)"
-    [ -n "${resolved}" ] && partdev="${resolved}"
-    [ -e "${partdev}" ] || return 1
-    base="$(basename "${partdev}")"
-    [ -L "/sys/class/block/${base}" ] || return 1
-    parent_sys="$(dirname "$(readlink -f "/sys/class/block/${base}")")"
-    parent_name="$(basename "${parent_sys}")"
-    [ -n "${parent_name}" ] || return 1
-    [ -e "/sys/class/block/${parent_name}/dev" ] || return 1
-    printf '/dev/%s\n' "${parent_name}"
 }
 
 # Walk through overlayfs to find the underlying rootfs partition device
@@ -398,10 +372,8 @@ main() {
             resize_ext4_filesystem "${userdata_part}"
             ;;
         crypto_LUKS)
-            if [ "${resize_status}" -eq 0 ]; then
-                warn "encrypted userdata partition resized; reboot is required to reopen the LUKS mapper before resizing its ext4 filesystem"
-                return 0
-            fi
+            # One stage: cryptsetup resize grows the mapping online in the
+            # same boot the partition grew; no mapper-reopen reboot needed.
             resize_luks_userdata "${userdata_part}"
             ;;
         *)
