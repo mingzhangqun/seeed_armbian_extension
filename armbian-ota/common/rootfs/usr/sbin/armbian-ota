@@ -129,6 +129,11 @@ case "${1:-}" in
         done
         [ $# -eq 1 ] || error_exit "start requires exactly one argument: the OTA package path (options: --force, --no-backup, --allow-release-change)"
         OTA_CLI_PACKAGE="$1"
+        # Lock before the slow package metadata read so a concurrent
+        # switch-slot cannot arm a trial mid-start (re-entrant with the
+        # backend's own acquire_lock).
+        init_logging
+        acquire_lock || error_exit "Cannot acquire OTA lock"
         check_ota_pkg "${OTA_CLI_PACKAGE}"
         call_mode_action "${OTA_CLI_MODE}" "start" "${OTA_CLI_PACKAGE}"
         ;;
