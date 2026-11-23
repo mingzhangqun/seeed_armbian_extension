@@ -519,6 +519,10 @@ acquire_lock() {
     if [ -f "${OTA_LOCK_FILE}" ]; then
         local lock_pid
         lock_pid="$(cat "${OTA_LOCK_FILE}" 2>/dev/null)"
+        # Re-acquisition by the same process (CLI pre-lock, backend re-lock) is a no-op.
+        if [ "${lock_pid}" = "$$" ]; then
+            return 0
+        fi
         if [ -n "${lock_pid}" ] && kill -0 "${lock_pid}" 2>/dev/null; then
             log_error "Another OTA process is running (PID: ${lock_pid})"
             return 1
