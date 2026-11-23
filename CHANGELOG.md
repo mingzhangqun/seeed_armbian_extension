@@ -11,6 +11,24 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **`start` holds the OTA lock through the package metadata read.** The CLI
+  read `package.env` (seconds on a large tar) before any lock, so a
+  concurrent `switch-slot` could legally take the lock mid-read and arm a
+  boot trial while the start was still running — two writers with no
+  arbitration. The lock is now acquired at CLI entry and is re-entrant
+  with the backend's own `acquire_lock`.
+- **A/B plain self-heals a stale target-root mount before mkfs.** A
+  SIGKILLed start leaves the inactive target root mounted in its OTA work
+  dir; the next start died at mkfs ("is mounted") and OTA stayed wedged
+  until manual umount or reboot. Plain A/B now mirrors the secure side's
+  stale-mapper self-heal: residue mounts are detached before rebuilding,
+  with a bounded wait for an orphaned extract pipeline to finish.
+- **Loader/OS mismatch fails fast at decryption.** A secure image booted
+  under a plain loader (no BL32/OP-TEE) previously fell through to a
+  manual cryptroot password prompt that could never succeed;
+  decryption-disk now panics with an explicit loader/OS-mismatch message
+  so first boot halts cleanly instead of appearing to wait for a
+  passphrase.
 - **Secure FIT packaging survives a debs-cache hit.** With the kernel
   deb restored from cache (kernel never compiled), the worktree has no
   built DTB and no `resource.img`, so all secure-boot builds died at
