@@ -17,6 +17,14 @@ FW_ENV_LIB="${OTA_RUNTIME_DIR}/fwenv.sh"
 }
 . "${FW_ENV_LIB}"
 
+# Repair key spec, single-sourced with the build-time completeness check.
+AB_ENV_KEYS_LIB="${OTA_RUNTIME_DIR}/ab/env-keys.sh"
+[ -r "${AB_ENV_KEYS_LIB}" ] || {
+    echo "ERROR: A/B env key spec not found: ${AB_ENV_KEYS_LIB}" >&2
+    return 1
+}
+. "${AB_ENV_KEYS_LIB}"
+
 ab_env_get() {
     fw_env_get "$@"
 }
@@ -87,11 +95,11 @@ ab_env_repair_defaults() {
 
     [ -s "${AB_INITIAL_ENV}" ] || return 1
 
-    for key in ota_in_progress slot_retry_max slot_retry_left; do
+    for key in ${AB_ENV_MISSING_KEYS}; do
         ab_env_apply_initial "${key}" || return 1
     done
 
-    for key in ab_preboot ab_select_boot_part scan_dev_for_boot_part ab_select_fit_slot bootcmd; do
+    for key in ${AB_ENV_SYNC_KEYS}; do
         ab_env_apply_initial "${key}" sync || return 1
     done
 

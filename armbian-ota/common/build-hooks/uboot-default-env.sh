@@ -74,7 +74,7 @@ function ota_ab_default_env_file_for_rootfs() {
 
 function ota_ab_write_complete_initial_env() {
     local root_dir="$1"
-    local default_env merged_env
+    local default_env merged_env key
 
     default_env="$(ota_ab_default_env_file_for_rootfs "${root_dir}")" || {
         display_alert "A/B U-Boot environment" "Packaged U-Boot default environment not found" "err"
@@ -95,6 +95,21 @@ function ota_ab_write_complete_initial_env() {
         rm -f "${merged_env}"
         return 1
     }
+
+    # Every repair key must resolve here: a key the runtime spec lists but
+    # the initial env lacks fails ab_env_repair_defaults on every boot.
+    # shellcheck source=/dev/null
+    source "${OTA_SUPPORT_DIR}/ab/rootfs/usr/share/armbian-ota/ab/env-keys.sh" || {
+        rm -f "${merged_env}"
+        return 1
+    }
+    for key in ${AB_ENV_MISSING_KEYS} ${AB_ENV_SYNC_KEYS}; do
+        grep -q "^${key}=" "${merged_env}" || {
+            display_alert "A/B U-Boot environment" "Initial env lacks repair key: ${key}" "err"
+            rm -f "${merged_env}"
+            return 1
+        }
+    done
 
     install -D -m 0644 "${merged_env}" "${root_dir}/etc/u-boot-initial-env" || {
         rm -f "${merged_env}"
