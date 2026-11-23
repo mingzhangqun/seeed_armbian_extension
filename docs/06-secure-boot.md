@@ -256,9 +256,10 @@ just script the good path. Four pieces do that:
    (the plain-direction mirror of 2):
    - rescue-default-env patch `#else`: `ota_rescue_boot_fit` is a
      refusal echo, dispatcher has no fit fallback;
-   - the env prefill and `fw_env_write_routing_set` write the same
-     stubs for the `*_boot_fit` keys on plain layouts (keys kept for
-     CRC-rebuild compatibility, scripts dead);
+   - the recovery env prefill and `fw_env_write_routing_set` write the
+     same stubs for the `*_boot_fit` keys on plain layouts (keys kept for
+     CRC-rebuild compatibility, scripts dead); the plain A/B prefill
+     writes no `*_boot_fit` keys at all;
    - the plain A/B prefill stamps `ab_boot_mode=filesystem`, so a flash
      overwrites any stale raw-fit value.
    Mismatch on plain stops at env routing, not at the TEE gate; env on

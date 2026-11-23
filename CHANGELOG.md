@@ -11,6 +11,19 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **Redundant env everywhere; no single-copy fallback.** Every shipped
+  U-Boot carries the redundant-env patch, so the probe/per-SoC gating and
+  `env-sanitize-single.bin` are gone: `fw_env.config` is always two
+  entries, the prefill always writes the `-r` dual copy. The old probe
+  guessed single-copy when no copy parsed; a both-bad rebuild then wrote
+  a blob the patched U-Boot could never read (default-env Rescue loop).
+- **One env-health predicate and rebuild mechanism on both flavors.**
+  The bad-CRC retry is `fw_setenv -f /etc/u-boot-initial-env` (the
+  libubootenv defenv base), same as A/B's `ab_env_initialize_default`;
+  the dd-sanitize machinery is deleted, `ab/env.sh` sources the common
+  `fwenv.sh`, and `armbian-ota-init-uboot` runs every boot so a mid-life
+  both-bad env self-heals on A/B too. The health check must read stderr:
+  `fw_printenv` exits 0 on a bad env once the initial env exists.
 - **`start` holds the OTA lock through the package metadata read.** The CLI
   read `package.env` (seconds on a large tar) before any lock, so a
   concurrent `switch-slot` could legally take the lock mid-read and arm a
@@ -53,10 +66,6 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   forked away `RK_SECURE_BOOT_MKIMAGE` and let the `make tools-only` log
   pollute `fit_padding`; full secure builds failed at U-Boot FIT signing.
   Padding now travels in `RK_SECURE_BOOT_FIT_PADDING`.
-- **Env residue detection strips NUL.** busybox grep matches NUL bytes,
-  so all-0x00 image-gap padding read as redundant residue in the
-  initramfs probe and single-copy devices were misrepaired as redundant
-  (persistent bad CRC, Rescue loop).
 - **fwenv temp files use `mktemp`** instead of predictable `/tmp` paths
   written by root.
 - **Security-part scan anchor accepts `sdX`/`vdX` partitions** (`p?[0-9]+`);
@@ -67,17 +76,6 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   (Recovery-only producer), so the failed `cat` aborted set -e callers at
   the source line — fw_env.config generation and every A/B OTA start died.
   The read is now failure-tolerant.
-- **Env-format probe cannot misread dual bad-CRC disks.** fw_printenv exits
-  0 on a bad-CRC read on some libubootenv builds, and two failed reads
-  defaulted to single-entry config; on a redundant U-Boot those writes are
-  CRC-valid but never read back. Clean reads now require no bad-CRC warning
-  and a non-empty list; unreadable disks fall back to erased-area evidence
-  (a single-copy U-Boot never writes 0x3f0000).
-- **A/B gets the bad-CRC self-heal entry.** init-uboot sanitizes the env
-  blob from the image's compiled default env before the first A/B write, so
-  trixie libubootenv's refuse-to-write cannot wedge init at every boot.
-- **`get_parent_disk_dev` emits one device line.** The `|| echo` fallback
-  stacked the derived parent and the raw partition into the fw_env.config.
 - **Library load guards propagate.** env.sh/ota_source_library/CLI no longer
   swallow a missing-fwenv `return 1`; the A/B CLI exits cleanly instead of
   failing later on undefined functions.
@@ -118,11 +116,13 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Added
 
-- **Redundant U-Boot env on rk3576/rk3588.** Second copy at 0x3f0000:
-  torn writes leave one copy intact; both-bad falls back to the default env.
+- **Unconditional redundant U-Boot env.** Every board ships the second copy
+  at 0x3f0000: `-r` prefill and the two-entry `fw_env.config` always; torn
+  writes leave one copy intact, both-bad rebuilds via
+  `fw_setenv -f /etc/u-boot-initial-env -s`.
 - **Trixie libubootenv CRC self-heal.** `fw_env_crc_bad` matches the trixie
-  wording; `fw_setenv` refusing a bad-CRC env triggers sanitize-and-retry on
-  full-set writes only. Partial writes fail with the blob untouched.
+  wording and flags a CRC-valid-but-empty blob; the `-f` rebuild runs on
+  full-set routing writes only, partial writes fail with the blob untouched.
 - **Encrypted userdata resizes in one boot.** `cryptsetup resize` grows the
   LUKS mapping online using the initramfs-stashed key; the
   resize-then-reboot flow is gone.

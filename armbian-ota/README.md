@@ -270,7 +270,8 @@ Encrypted A/B (auto-decrypt or secure boot):
 
 ### U-Boot Environment Variables
 
-The env lives at raw offset `0x3f8000` (`0x8000`), pre-filled at build and completed on first boot. rk3576/rk3588 add a redundant copy at `0x3f0000`: writes alternate, so a torn write never loses the last good copy. The second `fw_env.config` entry is installed only after `fw_env_probe_redundant` confirms the redundant format.
+
+The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy), size `0x8000` each, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. Every shipped U-Boot is patched for the redundant layout (`-r` prefill, unconditional two-entry `fw_env.config`): writes alternate between the copies, so a torn write never destroys the last good copy. A both-bad rebuild runs `fw_setenv -f /etc/u-boot-initial-env` — the same mechanism A/B uses.
 
 | Variable | Purpose |
 |----------|---------|
@@ -325,7 +326,7 @@ Both OTA modes require a GPT partition table. Their boot, rootfs, userdata, and 
 
 ### Initial U-Boot environment
 
-At build time `uboot-default-env.sh` extracts U-Boot's compiled default environment from the ELF and merges it with `ab/rootfs/etc/u-boot-initial-env` into the image's `/etc/u-boot-initial-env` (rootfs template wins on conflicts); `uboot-env-prefill.sh` writes the resulting persistent environment to raw offset `0x3f8000`. On first boot `armbian-ota-init-uboot` repairs missing defaults, writes `/etc/fw_env.config`, and fills in `distro_bootpart_a/b`, `ab_boot_devtype/devnum`, and `ab_boot_mode` (auto-detecting `raw-fit` when no boot partition carries a filesystem). Plain A/B does not fall back to raw FIT after `distro_bootcmd`. This keeps `distro_bootcmd`/`scan_dev_for_boot` intact while the slot logic overlays them.
+At build time `uboot-default-env.sh` extracts U-Boot's compiled default environment from the ELF and merges it with `ab/rootfs/etc/u-boot-initial-env` into the image's `/etc/u-boot-initial-env` (rootfs template wins on conflicts); `uboot-env-prefill.sh` writes the resulting persistent environment to raw offsets `0x3f8000` + `0x3f0000` (redundant pair). On first boot `armbian-ota-init-uboot` repairs missing defaults, writes the two-entry `/etc/fw_env.config`, and fills in `distro_bootpart_a/b`, `ab_boot_devtype/devnum`, and `ab_boot_mode` (auto-detecting `raw-fit` when no boot partition carries a filesystem). It runs every boot: an unreadable env (both copies bad) re-runs the full init and rebuilds via `fw_setenv -f`, like the Rescue reconciliation. Plain A/B does not fall back to raw FIT after `distro_bootcmd`. This keeps `distro_bootcmd`/`scan_dev_for_boot` intact while the slot logic overlays them.
 
 ## OTA Package Contents
 

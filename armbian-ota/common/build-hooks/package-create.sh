@@ -529,25 +529,6 @@ function ota_archive_directory() {
     return 0
 }
 
-function ota_archive_boot_partition() {
-    local source="$1"
-    local mount_dir="$2"
-    shift 2
-    local archive_status=0
-
-    if ! mount "${source}" "${mount_dir}"; then
-        display_alert "Failed to mount boot partition" "${source}" "warn"
-        return 0
-    fi
-
-    ota_archive_directory "${mount_dir}" "$@" || archive_status=$?
-    if ! umount "${mount_dir}"; then
-        display_alert "Failed to unmount boot partition" "${mount_dir}" "err"
-        return 1
-    fi
-    return "${archive_status}"
-}
-
 function ota_copy_secure_boot_itb() {
     local ota_temp_dir="$1"
     local boot_itb_source="${SRC}/cache/sources/${BOOTSOURCEDIR}/fit/boot.itb"

@@ -31,7 +31,4 @@ function ota_install_common_runtime_to_rootfs() {
     # Build-time truth for the release gate: stamped images never infer the
     # suite from distro files at runtime.
     printf 'RELEASE=%s\n' "${RELEASE}" >> "${image_release}"
-    # Required before the initramfs hooks (99-copy-tools) run: they stage
-    # the sanitize blobs fw_env_repair_blob dd's on both-bad rebuilds.
-    ota_build_env_sanitize_blobs "$1" || return 1
 }

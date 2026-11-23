@@ -6,8 +6,8 @@ DefaultDependencies=no
 After=local-fs.target
 Before=armbian-ota-firstboot.service
 Before=multi-user.target
-# Only run if u-boot environment has not been initialized yet
-ConditionPathExists=!/var/lib/armbian-ota/uboot_initialized
+# Every boot: healthy boots exit cheap, an unreadable env rebuilds via
+# fw_setenv -f (the A/B twin of the Rescue reconciliation).
 
 [Service]
 Type=oneshot

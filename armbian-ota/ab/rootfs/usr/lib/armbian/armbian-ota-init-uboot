@@ -15,11 +15,8 @@ AB_ENV_LIB="${OTA_RUNTIME_DIR}/ab/env.sh"
 }
 . "${AB_ENV_LIB}"
 
-# U-Boot environment location. The device is detected at runtime.
-readonly AB_FW_ENV_OFFSET="0x3f8000"
-readonly AB_FW_ENV_REDUND_OFFSET="0x3f0000"
-readonly AB_FW_ENV_SIZE="0x8000"
-readonly AB_FW_ENV_ERASE_SIZE="0x1000"
+# Env geometry (OTA_FW_ENV_*) and fw_env_* helpers come from fwenv.sh,
+# sourced via ab/env.sh.
 readonly AB_STATE_DIR="/var/lib/armbian-ota"
 readonly AB_UBOOT_INITIALIZED_FILE="${AB_STATE_DIR}/uboot_initialized"
 
@@ -34,19 +31,6 @@ log_info() {
 
 log_error() {
     log "ERROR: $@" >&2
-}
-
-# /dev/nvme0n1p1 -> /dev/nvme0n1 (shared sysfs impl in fwenv.sh via env.sh;
-# whole-disk and unresolvable inputs pass through unchanged)
-get_parent_disk_dev() {
-    local parent
-    # Use $1 only when empty; two device lines break fw_env.config.
-    parent="$(fw_env_parent_disk "$1")"
-    if [ -n "${parent}" ]; then
-        echo "${parent}"
-    else
-        echo "$1"
-    fi
 }
 
 # /dev/nvme0n1p1 -> 1
@@ -168,41 +152,25 @@ detect_ab_boot_configuration() {
     log_info "  root_b: ${root_b_uuid:-<not found>}"
 }
 
-# fw_env_probe_redundant is the shared fwenv.sh implementation (sourced via
-# ab/env.sh -> ab/partitions.sh); AB_FW_ENV_* constants match OTA_FW_ENV_*.
-
+# Two fw_env.config entries = redundant env mode (torn-write safe); the
+# write itself is fw_env_write_config from fwenv.sh (both flavors share it).
 ensure_fw_env_config() {
     local boot_part_dev="$1" fw_env_device
 
-    fw_env_device="$(get_parent_disk_dev "${boot_part_dev}")" || {
+    fw_env_device="$(fw_env_parent_disk "${boot_part_dev}")" || {
         log_error "Failed to detect U-Boot environment device"
         return 1
     }
 
-    mkdir -p /etc
-    # Two entries = redundant env mode (torn-write safe); the second entry
-    # only when the disk's blob proves the U-Boot reads that format.
-    local env_extra=""
-    {
-        printf '%s %s %s %s\n' \
-            "${fw_env_device}" "${AB_FW_ENV_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}"
-        if fw_env_probe_redundant "${fw_env_device}"; then
-            env_extra=" + ${AB_FW_ENV_REDUND_OFFSET} redundant"
-            printf '%s %s %s %s\n' \
-                "${fw_env_device}" "${AB_FW_ENV_REDUND_OFFSET}" "${AB_FW_ENV_SIZE}" "${AB_FW_ENV_ERASE_SIZE}"
-        fi
-    } > /etc/fw_env.config
-    log_info "Installed fw_env.config: ${fw_env_device} ${AB_FW_ENV_OFFSET}${env_extra} ${AB_FW_ENV_SIZE} ${AB_FW_ENV_ERASE_SIZE}"
+    fw_env_write_config "${fw_env_device}" || {
+        log_error "Failed to write ${OTA_FW_ENV_CONFIG}"
+        return 1
+    }
+    log_info "Installed fw_env.config: ${fw_env_device} ${OTA_FW_ENV_OFFSET} + ${OTA_FW_ENV_REDUND_OFFSET} (redundant) ${OTA_FW_ENV_SIZE}"
 }
 
 configure_ab_boot_environment() {
     ensure_fw_env_config "${boot_a_dev}" || return 1
-    # trixie libubootenv refuses to write a bad-CRC env; sanitize the blob
-    # from this image's compiled default env so ab_env_* can rebuild on top.
-    if fw_env_crc_bad; then
-        log_info "U-Boot env blob bad CRC; sanitizing before A/B env init"
-        fw_env_repair_blob || log_error "sanitize blob unavailable; fw_setenv must rebuild"
-    fi
     ab_env_initialize_default "${CURRENT_SLOT}" || return 1
     ab_env_repair_defaults "${CURRENT_SLOT}" || return 1
     ab_env_set \
@@ -238,10 +206,13 @@ root_b_uuid=${root_b_uuid}
 EOF
 }
 
-# Check if already initialized
+# Already initialized: healthy boots exit here; an unreadable env (both
+# copies bad) re-runs the full init, rebuilding via fw_setenv -f.
 if [ "${1:-}" != "--force" ] && [ -f "${AB_UBOOT_INITIALIZED_FILE}" ]; then
-    log_info "u-boot AB environment already initialized"
-    exit 0
+    if ab_env_healthy; then
+        exit 0
+    fi
+    log_error "persistent env unreadable; re-running full init (fw_setenv -f rebuild)"
 fi
 
 # Check if fw_setenv/fw_printenv exists

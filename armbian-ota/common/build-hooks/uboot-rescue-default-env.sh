@@ -36,18 +36,11 @@ function post_family_config__seeed_ota_stage_uboot_rescue_default_env() {
 	display_alert "seeed-ota" "staged rescue-default-env U-Boot patch -> ${target_dir}" "info"
 }
 
-# Stage the redundant-env patch for rk3576/rk3588; same BOARD => same decision.
+# Stage unconditionally: the Kconfig default activates it on BLK_DEV env
+# builds; inert anywhere else.
 function post_family_config__seeed_ota_stage_uboot_redundant_env() {
 	local extension_common_root patch_src
 	local boot_patch_dir target_dir target_patch
-
-	case "${BOOT_SOC:-}" in
-		rk3576 | rk3588) ;;
-		*)
-			display_alert "seeed-ota" "redundant env patch skipped (BOOT_SOC=${BOOT_SOC:-none})" "info"
-			return 0
-			;;
-	esac
 
 	extension_common_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 	patch_src="${extension_common_root}/patches/seeed-uboot-redundant-env.patch"
