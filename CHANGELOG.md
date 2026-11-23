@@ -132,6 +132,10 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Changed
 
+- **A/B env repair key spec is single-sourced.** The missing/sync key lists
+  live in `ab/env-keys.sh`; the runtime repair loop and the build-time
+  initial-env completeness check both source it, so a spec drift fails the
+  build instead of `ab_env_repair_defaults` on every boot.
 - **U-Boot routing env has a single source of truth.** The routing scripts
   live only in fwenv.sh; the build prefill sources it, and the default-env
   patch's rescue keys are machine-verified against the compiled default env
