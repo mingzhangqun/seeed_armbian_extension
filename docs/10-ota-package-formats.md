@@ -55,8 +55,8 @@ dd'd verbatim and is compared 1:1.
 Runtime constants (`common.sh`, mirrored in the initramfs lib):
 
 ```sh
-OTA_RUNTIME_VERSION="1.1"
-OTA_RUNTIME_FORMATS="gz xz"   # what this runtime's initramfs can decode
+OTA_RUNTIME_VERSION="1.4"
+OTA_RUNTIME_FORMATS="gz xz"   # + " zst" when the zstd CLI exists (probed at runtime)
 ```
 
 Phase-1 checks, in order:
@@ -89,9 +89,10 @@ disagrees with the file contents is refused, so a renamed archive cannot bypass
 negotiation. Extraction flags are unified across modes: recovery-phase-2
 extraction uses the same `--xattrs --acls --numeric-owner` set as A/B.
 
-zstd is wired through the map and the build selector, but `OTA_RUNTIME_FORMATS`
-only lists it once the image actually ships the zstd CLI (the initramfs hook
-copies zstd + libzstd into the initrd whenever the rootfs has them, ~2 MB).
+zstd is wired through the map and the build selector; `OTA_RUNTIME_FORMATS`
+lists `zst` only when the zstd CLI is actually present (probed at runtime —
+the initramfs hook copies zstd + libzstd into the initrd whenever the rootfs
+has them, ~2 MB).
 
 ## 4. OTA hooks
 

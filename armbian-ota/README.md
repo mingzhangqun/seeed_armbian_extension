@@ -270,7 +270,8 @@ Encrypted A/B (auto-decrypt or secure boot):
 
 ### U-Boot Environment Variables
 
-The persistent U-Boot environment lives at raw offset `0x3f8000` (size `0x8000`) on the boot disk, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`.
+
+The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy), size `0x8000` each, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. Every shipped U-Boot is patched for the redundant layout (`-r` prefill, unconditional two-entry `fw_env.config`): writes alternate between the copies, so a torn write never destroys the last good copy. A both-bad rebuild runs `fw_setenv -f /etc/u-boot-initial-env` — the same mechanism A/B uses.
 
 | Variable | Purpose |
 |----------|---------|
@@ -325,7 +326,7 @@ Both OTA modes require a GPT partition table. Their boot, rootfs, userdata, and 
 
 ### Initial U-Boot environment
 
-At build time `uboot-default-env.sh` extracts U-Boot's compiled default environment from the ELF and merges it with `ab/rootfs/etc/u-boot-initial-env` into the image's `/etc/u-boot-initial-env` (rootfs template wins on conflicts); `uboot-env-prefill.sh` writes the resulting persistent environment to raw offset `0x3f8000`. On first boot `armbian-ota-init-uboot` repairs missing defaults, writes `/etc/fw_env.config`, and fills in `distro_bootpart_a/b`, `ab_boot_devtype/devnum`, and `ab_boot_mode` (auto-detecting `raw-fit` when no boot partition carries a filesystem). Plain A/B does not fall back to raw FIT after `distro_bootcmd`. This keeps `distro_bootcmd`/`scan_dev_for_boot` intact while the slot logic overlays them.
+At build time `uboot-default-env.sh` extracts U-Boot's compiled default environment from the ELF and merges it with `ab/rootfs/etc/u-boot-initial-env` into the image's `/etc/u-boot-initial-env` (rootfs template wins on conflicts); `uboot-env-prefill.sh` writes the resulting persistent environment to raw offsets `0x3f8000` + `0x3f0000` (redundant pair). On first boot `armbian-ota-init-uboot` repairs missing defaults, writes the two-entry `/etc/fw_env.config`, and fills in `distro_bootpart_a/b`, `ab_boot_devtype/devnum`, and `ab_boot_mode` (auto-detecting `raw-fit` when no boot partition carries a filesystem). It runs every boot: an unreadable env (both copies bad) re-runs the full init and rebuilds via `fw_setenv -f`, like the Rescue reconciliation. Plain A/B does not fall back to raw FIT after `distro_bootcmd`. This keeps `distro_bootcmd`/`scan_dev_for_boot` intact while the slot logic overlays them.
 
 ## OTA Package Contents
 
@@ -351,7 +352,7 @@ In Recovery mode the dedicated `/boot` partition is the one exception to overlay
 
 Neither OTA mode migrates data from older single-rootfs Recovery images; this layout is intended for new development images.
 
-On first boot, `armbian-resize-userdata.service` expands the final `userdata` partition to use available disk space in both modes (partition must be last on disk; shrink is refused). For encrypted images the resize is two-step: the first boot grows the partition and logs that a reboot is required; the next boot reopens the `armbian-userdata` LUKS mapper at the new size and grows the inner ext4.
+On first boot, `armbian-resize-userdata.service` expands the final `userdata` partition to use available disk space in both modes (partition must be last on disk; shrink is refused). For encrypted images the resize completes in the same boot: `cryptsetup resize` grows the `armbian-userdata` LUKS mapping online, then `resize2fs` grows the inner ext4 — no reboot is required.
 
 ## Troubleshooting
 
@@ -414,7 +415,7 @@ In `ota-support.sh` and `*/build-hooks/*.sh` (ordering matters):
 - Resize userdata service: `pre_umount_final_image__896_*` (`common/build-hooks/userdata-resize.sh`)
 - OTA payload pubkey install: `pre_umount_final_image__897_*` (`common/build-hooks/ota-payload-security.sh`)
 - OTA package creation (incl. payload encryption): `pre_umount_final_image__901_*` (`common/build-hooks/package-create.sh`)
-- Persistent U-Boot env prefill at 0x3f8000: `post_write_uboot_platform__910_*` (`common/build-hooks/uboot-env-prefill.sh`)
+- Persistent U-Boot env prefill at 0x3f8000 + 0x3f0000 (redundant copy): `post_write_uboot_platform__910_*` (`common/build-hooks/uboot-env-prefill.sh`)
 
 ## License
 
