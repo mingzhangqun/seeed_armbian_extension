@@ -218,8 +218,8 @@ else
     # out the raw passphrase (and the rootfs) in that state closes the
     # loader-swap window while the passphrase is still stored in plaintext.
     if ! keybox_ready; then
-        log_step "[Decryption-disk] Error: raw passphrase path requires OP-TEE (no /dev/tee*; launched by a loader without BL32?)"
-        exit 1
+        log_step "[Decryption-disk] Error: loader/OS mismatch: no OP-TEE/BL32 under this loader"
+        panic "Decryption-disk: this image requires a secure loader (BL32). Boot halted; rootfs stays locked."
     fi
     log_step "[Decryption-disk] No SSKR marker, reading raw passphrase"
     dd if="$SECURITY_DEV" of="$SYSPW_FILE" bs=1 count=64 2>/dev/null || {
