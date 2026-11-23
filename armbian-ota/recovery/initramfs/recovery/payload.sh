@@ -2,9 +2,7 @@
 #
 # Recovery initramfs source: payload apply, FIT write, config patch, state commit.
 #
-# Sourced by 99-ota-apply AFTER recovery/log.sh and recovery/device.sh (uses log/heartbeat
-# and device primitives) and state.sh (uses ota_state_write_file).
-# /bin/sh + busybox userland.
+# Sourced by 99-ota-apply; /bin/sh + busybox.
 #
 # Expects globals from the orchestrator: ROOT_MNT, BOOT_MNT, STATE_DIR,
 # STATE_FILE, OTA_DIR, ROOTFS_TAR, BOOT_TAR, BOOT_ITB.
@@ -607,7 +605,7 @@ ota_patch_config() {
 
     # fallback UUID detection (just in case), anchored to the boot disk so a
     # clone disk with duplicate labels does not answer for the boot device
-    _ota_disk="$(recovery_boot_disk || true)"
+    _ota_disk="$(fw_env_boot_disk || true)"
     if [ "${AUTO_DECRYPT_MODE}" -eq 1 ]; then
         [ -z "$ROOT_UUID" ] && ROOT_UUID="$(get_luks_uuid_for_root)"
     else
@@ -733,26 +731,6 @@ ota_patch_config() {
     fi
 
     sync
-}
-
-# ===== write success state via state.sh helper =====
-ota_commit_success_state() {
-    mkdir -p "${STATE_DIR}"
-    PACKAGE_PATH_VALUE="$(grep -E '^PACKAGE_PATH=' "${STATE_FILE}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
-    START_TIME_VALUE="$(grep -E '^START_TIME=' "${STATE_FILE}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
-    COMPLETE_TIME_VALUE="$(date -Iseconds)"
-    if command -v ota_state_write_file >/dev/null 2>&1; then
-        (
-            OTA_STATE_MODE=recovery
-            OTA_STATE_STATUS=success
-            OTA_STATE_PACKAGE_PATH="${PACKAGE_PATH_VALUE}"
-            OTA_STATE_START_TIME="${START_TIME_VALUE}"
-            OTA_STATE_COMPLETE_TIME="${COMPLETE_TIME_VALUE}"
-            ota_state_write_file "${STATE_FILE}"
-        ) || log "WARN: failed to write ${STATE_FILE}"
-    else
-        log "WARN: state helper not available, failed to write ${STATE_FILE}"
-    fi
 }
 
 # ===== unmount partitions (normal path; logs WARN on failure) =====

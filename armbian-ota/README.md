@@ -270,7 +270,7 @@ Encrypted A/B (auto-decrypt or secure boot):
 
 ### U-Boot Environment Variables
 
-The persistent U-Boot environment lives at raw offset `0x3f8000`, size `0x8000`, on the boot disk, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. rk3576 boards add a redundant copy at `0x3f0000` (patched vendor U-Boot, `-r` prefill, second `fw_env.config` entry): writes alternate between the copies, so a torn write never destroys the last good copy. The second entry (and the redundant blob format) is installed only after `fw_env_probe_redundant` proves the disk's blob parses as redundant format, so rk3588 boards and devices still on a pre-redundant U-Boot stay single-copy.
+The env lives at raw offset `0x3f8000` (`0x8000`), pre-filled at build and completed on first boot. rk3576/rk3588 add a redundant copy at `0x3f0000`: writes alternate, so a torn write never loses the last good copy. The second `fw_env.config` entry is installed only after `fw_env_probe_redundant` confirms the redundant format.
 
 | Variable | Purpose |
 |----------|---------|
@@ -351,7 +351,7 @@ In Recovery mode the dedicated `/boot` partition is the one exception to overlay
 
 Neither OTA mode migrates data from older single-rootfs Recovery images; this layout is intended for new development images.
 
-On first boot, `armbian-resize-userdata.service` expands the final `userdata` partition to use available disk space in both modes (partition must be last on disk; shrink is refused). For encrypted images the resize is two-step: the first boot grows the partition and logs that a reboot is required; the next boot reopens the `armbian-userdata` LUKS mapper at the new size and grows the inner ext4.
+On first boot, `armbian-resize-userdata.service` expands the final `userdata` partition to use available disk space in both modes (partition must be last on disk; shrink is refused). For encrypted images the resize completes in the same boot: `cryptsetup resize` grows the `armbian-userdata` LUKS mapping online, then `resize2fs` grows the inner ext4 — no reboot is required.
 
 ## Troubleshooting
 

@@ -15,14 +15,14 @@
 OTA_STATE_DIR="${OTA_STATE_DIR:-/var/lib/armbian-ota}"
 OTA_STATE_FILE="${OTA_STATE_FILE:-${OTA_STATE_DIR}/ota-state.env}"
 
-# Persist the current key set atomically. Input file $1 already holds the
-# complete new content; it is fsynced (via sync), renamed over the state file
-# and the directory entry synced again.
+# Commit tmp_file over dest_file (default: the global state file): the rename
+# is the commit point, bracketed by syncs.
 ota_state_commit_tmp() {
     tmp_file="$1"
+    dest_file="${2:-${OTA_STATE_FILE}}"
 
     sync
-    if ! mv "${tmp_file}" "${OTA_STATE_FILE}"; then
+    if ! mv "${tmp_file}" "${dest_file}"; then
         rm -f "${tmp_file}" 2>/dev/null || true
         return 1
     fi
@@ -30,12 +30,13 @@ ota_state_commit_tmp() {
     return 0
 }
 
-# Rewrite key=$2 to value=$3 atomically (single-key form).
+# Rewrite key=$2 to value=$3 atomically in the file named by $1 (writes go
+# to that same file -- the parameter is not just a read anchor).
 ota_state_set_key() {
     state_file="$1"
     key="$2"
     value="$3"
-    tmp_file="${OTA_STATE_FILE}.tmp.$$"
+    tmp_file="${state_file}.tmp.$$"
 
     {
         grep -v "^${key}=" "${state_file}" 2>/dev/null
@@ -45,7 +46,7 @@ ota_state_set_key() {
         return 1
     }
 
-    ota_state_commit_tmp "${tmp_file}"
+    ota_state_commit_tmp "${tmp_file}" "${state_file}"
 }
 
 # Set multiple keys in ONE atomic write: ota_state_set_multi K1=V1 K2=V2 ...
@@ -82,36 +83,36 @@ ota_state_set_multi() {
     ota_state_commit_tmp "${tmp_file}"
 }
 
+# Persist a complete state file in ONE atomic write. Values arrive via the
+# OTA_STATE_* variables; the fixed keys below start empty/zero.
 ota_state_write_file() {
     state_file="$1"
     state_dir="${state_file%/*}"
 
     mkdir -p "${state_dir}" || return 1
-    cat > "${state_file}" <<'EOF' || return 1
-# Armbian OTA runtime state
-OTA_MODE=
-STATUS=idle
-PACKAGE_PATH=
-CURRENT_SLOT=
-TARGET_SLOT=
-START_TIME=
-COMPLETE_TIME=
-CANDIDATE_ID=
-INSTALLED_ID=
-BACKUP_ID=
-RESTORE_MODE=0
-ROOTFS_TOUCHED=0
-RETRY_COUNT=0
-ERROR_MSG=
-EOF
+    tmp_file="${state_file}.tmp.$$"
+    {
+        echo "# Armbian OTA runtime state"
+        echo "OTA_MODE=${OTA_STATE_MODE:-}"
+        echo "STATUS=${OTA_STATE_STATUS:-idle}"
+        echo "PACKAGE_PATH=${OTA_STATE_PACKAGE_PATH:-}"
+        echo "CURRENT_SLOT=${OTA_STATE_CURRENT_SLOT:-}"
+        echo "TARGET_SLOT=${OTA_STATE_TARGET_SLOT:-}"
+        echo "START_TIME=${OTA_STATE_START_TIME:-}"
+        echo "COMPLETE_TIME=${OTA_STATE_COMPLETE_TIME:-}"
+        echo "CANDIDATE_ID="
+        echo "INSTALLED_ID="
+        echo "BACKUP_ID="
+        echo "RESTORE_MODE=0"
+        echo "ROOTFS_TOUCHED=0"
+        echo "RETRY_COUNT=0"
+        echo "ERROR_MSG="
+    } > "${tmp_file}" || {
+        rm -f "${tmp_file}" 2>/dev/null || true
+        return 1
+    }
 
-    ota_state_set_key "${state_file}" OTA_MODE "${OTA_STATE_MODE:-}" || return 1
-    ota_state_set_key "${state_file}" STATUS "${OTA_STATE_STATUS:-idle}" || return 1
-    ota_state_set_key "${state_file}" PACKAGE_PATH "${OTA_STATE_PACKAGE_PATH:-}" || return 1
-    ota_state_set_key "${state_file}" CURRENT_SLOT "${OTA_STATE_CURRENT_SLOT:-}" || return 1
-    ota_state_set_key "${state_file}" TARGET_SLOT "${OTA_STATE_TARGET_SLOT:-}" || return 1
-    ota_state_set_key "${state_file}" START_TIME "${OTA_STATE_START_TIME:-}" || return 1
-    ota_state_set_key "${state_file}" COMPLETE_TIME "${OTA_STATE_COMPLETE_TIME:-}" || return 1
+    ota_state_commit_tmp "${tmp_file}" "${state_file}"
 }
 
 state_init() {
@@ -140,14 +141,12 @@ state_set() {
     ota_state_set_key "${OTA_STATE_FILE}" "${key}" "${value}"
 }
 
-state_mark_mode() {
-    state_set "OTA_MODE" "$1"
-}
-
 state_mark_status() {
     state_set "STATUS" "$1"
 }
 
+# Mark the A/B prepared header in ONE atomic multi-key write (the transaction
+# boundary; a power cut mid-write would leave an underivable state).
 state_mark_prepared() {
     mode="$1"
     status="$2"
@@ -156,13 +155,14 @@ state_mark_prepared() {
     target_slot="${5:-}"
 
     state_init || return 1
-    state_mark_mode "${mode}" || return 1
-    state_mark_status "${status}" || return 1
-    state_set "PACKAGE_PATH" "$(basename "${package_path}")" || return 1
-    state_set "CURRENT_SLOT" "${current_slot}" || return 1
-    state_set "TARGET_SLOT" "${target_slot}" || return 1
-    state_set "START_TIME" "$(date -Iseconds)" || return 1
-    state_set "COMPLETE_TIME" "" || return 1
+    ota_state_set_multi \
+        "OTA_MODE=${mode}" \
+        "STATUS=${status}" \
+        "PACKAGE_PATH=$(basename "${package_path}")" \
+        "CURRENT_SLOT=${current_slot}" \
+        "TARGET_SLOT=${target_slot}" \
+        "START_TIME=$(date -Iseconds)" \
+        "COMPLETE_TIME=" || return 1
 }
 
 state_mark_completed() {
@@ -172,11 +172,12 @@ state_mark_completed() {
     target_slot="${4:-}"
 
     state_init || return 1
-    state_mark_mode "${mode}" || return 1
-    state_mark_status "${status}" || return 1
-    state_set "CURRENT_SLOT" "${current_slot}" || return 1
-    state_set "TARGET_SLOT" "${target_slot}" || return 1
-    state_set "COMPLETE_TIME" "$(date -Iseconds)" || return 1
+    ota_state_set_multi \
+        "OTA_MODE=${mode}" \
+        "STATUS=${status}" \
+        "CURRENT_SLOT=${current_slot}" \
+        "TARGET_SLOT=${target_slot}" \
+        "COMPLETE_TIME=$(date -Iseconds)" || return 1
 }
 
 # ===== v0.8 plain recovery helpers ==========================================

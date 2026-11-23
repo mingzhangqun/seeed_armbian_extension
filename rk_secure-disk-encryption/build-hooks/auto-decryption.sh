@@ -251,31 +251,18 @@ function rk_autodecrypt_install_initramfs_hooks() {
         "${root_dir}/etc/initramfs-tools/scripts/init-top/0-decryption-disk" \
         "decryption-disk script" || return 1
 }
-function rk_secure_storage_format_partition() {
-    local sec_dev="$1"
-
-    if [[ "${SECURE_STORAGE_SECURITY_FS_TYPE}" == "none" ]]; then
-        return 0
-    fi
-
-    display_alert "secure-storage" "mkfs.${SECURE_STORAGE_SECURITY_FS_TYPE} on security (${sec_dev})" "info"
-    if command -v mkfs.${SECURE_STORAGE_SECURITY_FS_TYPE} >/dev/null 2>&1; then
-        mkfs.${SECURE_STORAGE_SECURITY_FS_TYPE} -q "${sec_dev}" || {
-            display_alert "secure-storage" "security mkfs failed" "err"
-            return 1
-        }
-    else
-        display_alert "secure-storage" "mkfs.${SECURE_STORAGE_SECURITY_FS_TYPE} not found" "err"
-        return 1
-    fi
-}
-
 function rk_secure_storage_write_passphrase() {
     local sec_dev="$1"
     local read_back
 
     if [[ "${CRYPTROOT_ENABLE}" != "yes" || -z "${CRYPTROOT_PASSPHRASE}" ]]; then
         return 0
+    fi
+
+    # Initramfs reads a fixed 64 bytes (decryption-disk.sh dd count=64);
+    # a non-64-char passphrase makes first boot unlock with NUL padding.
+    if [[ "${#CRYPTROOT_PASSPHRASE}" -ne 64 ]]; then
+        exit_with_error "secure-storage" "CRYPTROOT_PASSPHRASE must be exactly 64 characters (got ${#CRYPTROOT_PASSPHRASE})"
     fi
 
     display_alert "secure-storage" "Writing CRYPTROOT_PASSPHRASE to security partition" "info"
@@ -291,7 +278,7 @@ function rk_secure_storage_write_passphrase() {
     if [[ "${read_back}" == "${CRYPTROOT_PASSPHRASE}" ]]; then
         display_alert "secure-storage" "Password written and verified successfully" "info"
     else
-        display_alert "secure-storage" "Password write verification failed" "warn"
+        exit_with_error "secure-storage" "Password write verification failed (security partition corrupt)"
     fi
 
     sync
@@ -303,7 +290,6 @@ function rk_secure_storage_prepare_partitions() {
         BIOSSIZE=0
         UEFISIZE=0
     }
-    SECURE_STORAGE_SECURITY_FS_TYPE=${SECURE_STORAGE_SECURITY_FS_TYPE:-none}
     display_alert "secure-storage" "security(${OTA_SECURITY_SIZE:-4}MiB) partitions" "info"
 }
 
@@ -414,11 +400,12 @@ function rk_secure_storage_verify_layout() {
 function rk_secure_storage_format_partitions() {
     [[ -n "${SECURE_STORAGE_SECURITY_PART_INDEX}" ]] || return 0
 
+    # The security partition stays raw: SSKR/keybox and the passphrase
+    # window are pre-filesystem containers read directly by initramfs.
     local sec_dev="${LOOP}p${SECURE_STORAGE_SECURITY_PART_INDEX}"
     check_loop_device "${sec_dev}"
     [[ -b "${sec_dev}" ]] ||
         exit_with_error "secure-storage verification failed: security partition device missing after loop setup" "${sec_dev}"
 
-    rk_secure_storage_format_partition "${sec_dev}" || return 1
     rk_secure_storage_write_passphrase "${sec_dev}" || return 1
 }
