@@ -35,3 +35,31 @@ function post_family_config__seeed_ota_stage_uboot_rescue_default_env() {
 	cp -f "${patch_src}" "${target_patch}"
 	display_alert "seeed-ota" "staged rescue-default-env U-Boot patch -> ${target_dir}" "info"
 }
+
+# Stage the redundant-env patch for rk3576/rk3588; same BOARD => same decision.
+function post_family_config__seeed_ota_stage_uboot_redundant_env() {
+	local extension_common_root patch_src
+	local boot_patch_dir target_dir target_patch
+
+	case "${BOOT_SOC:-}" in
+		rk3576 | rk3588) ;;
+		*)
+			display_alert "seeed-ota" "redundant env patch skipped (BOOT_SOC=${BOOT_SOC:-none})" "info"
+			return 0
+			;;
+	esac
+
+	extension_common_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+	patch_src="${extension_common_root}/patches/seeed-uboot-redundant-env.patch"
+
+	[[ -f "${patch_src}" ]] ||
+		exit_with_error "seeed-ota" "redundant-env patch missing: ${patch_src}"
+
+	boot_patch_dir="${BOOTPATCHDIR%% *}"
+	target_dir="${USERPATCHES_PATH}/u-boot/${boot_patch_dir}"
+	target_patch="${target_dir}/seeed-uboot-redundant-env.patch"
+
+	mkdir -p "${target_dir}"
+	cp -f "${patch_src}" "${target_patch}"
+	display_alert "seeed-ota" "staged redundant-env U-Boot patch -> ${target_dir}" "info"
+}

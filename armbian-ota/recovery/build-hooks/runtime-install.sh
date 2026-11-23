@@ -3,12 +3,30 @@
 readonly OTA_ROOTFS_RUNTIME_DIR="usr/share/armbian-ota"
 readonly OTA_COMMON_INITRAMFS="${OTA_SUPPORT_DIR}/common/initramfs"
 
+# Merge base for the both-copies-bad fw_setenv rebuild; 99-copy-tools
+# stages it into the initramfs. Missing file degrades to sanitize.
+function ota_recovery_write_initial_env() {
+    local root_dir="$1" default_env
+
+    default_env="$(ota_ab_default_env_file_for_rootfs "${root_dir}")" || {
+        display_alert "Recovery OTA runtime" "U-Boot default env not found; fw_setenv merge base not installed" "warn"
+        return 0
+    }
+
+    install -D -m 0644 "${default_env}" "${root_dir}/etc/u-boot-initial-env" || {
+        display_alert "Recovery OTA runtime" "Failed to install /etc/u-boot-initial-env" "err"
+        return 1
+    }
+    display_alert "Recovery OTA runtime" "Installed /etc/u-boot-initial-env merge base" "info"
+}
+
 function ota_install_recovery_runtime_to_rootfs() {
     local root_dir="$1"
 
     ota_install_common_runtime_to_rootfs "${root_dir}" || return 1
     ota_sync_rootfs "Recovery OTA runtime" "${OTA_RECOVERY_ROOTFS}" "${root_dir}"
     ota_install_recovery_fw_env_tools "${root_dir}" || return 1
+    ota_recovery_write_initial_env "${root_dir}"
 
     display_alert "Recovery OTA runtime" "Enabling firstboot hook service" "info"
     chroot "${root_dir}" systemctl enable armbian-ota-firstboot-hook.service \
@@ -144,6 +162,8 @@ function ota_install_recovery_initramfs() {
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/find-userdata.sh"
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/fwenv.sh"
             sha256sum "etc/initramfs-tools/hooks/99-copy-tools"
+            sha256sum "usr/share/armbian-ota/env-sanitize-redundant.bin"
+            sha256sum "usr/share/armbian-ota/env-sanitize-single.bin"
             for entry in "${initramfs_file_list[@]}"; do
                 IFS=: read -r source_path destination_path mode <<< "${entry}"
                 sha256sum "${destination_path}"
