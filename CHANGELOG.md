@@ -12,6 +12,14 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Fixed
 
+- **Plain U-Boot no longer has any live raw-FIT entry in the env it
+  produces.** Patch `#else`, the env prefill and
+  `fw_env_write_routing_set` write the `*_boot_fit` keys as refusal
+  stubs on plain layouts (keys kept for CRC-rebuild compat); the plain
+  A/B prefill stamps `ab_boot_mode=filesystem`. A loader/OS mismatch
+  on plain stops at env routing (2026-11-20 devkit repro) instead of
+  the initramfs TEE gate. Loader-owned env (NOR) only heals via
+  runtime reconciliation; deliberate plain FIT boots stay manual.
 - **A/B U-Boot rollback state reconciliation.** After retry exhaustion boots
   the last confirmed slot, the firstboot service's post-action records
   `STATUS=rollback` and clears the stale target. An unconfirmed pending state
@@ -63,6 +71,72 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### Recovery OTA
 
+- **Redundant U-Boot environment on rk3576/rk3588 boards.** A staged U-Boot patch
+  makes `CONFIG_ENV_OFFSET_REDUND` selectable for the vendor block-device
+  env driver (its Kconfig entry was only reachable via ENVF) and defaults
+  it to `0x3f0000` — the 32 KiB directly below the `0x3f8000` primary env,
+  verified free between the sector-64 loader blob and the 8 MiB
+  u-boot.itb. U-Boot and libubootenv (two-entry `fw_env.config`) then
+  alternate writes between the two copies: a `saveenv` power cut leaves
+  the other copy intact, and both-copies-bad falls back to the compiled
+  default env (Rescue) as before.
+  The redundant format is gated everywhere the U-Boot patch is not:
+  `uboot-env-prefill` writes the `-r` dual copy only for `BOOT_SOC`
+  `rk3576`/`rk3588` (single-copy boards keep the 4-byte-header blob;
+  rk3588-devkit keeps U-Boot in partition 1, so its raw area below
+  16 MiB holds only idbloader + env, and prefill's assert_layout fails
+  the build if a loader ever crosses the env boundary), and the
+  runtime `fw_env_write_config`/`armbian-ota-init-uboot` install the
+  second `fw_env.config` entry only when `fw_env_probe_redundant` proves
+  the disk's blob parses as redundant format — so devices still
+  running a pre-redundant U-Boot (e.g. after a rootfs-only OTA) stay
+  single-copy instead of diverging from their bootloader.
+  The both-copies-bad rebuild path is hardened: `fw_env_set_multi` no
+  longer deletes the script file before the sanitize retry consumes it,
+  and the sanitize stamps a build-generated minimal rescue env
+  (`env-sanitize-{redundant,single}.bin`, filtered from the same
+  compiled default env this image's U-Boot ships, staged into the
+  recovery initramfs as required files) instead of a valid-CRC empty
+  blob, so a power cut between sanitize and the rewrite boots into
+  Rescue instead of hanging autoboot at the prompt. The recovery build
+  also installs `/etc/u-boot-initial-env` into the recovery rootfs as
+  the native fw_setenv merge base for rootfs-side rebuilds.
+- **Env CRC self-heal works on trixie libubootenv.** `fw_env_crc_bad` now
+  matches the trixie wording ("Cannot read environment") alongside the
+  classic "Bad CRC", and `fw_env_set_multi` sanitizes a bad-CRC blob (zero
+  + valid empty-env CRC) and retries once — trixie `fw_setenv` refuses to
+  write a bad-CRC env outright, which broke every rebuild path. Verified
+  on-device: corrupt -> detect -> repair+rewrite -> routing readback ->
+  CRC good.
+- **Partial env writes no longer sanitize the blob.** The
+  sanitize-and-retry in `fw_env_set_multi` is now gated on an explicit
+  `--full-set` contract (only `fw_env_write_routing_set` passes it): any
+  other caller failing `fw_setenv` fails the write with the blob
+  untouched. Before, a two-key arming write that hit an I/O error (or a
+  CRC mis-detection) would zero a good-CRC env and rewrite only
+  `ota_in_progress`/`ota_boot_next` — a valid-CRC blob without the
+  routing set, i.e. an endless Rescue loop no auto-rebuild can detect.
+- **Env sanitize is confirmed, loud, and never leaves a valid empty blob.**
+  `fw_env_set_multi` now captures the failed `fw_setenv` stderr and only
+  sanitizes on a confirmed bad-CRC refusal (or a fresh `fw_env_crc_bad`);
+  any other failure fails with the blob untouched, and the sanitize
+  itself logs a warning. `fw_env_crc_bad` also flags a CRC-valid but
+  empty blob (the sanitize/rewrite intermediate state U-Boot cannot
+  recover from), and a failed rewrite-after-sanitize poisons one CRC bit
+  so U-Boot falls back to the compiled default env instead of hanging
+  at the prompt.
+- **Encrypted userdata resizes in one boot.** `armbian-resize-userdata`
+  grows the LUKS mapping online with `cryptsetup resize --key-file
+  /run/armbian-luks-passphrase` (the initramfs-stashed key; a bare call
+  has no key source in the TTY-less service) instead of reloading the
+  `dmsetup` table, which always failed on LUKS2 with "Required key not
+  available" (masked key). The two-stage
+  partition-then-reboot flow is gone: freshly flashed encrypted devices
+  have full userdata on the first boot, so first-boot A/B OTA staging no
+  longer needs a second boot.
+- **Status wording.** `armbian-ota status` no longer prints
+  `Mode: recovery (plain v0.8)` on encrypted devices — the backend flavor
+  was never the image flavor; it reads `backend v0.8` now.
 - **Secure-boot rescue: dedicated `recovery` raw FIT partition.** Secure
   boot Recovery images now split the boot area in two: the existing raw FIT
   `boot` partition plus a new `PARTLABEL=recovery` partition (same size as
@@ -121,6 +195,17 @@ Covers the work against the initial import (merge base `9980aee`,
     `CMD_BOOTI` on ARM64 so it cannot be Kconfig-disabled); the same patch
     compiles the default-env rescue dispatcher down to the signed
     recovery-FIT branch. Plain builds are unchanged.
+  - plain (non-`FIT_SIGNATURE`) builds keep every boot command: FIT
+    entry is env-gated in the persistent env only — the layout stamp
+    keeps the fwenv routing set and uboot-env-prefill on the ext4 fs
+    path, while the compiled default env is `CONFIG_FIT_SIGNATURE`-
+    gated at compile time and keeps its `|| run ota_rescue_boot_fit ||`
+    fallback on plain, so an ext4-branch failure can still reach
+    `boot_fit` automatically (the TEE gate is the final backstop).
+    Manual FIT boot is a plain env edit or a
+    `boot_fit` at the prompt. The loader/disk mismatch backstops at the
+    TEE gate (secure rootfs cannot complete boot under a plain loader).
+    `BOOT_RAW_MODE` builds need a verifying U-Boot.
   - `decryption-disk.sh` hard-fails the raw (pre-SSKR-migration)
     passphrase path when OP-TEE is unavailable (plain U-Boot ships no
     BL32), closing the loader-swap window while the passphrase is still
@@ -169,6 +254,23 @@ Covers the work against the initial import (merge base `9980aee`,
 
 #### OTA payload security
 
+- **Release gate on the build-stamped truth.** Image finalize stamps
+  `RELEASE` into `/etc/armbian-image-release` (next to `IMAGE_VARIANT`)
+  and `ota_check_board_release` compares it against `package.env`;
+  unstamped images skip the release check (BOARD always applies).
+- **zstd capability is probed, not declared.** `OTA_RUNTIME_FORMATS` lists
+  `zst` only when the zstd CLI exists, so a zst package fed to an image
+  without zstd is refused at negotiation instead of misreporting
+  `missing package.env` (runtime version bumped 1.3 → 1.4);
+  `load_package_env_metadata` now propagates tar's stderr so listing or
+  extraction failures surface their real cause. A/B images now install
+  zstd (recovery parity) so `--ota-format zstd` packages decode on every
+  A/B device instead of depending on incidental desktop-stack deps.
+- **Image identity stamps consolidated into `armbian-image-release`.**
+  `IMAGE_VARIANT` and `SEEED_EXTENSION_REPO/COMMIT` are stamped at image
+  finalize (after the framework's release snapshot, so they cannot be
+  clobbered); the device variant gate falls back to the legacy
+  `/etc/armbian-ota-image` for pre-existing devices.
 - **Encrypted and signed OTA payloads.** On encrypted-rootfs images the OTA
   packaging encrypts `rootfs.tar.gz` (AES-256-CBC, key derived from the
   LUKS passphrase via HKDF-SHA256) and signs `payload.manifest` (IV, plaintext
@@ -314,7 +416,8 @@ Covers the work against the initial import (merge base `9980aee`,
   compatibility path.
 - **Release provenance.** GitHub Releases target the exact armbian-build
   commit used for the image build, including cross-repository Releases.
-  `/etc/armbian-release` records only the extension commit, not a mutable ref.
+  `/etc/armbian-image-release` records only the extension commit, not a
+  mutable ref.
 
 - **PR #37 hardening: OTA integrity, mirror safety and CI fail-closed
   behavior.** A/B staging now reuses the mounted userdata overlay upper
@@ -456,9 +559,9 @@ Covers the work against the initial import (merge base `9980aee`,
 
 ### Removed
 
-- **Mutable extension ref in release metadata.** `/etc/armbian-release` keeps
-  the immutable `SEEED_EXTENSION_COMMIT`; `SEEED_EXTENSION_REF` is no longer
-  recorded.
+- **Mutable extension ref in release metadata.** `/etc/armbian-image-release`
+  keeps the immutable `SEEED_EXTENSION_COMMIT`; `SEEED_EXTENSION_REF` is no
+  longer recorded.
 - **Legacy OTA mirror test harness.** The unused
   `.github/scripts/test_image_mirror.py` is removed; mirror coverage checks
   remain in the OCR/publishing pipeline.

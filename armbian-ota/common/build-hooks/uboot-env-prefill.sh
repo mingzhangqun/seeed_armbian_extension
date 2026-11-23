@@ -1,18 +1,15 @@
 # Build-time U-Boot environment prefill for OTA images (A/B and recovery).
 #
-# Vendor U-Boot (env_blk) loads its environment from a raw area on its own
-# boot disk at CONFIG_ENV_OFFSET (0x3f8000, size 0x8000, no redundant copy for
-# both rk3576 and rk3588 vendor trees). Images historically shipped with that
-# area blank, so every first boot ran the compiled default bootcmd behind a
-# bad-CRC warning; recovery images have no runtime env writer at all, which
-# left their kernel cmdline without the armbian.bootdev anchoring token and
-# let multi-disk blkid first-match resolve partitions on the wrong disk.
-# Prefilling a valid blob here makes every flash boot the token-carrying
-# bootcmd from the start; U-Boot saveenv and ota-init writes simply overwrite
-# the area later.
+# Prefill valid env blobs so every flash boots the token-carrying bootcmd.
 
-OTA_UBOOT_ENV_OFFSET_HEX="0x3f8000" # CONFIG_ENV_OFFSET (env/Kconfig, ARCH_ROCKCHIP)
-OTA_UBOOT_ENV_SIZE_HEX="0x8000"     # CONFIG_ENV_SIZE
+OTA_UBOOT_ENV_OFFSET_HEX="0x3f8000"       # CONFIG_ENV_OFFSET (env/Kconfig, ARCH_ROCKCHIP)
+OTA_UBOOT_ENV_REDUND_OFFSET_HEX="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
+OTA_UBOOT_ENV_SIZE_HEX="0x8000"           # CONFIG_ENV_SIZE
+# rk3576/rk3588: redundant layout; other boards need the single-copy blob.
+OTA_UBOOT_ENV_REDUNDANT=0
+case "${BOOT_SOC:-}" in
+    rk3576 | rk3588) OTA_UBOOT_ENV_REDUNDANT=1 ;;
+esac
 
 # mkenvimage discovery: the build container ships u-boot-tools, but fall back
 # to the binary produced by any local U-Boot compilation so image-only builds
@@ -51,6 +48,8 @@ function ota_uboot_env_prefill_compose() {
         grep -q '^bootcmd=.*armbian\.bootdev' "${src_env}" ||
             exit_with_error "A/B initial env lacks bootdev token" "${src_env}"
 
+        local mode_override_env
+        mode_override_env="$(mktemp)" || exit_with_error "mktemp failed"
         if ota_raw_boot_enabled; then
             # Raw-FIT images must take the bootcmd's raw-fit branch from the
             # very first boot. The else-branch runs distro_bootcmd first, and
@@ -60,13 +59,13 @@ function ota_uboot_env_prefill_compose() {
             # device and dies with "No boot partition" (RK3588 SD boot,
             # 2026-09-03). ota-init only sets this mode after a bootstrapped
             # first boot, which never happens without this injection.
-            raw_override_env="$(mktemp)" || exit_with_error "mktemp failed"
-            printf 'ab_boot_mode=raw-fit\n' > "${raw_override_env}"
-            ota_ab_merge_uboot_env_files "${final_env}" "${src_env}" "${raw_override_env}"
-            rm -f "${raw_override_env}"
+            printf 'ab_boot_mode=raw-fit\n' > "${mode_override_env}"
         else
-            ota_ab_merge_uboot_env_files "${final_env}" "${src_env}"
+            # Plain A/B: stamp the fs branch; plain FIT boots stay a manual console action.
+            printf 'ab_boot_mode=filesystem\n' > "${mode_override_env}"
         fi
+        ota_ab_merge_uboot_env_files "${final_env}" "${src_env}" "${mode_override_env}"
+        rm -f "${mode_override_env}"
         return 0
     fi
 
@@ -80,15 +79,18 @@ function ota_uboot_env_prefill_compose() {
     # carries the armbian.bootdev tokens in its own bootargs, and the rescue
     # branches inject them directly, so no bootargs prefixing is needed here.
     routing_env="$(mktemp)" || exit_with_error "mktemp failed"
-    # Plain uses ext4 only; secure/raw-FIT uses the signed boot/recovery FIT
-    # directly. Do not make FIT a fallback for plain.
-    local rescue_root="LABEL=armbi_root" normal_boot rescue_boot
+    # Plain uses ext4 only; FIT is never a plain fallback.
+    local rescue_root="LABEL=armbi_root" normal_boot rescue_boot fit_normal fit_rescue
     if ota_raw_boot_enabled; then
         normal_boot='run ota_normal_boot_fit'
         rescue_boot='run ota_rescue_boot_fit'
+        fit_normal='setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
+        fit_rescue='setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
     else
         normal_boot='run ota_normal_boot_fs'
         rescue_boot='run ota_rescue_boot_fs || run distro_bootcmd'
+        fit_normal='echo "PLAIN: raw FIT boot refused"'
+        fit_rescue='echo "PLAIN: raw FIT boot refused"'
     fi
     if ota_encrypted_rootfs_enabled; then
         rescue_root="/dev/mapper/armbian-root"
@@ -100,10 +102,10 @@ function ota_uboot_env_prefill_compose() {
         printf '%s\n' 'ota_in_progress=0'
         printf '%s\n' 'ota_boot_next=recovery'
         printf '%s\n' 'ota_normal_boot_fs=setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scriptaddr} /boot.scr && source ${scriptaddr}'
-        printf '%s\n' 'ota_normal_boot_fit=setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
+        printf 'ota_normal_boot_fit=%s\n' "${fit_normal}"
         printf 'ota_normal_boot=%s\n' "${normal_boot}"
         printf '%s\n' "ota_rescue_boot_fs=ext4load \${devtype} \${devnum}:1 \${kernel_addr_r} /recovery/Image && ext4load \${devtype} \${devnum}:1 \${ramdisk_addr_r} /recovery/uInitrd && ext4load \${devtype} \${devnum}:1 \${fdt_addr_r} /recovery/board.dtb && setenv bootargs \"root=${rescue_root} rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=\${devtype} armbian.bootdevnum=\${devnum} armbian.ota_role=recovery\" && booti \${kernel_addr_r} \${ramdisk_addr_r} \${fdt_addr_r}"
-        printf '%s\n' 'ota_rescue_boot_fit=setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
+        printf 'ota_rescue_boot_fit=%s\n' "${fit_rescue}"
         printf 'ota_rescue_boot=%s\n' "${rescue_boot}"
         printf '%s\n' 'bootcmd=if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
     } > "${routing_env}"
@@ -118,13 +120,14 @@ function ota_uboot_env_prefill_compose() {
 # u-boot.itb at sector 16384) and the FIT lands inside partition 1 by
 # design, far beyond the env area.
 function ota_uboot_env_prefill_assert_layout() {
-    local offset=$((OTA_UBOOT_ENV_OFFSET_HEX))
+    local offset_hex="$1"
+    local offset=$((offset_hex))
     local size=$((OTA_UBOOT_ENV_SIZE_HEX))
     local env_end_sector=$(((offset + size) / 512))
     local first_part_start uboot_end sector64_blob candidate
 
     ((offset % 512 == 0 && size % 512 == 0)) ||
-        exit_with_error "Env geometry not sector-aligned" "offset=${OTA_UBOOT_ENV_OFFSET_HEX} size=${OTA_UBOOT_ENV_SIZE_HEX}"
+        exit_with_error "Env geometry not sector-aligned" "offset=${offset_hex} size=${OTA_UBOOT_ENV_SIZE_HEX}"
 
     first_part_start="$(sfdisk -J "${LOOP}" 2>/dev/null |
         jq '.partitiontable.partitions | map(.start) | min')" ||
@@ -151,20 +154,23 @@ function ota_uboot_env_prefill_assert_layout() {
 # bootcmd that will run on first boot.
 function ota_uboot_env_prefill_verify() {
     local loop="$1" seek_sector="$2" size="$3"
-    local env_info
+    local env_info data_skip
 
+    # Redundant layout: CRC(4) + flags(1) + data; single-copy: CRC(4) + data.
+    [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]] && data_skip=5 || data_skip=4
     env_info="$(dd if="${loop}" bs=512 skip="${seek_sector}" count="$((size / 512))" status=none |
-        python3 -c '
+        python3 -c "
 import struct, sys, zlib
+skip = ${data_skip}
 blob = sys.stdin.buffer.read()
-crc = struct.unpack("<I", blob[:4])[0]
-if (zlib.crc32(blob[4:]) & 0xFFFFFFFF) != crc:
-    sys.exit("env blob CRC mismatch after write")
-for entry in blob[4:].split(b"\0"):
+crc = struct.unpack('<I', blob[:4])[0]
+if (zlib.crc32(blob[skip:]) & 0xFFFFFFFF) != crc:
+    sys.exit('env blob CRC mismatch after write')
+for entry in blob[skip:].split(b'\0'):
     if not entry:
         break
-    print(entry.decode("utf-8", "replace"))
-')" || exit_with_error "Env blob readback failed" "${env_info}"
+    print(entry.decode('utf-8', 'replace'))
+")" || exit_with_error "Env blob readback failed" "${env_info}"
     # Verify the tokens the composed env actually carries.  A/B blobs anchor
     # on the armbian.bootdev bootcmd from /etc/u-boot-initial-env (plus the
     # raw-fit override on secure images); only recovery blobs carry the v0.8
@@ -176,6 +182,9 @@ for entry in blob[4:].split(b"\0"):
         if ota_raw_boot_enabled; then
             grep -q '^ab_boot_mode=raw-fit' <<< "${env_info}" ||
                 exit_with_error "Prefilled A/B env lacks raw-fit mode" "ab_boot_mode not carried into blob"
+        else
+            grep -q '^ab_boot_mode=filesystem' <<< "${env_info}" ||
+                exit_with_error "Prefilled A/B env lacks filesystem mode" "ab_boot_mode not carried into blob"
         fi
     else
         grep -q '^ota_normal_boot_fit=' <<< "${env_info}" ||
@@ -190,6 +199,10 @@ for entry in blob[4:].split(b"\0"):
             grep -qx 'ota_rescue_boot=run ota_rescue_boot_fit' <<< "${env_info}" ||
                 exit_with_error "Prefilled env lacks secure rescue dispatcher" "ota_rescue_boot not carried into blob"
         else
+            grep -q '^ota_normal_boot_fit=echo ' <<< "${env_info}" ||
+                exit_with_error "Prefilled plain env has live FIT script" "ota_normal_boot_fit must be a refusal stub"
+            grep -q '^ota_rescue_boot_fit=echo ' <<< "${env_info}" ||
+                exit_with_error "Prefilled plain env has live FIT script" "ota_rescue_boot_fit must be a refusal stub"
             grep -qx 'ota_normal_boot=run ota_normal_boot_fs' <<< "${env_info}" ||
                 exit_with_error "Prefilled env lacks plain normal boot dispatcher" "ota_normal_boot not carried into blob"
             grep -qx 'ota_rescue_boot=run ota_rescue_boot_fs || run distro_bootcmd' <<< "${env_info}" ||
@@ -204,9 +217,11 @@ for entry in blob[4:].split(b"\0"):
 
 function post_write_uboot_platform__910_prefill_uboot_env() {
     local offset=$((OTA_UBOOT_ENV_OFFSET_HEX))
+    local redund_offset=$((OTA_UBOOT_ENV_REDUND_OFFSET_HEX))
     local size=$((OTA_UBOOT_ENV_SIZE_HEX))
     local seek_sector=$((offset / 512))
-    local mkenvimage_bin final_env blob
+    local redund_seek_sector=$((redund_offset / 512))
+    local mkenvimage_bin final_env blob mkenv_flags
 
     mkenvimage_bin="$(ota_uboot_env_prefill_mkenvimage)" ||
         exit_with_error "mkenvimage not found" "install u-boot-tools or run a u-boot build first"
@@ -215,19 +230,37 @@ function post_write_uboot_platform__910_prefill_uboot_env() {
     blob="$(mktemp)" || exit_with_error "mktemp failed"
 
     ota_uboot_env_prefill_compose "${final_env}"
-    ota_uboot_env_prefill_assert_layout
+    ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_OFFSET_HEX}"
 
-    "${mkenvimage_bin}" -s "${size}" -o "${blob}" "${final_env}" ||
-        exit_with_error "mkenvimage failed" "${mkenvimage_bin}"
+    # -r = redundant layout (flags=1 both copies: deterministic primary on
+    # first boot, first saveenv alternates). Single boards get 4B header.
+    mkenv_flags=()
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        mkenv_flags=(-r)
+        ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
+    fi
+    "${mkenvimage_bin}" "${mkenv_flags[@]}" -s "${size}" -o "${blob}" "${final_env}" ||
+        exit_with_error "mkenvimage failed" "${mkenvimage_bin} ${mkenv_flags[*]}"
     [[ "$(stat -c%s "${blob}")" == "${size}" ]] ||
         exit_with_error "Unexpected blob size" "$(stat -c%s "${blob}") != ${size}"
 
     dd if="${blob}" of="${LOOP}" bs=512 seek="${seek_sector}" conv=notrunc status=none ||
         exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_OFFSET_HEX}"
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        dd if="${blob}" of="${LOOP}" bs=512 seek="${redund_seek_sector}" conv=notrunc status=none ||
+            exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
+    fi
     sync
 
     ota_uboot_env_prefill_verify "${LOOP}" "${seek_sector}" "${size}"
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        ota_uboot_env_prefill_verify "${LOOP}" "${redund_seek_sector}" "${size}"
+    fi
 
     rm -f "${final_env}" "${blob}"
-    display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offset ${OTA_UBOOT_ENV_OFFSET_HEX}" "info"
+    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
+        display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offsets ${OTA_UBOOT_ENV_OFFSET_HEX} + ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX} (redundant)" "info"
+    else
+        display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offset ${OTA_UBOOT_ENV_OFFSET_HEX} (single copy)" "info"
+    fi
 }
