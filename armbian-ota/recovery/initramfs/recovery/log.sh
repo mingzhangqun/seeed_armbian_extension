@@ -10,13 +10,6 @@
 LOGDIR="${LOGDIR:-/run/initramfs}"
 LOGFILE="${LOGFILE:-${LOGDIR}/ota.log}"
 
-ota_log_init() {
-    mkdir -p "$LOGDIR"
-
-    # increase printk level so /dev/kmsg goes to console
-    echo "8 4 1 7" > /proc/sys/kernel/printk 2>/dev/null || true
-}
-
 log() {
     echo "OTA_DEBG $*" >> "$LOGFILE" 2>/dev/null || true
     echo "OTA_DEBG $*" > /dev/kmsg 2>/dev/null || true

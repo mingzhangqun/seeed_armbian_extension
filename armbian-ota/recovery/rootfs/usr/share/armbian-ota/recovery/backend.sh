@@ -593,6 +593,13 @@ recovery_rollback() {
     error_exit "Rollback is not a user command in recovery mode; recovery happens automatically when retries are exhausted (v0.8 design section 15.4)"
 }
 
+# CLI dispatch target (armbian-ota reconcile): in recovery mode the env
+# reconciliation runs on every boot inside armbian-ota-health-recovery,
+# so there is nothing to trigger manually.
+recovery_reconcile() {
+    log_info "Recovery mode reconciles on every boot (armbian-ota-health-recovery); nothing to do"
+}
+
 # ===== status ==================================================================
 
 recovery_status() {
