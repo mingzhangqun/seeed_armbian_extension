@@ -1,6 +1,7 @@
 """Shared, side-effect-free helpers for the image mirror CI scripts."""
 
 import json
+import re
 import subprocess
 
 
@@ -31,9 +32,13 @@ def decode(raw, description):
         raise ImageMirrorError(f"{description} is not valid JSON: {exc}") from exc
 
 
+def _safe_tag(tag):
+    return isinstance(tag, str) and bool(tag) and "/" not in tag
+
+
 def optional_tag(slots, slot):
     tag = slots.get(slot)
-    if tag is not None and (not isinstance(tag, str) or not tag or "/" in tag):
+    if tag is not None and not _safe_tag(tag):
         raise ImageMirrorError(f"slots.json {slot} must be a safe tag string or null")
     return tag
 
@@ -49,7 +54,7 @@ def history_tags(slots, legacy=True):
         history = [slots["previous"]] if slots.get("previous") else []
     else:
         raise ImageMirrorError("slots.json history must be an array")
-    if any(not isinstance(tag, str) or not tag or "/" in tag for tag in history):
+    if any(not _safe_tag(tag) for tag in history):
         raise ImageMirrorError("slots.json history must contain only safe, non-empty tags")
     return history
 
@@ -69,3 +74,31 @@ def parse_slots(raw, legacy=True):
 
 def references(slots):
     return set(filter(None, [slots["stable"], slots["pre-release"], *slots["history"]]))
+
+
+# Regex for the notes' kernel-repo row (plain or linked);
+# cell-boundary lookahead avoids fork-suffix truncation.
+KERNEL_REPO_RE = re.compile(
+    r"^\| \[?([A-Za-z0-9_.-]+/linux-rockchip)(?=[\]\|\s]|$)", re.MULTILINE
+)
+
+
+def kernel_repo_from_notes(body):
+    """Return the kernel repo named by the notes' build-sources table, or None."""
+    match = KERNEL_REPO_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+def owned_kernel_repo(body, workflow_repo):
+    """Kernel repo from the notes table, only when its owner matches this
+    pipeline's owner: the build only tags kernel forks it owns, so a
+    third-party repo named in the notes must never be swept."""
+    repo = kernel_repo_from_notes(body)
+    if repo and repo.split("/", 1)[0] == workflow_repo.split("/", 1)[0]:
+        return repo
+    return None
+
+
+def pipeline_owned(body, repo):
+    """True when the Release body links a run of this pipeline's repository."""
+    return bool(re.search(rf"{re.escape(repo)}/actions/runs/\d+\b", body or ""))

@@ -1,13 +1,16 @@
+diff --git a/extensions/radxa-aic8800.sh b/extensions/radxa-aic8800.sh
+index 946650f..b7c52a9 100644
 --- a/extensions/radxa-aic8800.sh
 +++ b/extensions/radxa-aic8800.sh
-@@ -10,11 +10,96 @@ function extension_finish_config__install_kernel_headers_for_aic8800_dkms() {
+@@ -10,6 +10,85 @@ function extension_finish_config__install_kernel_headers_for_aic8800_dkms() {
  	display_alert "Forcing INSTALL_HEADERS=yes; for use with aic8800 dkms" "${EXTENSION}" "debug"
  }
  
 +function aic8800_download_from_github_api() {
 +	declare output_name="$1"
-+	declare cached_file="${AIC8800_CACHE_DIR}/${output_name}"
-+	declare assets_json="${AIC8800_CACHE_DIR}/release-${latest_version}.json"
++	declare cache_dir="${AIC8800_CACHE_DIR:-${SRC}/cache/radxa-aic8800-debs}"
++	declare cached_file="${cache_dir}/${output_name}"
++	declare assets_json="${cache_dir}/release-${latest_version}.json"
 +	declare release_encoded asset_id
 +	declare -a curl_auth=()
 +	if [[ -n "${AIC8800_GITHUB_TOKEN:-}" ]]; then
@@ -52,7 +55,8 @@
 +function aic8800_download_file_with_cache() {
 +	declare url="$1"
 +	declare output_name="$2"
-+	declare cached_file="${AIC8800_CACHE_DIR}/${output_name}"
++	declare cache_dir="${AIC8800_CACHE_DIR:-${SRC}/cache/radxa-aic8800-debs}"
++	declare cached_file="${cache_dir}/${output_name}"
 +
 +	if [[ -f "${cached_file}" ]] && ! dpkg-deb --info "${cached_file}" > /dev/null 2>&1; then
 +		display_alert "Discarding invalid cached AIC8800 package" "${output_name}" "warn"
@@ -84,40 +88,13 @@
  function post_install_kernel_debs__install_aic8800_dkms_package() {
  
  	[[ "${INSTALL_HEADERS}" != "yes" ]] || [[ "${KERNEL_HAS_WORKING_HEADERS}" != "yes" ]] && return 0
- 	[[ -z $AIC8800_TYPE ]] && return 0
--	latest_version="$(github_latest_release_tag "radxa-pkg/aic8800")" || return 1
-+
-+	# Cache dir on host. Reused across builds.
-+	declare -g AIC8800_CACHE_DIR="${AIC8800_CACHE_DIR:-${SRC}/cache/radxa-aic8800-debs}"
-+	mkdir -p "${AIC8800_CACHE_DIR}"
-+
-+	# Pin a known-good release. The asset API is used if release downloads fail.
-+	declare AIC8800_FALLBACK_VERSION="${AIC8800_FALLBACK_VERSION:-5.0+git20260123.5f7be68d-10}"
-+	latest_version="${AIC8800_VERSION:-${AIC8800_FALLBACK_VERSION}}"
-+	display_alert "AIC8800 version pinned" "${latest_version}" "info"
+@@ -39,19 +118,12 @@ function post_install_kernel_debs__install_aic8800_dkms_package() {
+ 	# Local download cache on the host; the version is part of the filename, so it doubles as the cache key.
+ 	declare down_dir="${SRC}/cache/radxa-aic8800-debs"
+ 	mkdir -p "${down_dir}"
++	declare -g AIC8800_CACHE_DIR="${down_dir}"
  
- 	# Determine the DKMS package name based on the requested AIC8800_TYPE.
- 	declare aic8800_dkms_file_name
-@@ -31,24 +116,20 @@ function post_install_kernel_debs__install_aic8800_dkms_package() {
- 	if [[ "${GITHUB_MIRROR}" == "ghproxy" ]]; then
- 		ghproxy_header="https://ghfast.top/"
- 	fi
--	declare base_url="https://github.com/radxa-pkg/aic8800/releases/download/${latest_version}"
-+	# URL-encode the version for use in the default GitHub download URL.
-+	declare aic8800_version_encoded
-+	if [[ -n "${AIC8800_BASE_URL:-}" ]]; then
-+		aic8800_version_encoded="${latest_version}"
-+	else
-+		aic8800_version_encoded=$(printf '%s' "${latest_version}" | jq -sRr @uri)
-+	fi
- 
--	# Local download cache on the host; the version is part of the filename, so it doubles as the cache key.
--	declare down_dir="${SRC}/cache/radxa-aic8800-debs"
--	mkdir -p "${down_dir}"
-+	# Base URL for the release assets. Override to use a local mirror.
-+	declare base_url="${AIC8800_BASE_URL:-https://github.com/radxa-pkg/aic8800/releases/download/${aic8800_version_encoded}}"
- 
- 	# Download (if not already cached) and stage each deb into the chroot's /tmp for installation.
+-	# Download (if not already cached) and stage each deb into the chroot's /tmp for installation.
 -	declare deb_file full_deb_path down_url
 -	for deb_file in "${aic8800_dkms_file_name}" "${aic8800_firmware_file_name}"; do
 -		full_deb_path="${down_dir}/${deb_file}"
@@ -129,6 +106,8 @@
 -		fi
 -		cp -v "${full_deb_path}" "${SDCARD}/tmp/${deb_file}"
 -	done
++	# Download (cached, deb-validated) and stage each deb into the chroot's /tmp for installation.
++	# Release downloads fall back to the GitHub asset API on failure.
 +	aic8800_download_file_with_cache "${ghproxy_header}${base_url}/${aic8800_dkms_file_name}" "${aic8800_dkms_file_name}"
 +	aic8800_download_file_with_cache "${ghproxy_header}${base_url}/${aic8800_firmware_file_name}" "${aic8800_firmware_file_name}"
  

@@ -114,7 +114,9 @@ shows each Image/OTA download size. New manifests include file sizes; Pages
 reads sizes from the mirror only for legacy manifests that lack them, so
 existing trees gain sizes without rebuilding or modifying their manifests.
 Promotion validates the complete referenced trees, updates the pointers
-(`stable ⟵ pre-release`, previous stable joins the bounded history), and
+(`stable ⟵ pre-release`; `history_depth` defaults to 0, so the previous
+stable's tree is purged — hard-deleted, recycle bin included — on every
+promotion unless depth is raised), and
 moves no image files. The OneDrive tree for an expired stable may be
 purged, but its GitHub Release is retained as historical metadata.
 `Pages - Refresh` (`refresh-pages.yml`) re-renders the page from the live
