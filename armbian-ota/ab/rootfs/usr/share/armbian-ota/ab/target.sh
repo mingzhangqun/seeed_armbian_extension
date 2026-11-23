@@ -90,12 +90,29 @@ ab_reformat_target_root() {
     local label="$2"
     local root_type="$3"
     local mkfs_opts="-F -q"
-    local old_uuid
+    local old_uuid residue_mnt residue_try
 
     if ! command -v mkfs.ext4 >/dev/null 2>&1; then
         log_info "Target root mkfs path skipped: mkfs.ext4 not available, falling back to file cleanup"
         return 1
     fi
+
+    # A killed transaction can leave the inactive target root mounted (its
+    # orphan extract may still write). umount success implies writers are
+    # gone; wait them out instead of failing the transaction.
+    while read -r residue_mnt; do
+        [ -n "${residue_mnt}" ] || continue
+        log_warn "Detaching stale target-root mount: ${residue_mnt}"
+        residue_try=0
+        until umount "${residue_mnt}" 2>/dev/null; do
+            residue_try=$((residue_try + 1))
+            [ "${residue_try}" -ge 24 ] && {
+                log_error "Cannot detach stale mount ${residue_mnt} (orphan extract still writing after 120s?)"
+                return 2
+            }
+            sleep 5
+        done
+    done < <(findmnt -rn -o TARGET -S "${mount_dev}" 2>/dev/null)
 
     if [ -n "${label}" ]; then
         mkfs_opts="${mkfs_opts} -L ${label}"
