@@ -127,6 +127,14 @@ if [ "${fw_env_staged}" -eq 2 ]; then
         mkdir -p "${DESTDIR}/usr/lib/aarch64-linux-gnu"
         cp -p "${lib}" "${DESTDIR}/usr/lib/aarch64-linux-gnu/"
     done
+    # fw_setenv -f rebuild base; hard-fail if missing.
+    if [ -f "/etc/u-boot-initial-env" ]; then
+        mkdir -p "${DESTDIR}/etc"
+        cp -p "/etc/u-boot-initial-env" "${DESTDIR}/etc/u-boot-initial-env"
+    else
+        echo "[99-copy-tools] missing required /etc/u-boot-initial-env; both-bad env rebuild would be dead" >&2
+        exit 1
+    fi
     echo "[99-copy-tools] staged fw_setenv/fw_printenv + libubootenv" >&2
 else
     echo "[99-copy-tools] WARN: fw_setenv/fw_printenv not found in rootfs (${fw_env_staged}/2); OTA env writes will fail on device" >&2

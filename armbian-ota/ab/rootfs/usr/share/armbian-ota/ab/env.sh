@@ -9,35 +9,39 @@ AB_PARTITIONS_LIB="${OTA_RUNTIME_DIR}/ab/partitions.sh"
 }
 . "${AB_PARTITIONS_LIB}"
 
+# fw_env_* helpers: shared with recovery via the common runtime.
+FW_ENV_LIB="${OTA_RUNTIME_DIR}/fwenv.sh"
+[ -r "${FW_ENV_LIB}" ] || {
+    echo "ERROR: fw_env helper not found: ${FW_ENV_LIB}" >&2
+    return 1
+}
+. "${FW_ENV_LIB}"
+
+# Repair key spec, single-sourced with the build-time completeness check.
+AB_ENV_KEYS_LIB="${OTA_RUNTIME_DIR}/ab/env-keys.sh"
+[ -r "${AB_ENV_KEYS_LIB}" ] || {
+    echo "ERROR: A/B env key spec not found: ${AB_ENV_KEYS_LIB}" >&2
+    return 1
+}
+. "${AB_ENV_KEYS_LIB}"
+
 ab_env_get() {
-    fw_printenv -n "$1" 2>/dev/null || true
+    fw_env_get "$@"
 }
 
+# Batch write + readback via fw_env_set_multi (never rebuilds from empty).
 ab_env_set() {
-    local env_file entry key value
+    local entry key value
 
-    env_file="$(mktemp)" || return 1
     for entry in "$@"; do
         key="${entry%%=*}"
         value="${entry#*=}"
         if [ -z "${key}" ] || [ "${key}" = "${entry}" ]; then
-            rm -f "${env_file}"
             return 1
         fi
-        printf '%s=%s\n' "${key}" "${value}" >> "${env_file}"
     done
 
-    if ! fw_setenv -s "${env_file}"; then
-        rm -f "${env_file}"
-        return 1
-    fi
-    rm -f "${env_file}"
-
-    for entry in "$@"; do
-        key="${entry%%=*}"
-        value="${entry#*=}"
-        [ "$(ab_env_get "${key}")" = "${value}" ] || return 1
-    done
+    fw_env_set_multi "$@"
 }
 
 # Default environment initialization and repair.
@@ -72,10 +76,15 @@ ab_env_apply_initial() {
     ab_env_set "${key}=${value}"
 }
 
+# Negation of the shared fw_env_crc_bad predicate.
+ab_env_healthy() {
+    ! fw_env_crc_bad
+}
+
 ab_env_initialize_default() {
     local current_slot="$1"
 
-    fw_printenv >/dev/null 2>&1 && return 0
+    ab_env_healthy && return 0
     [ -s "${AB_INITIAL_ENV}" ] || return 1
     fw_setenv -f "${AB_INITIAL_ENV}" boot_slot "${current_slot}" || return 1
     fw_setenv boot_success "${current_slot}"
@@ -86,11 +95,11 @@ ab_env_repair_defaults() {
 
     [ -s "${AB_INITIAL_ENV}" ] || return 1
 
-    for key in ota_in_progress slot_retry_max slot_retry_left; do
+    for key in ${AB_ENV_MISSING_KEYS}; do
         ab_env_apply_initial "${key}" || return 1
     done
 
-    for key in ab_preboot ab_select_boot_part scan_dev_for_boot_part ab_select_fit_slot bootcmd; do
+    for key in ${AB_ENV_SYNC_KEYS}; do
         ab_env_apply_initial "${key}" sync || return 1
     done
 

@@ -3,16 +3,17 @@
 # fw_env helpers shared by the normal system (armbian-ota CLI, health
 # service) and the Rescue initramfs (99-ota-apply). POSIX sh + busybox.
 #
-# Plain recovery routing tokens (ota_in_progress / ota_boot_next) live in the
-# single-copy vendor env blob at a raw offset below partition 1. Every write
-# goes through fw_setenv and is verified by readback (design section 3.3);
-# a bad-CRC env is detected explicitly and rebuilt from state, never blindly
-# appended to (fw_setenv on a bad-CRC env starts from an EMPTY environment,
-# which would silently drop every other variable).
+# Routing tokens live in the redundant env pair below partition 1 (config
+# always two entries; every shipped U-Boot is patched for it). Writes are
+# readback-verified; a bad-CRC env is rebuilt from the initial env, never
+# blindly appended to.
 
 OTA_FW_ENV_CONFIG="${OTA_FW_ENV_CONFIG:-/etc/fw_env.config}"
-OTA_FW_ENV_OFFSET="0x3f8000"   # CONFIG_ENV_OFFSET (vendor env_blk)
-OTA_FW_ENV_SIZE="0x8000"       # CONFIG_ENV_SIZE
+OTA_FW_ENV_OFFSET="0x3f8000"        # CONFIG_ENV_OFFSET (vendor env_blk)
+OTA_FW_ENV_REDUND_OFFSET="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
+OTA_FW_ENV_SIZE="0x8000"            # CONFIG_ENV_SIZE
+# libubootenv bad-env stderr wordings (classic, trixie, generic).
+OTA_FW_ENV_BAD_ERR_RE="bad crc|cannot read environment|failed to read environment"
 
 # Whole-disk device backing partition device $1, via sysfs parent walk.
 # /dev/mmcblk0p3 -> /dev/mmcblk0, /dev/nvme0n1p3 -> /dev/nvme0n1.
@@ -62,14 +63,19 @@ fw_env_boot_disk() {
     [ -n "${anchor_dev}" ] && fw_env_parent_disk "${anchor_dev}"
 }
 
-# (Re)write /etc/fw_env.config for boot disk $1. Idempotent.
+
+# (Re)write /etc/fw_env.config for boot disk $1: always the two redundant
+# entries; a single-format guess is unreadable to the patched U-Boot.
+
 fw_env_write_config() {
     disk="$1"
 
     [ -b "${disk}" ] || return 1
     mkdir -p "$(dirname "${OTA_FW_ENV_CONFIG}")" 2>/dev/null || return 1
-    printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}" \
-        > "${OTA_FW_ENV_CONFIG}" || return 1
+    {
+        printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_OFFSET}" "${OTA_FW_ENV_SIZE}"
+        printf '%s\t%s\t%s\n' "${disk}" "${OTA_FW_ENV_REDUND_OFFSET}" "${OTA_FW_ENV_SIZE}"
+    } > "${OTA_FW_ENV_CONFIG}" || return 1
     return 0
 }
 
@@ -97,17 +103,17 @@ fw_env_get() {
     fw_printenv -n "$1" 2>/dev/null
 }
 
-# True when the persistent env blob fails its CRC check. fw_printenv still
-# prints the (default) variables in that state, so the warning on stderr is
-# the only reliable signal.
+# Bad CRC = stderr warning (wording varies); empty blob also counts as bad.
 fw_env_crc_bad() {
-    err_file="${TMPDIR:-/tmp}/fwenv.crc.$$"
+    err_file="$(mktemp 2>/dev/null)" || return 0
 
-    fw_printenv > /dev/null 2> "${err_file}" || true
-    grep -qi "bad crc" "${err_file}"
-    rc=$?
+    env_list="$(fw_printenv 2> "${err_file}")" || true
+    if grep -qiE "${OTA_FW_ENV_BAD_ERR_RE}" "${err_file}"; then
+        rm -f "${err_file}" 2>/dev/null || true
+        return 0
+    fi
     rm -f "${err_file}" 2>/dev/null || true
-    [ "${rc}" -eq 0 ]
+    [ -z "${env_list}" ]
 }
 
 # Set one variable and verify by readback.
@@ -120,19 +126,42 @@ fw_env_set() {
     return 0
 }
 
-# Set multiple variables in one fw_setenv -s run and verify each by readback.
+# --full-set only for whole-env rewrites; partial would drop bootcmd.
 fw_env_set_multi() {
+    full_set=0
+    if [ "${1:-}" = "--full-set" ]; then
+        full_set=1
+        shift
+    fi
+
     script_file="$(mktemp 2>/dev/null)" || return 1
 
     for kv in "$@"; do
         printf '%s\n' "${kv}" >> "${script_file}"
     done
 
-    fw_setenv -s "${script_file}" || {
-        rm -f "${script_file}" 2>/dev/null || true
-        return 1
+    set_err="$(mktemp 2>/dev/null)" || set_err="${TMPDIR:-/tmp}/fwenv.set.$$.err"
+    fw_setenv -s "${script_file}" 2>"${set_err}" || {
+        # script_file must survive until the retry below consumes it.
+        if [ "${full_set}" -eq 0 ] || \
+           ! { grep -qiE "${OTA_FW_ENV_BAD_ERR_RE}" "${set_err}" || fw_env_crc_bad; }; then
+            # Partial writers, and any failure that is not a confirmed
+            # bad-CRC refusal, fail with the blob untouched.
+            cat "${set_err}" >&2
+            rm -f "${set_err}" "${script_file}" 2>/dev/null || true
+            return 1
+        fi
+        rm -f "${set_err}" 2>/dev/null || true
+        # Bad-CRC refusal: rebuild from the initial env (defenv base),
+        # without reading the blob. Failed retry leaves the bad CRC: U-Boot
+        # falls back to the compiled default env (Rescue).
+        echo "fwenv: WARNING rebuilding env from /etc/u-boot-initial-env (bad CRC)" >&2
+        fw_setenv -f /etc/u-boot-initial-env -s "${script_file}" || {
+            rm -f "${script_file}" 2>/dev/null || true
+            return 1
+        }
     }
-    rm -f "${script_file}" 2>/dev/null || true
+    rm -f "${set_err}" "${script_file}" 2>/dev/null || true
 
     for kv in "$@"; do
         key="${kv%%=*}"
@@ -143,10 +172,7 @@ fw_env_set_multi() {
 }
 
 # ===== routing set ============================================================
-# The env entries that make plain-recovery routing work (transactional
-# bootcmd + both boot scripts + the two flags). KEEP IN SYNC with the three
-# producers: uboot-env-prefill.sh (persistent blob), the U-Boot default-env
-# patch (seeed-ota-rescue-default-env.patch) and this file.
+# Single source: prefill and the runtime rebuild share these strings.
 #
 # Why a full set exists here: fw_setenv on a bad-CRC env starts from an EMPTY
 # environment, so a CRC-rebuild that writes only ota_in_progress/ota_boot_next
@@ -175,16 +201,26 @@ OTA_ENV_NORMAL_BOOT_FS='setenv prefix /; ext4load ${devtype} ${devnum}:1 ${scrip
 # bootargs. Only the dynamic disk and Rescue-role tokens belong in this script;
 # a second hardcoded copy would override RK_SECURE_BOOT_* customizations.
 OTA_ENV_NORMAL_BOOT_FIT='setenv boot_fit_part boot; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; boot_fit'
-# Select routes from the build-stamped layout, not a writable U-Boot variable:
-# plain never falls back to an unsigned raw FIT; secure/raw-FIT has no ext4
-# /boot to try. The unused branch is retained only as inert reference data so
-# full CRC rebuilds remain compatible with older compiled default envs.
+# Routes come from the build-stamped layout; plain FIT keys are refusal stubs.
 OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fs'
 OTA_ENV_RESCUE_BOOT_FIT='setenv boot_fit_part recovery; env set bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery"; boot_fit'
+# Rescue fs script skeleton; @ROOT@ is spliced by fw_env_splice_root at
+# routing-set build time (LABEL=armbi_root plain, mapper on encrypted).
+OTA_ENV_RESCUE_BOOT_FS_TMPL='ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root=@ROOT@ rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
 OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fs || run distro_bootcmd'
-if [ "$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null)" = "raw-fit" ]; then
+
+# OTA_BOOT_MODE wins over the stamp; the failed read must stay exit-0.
+if [ -n "${OTA_BOOT_MODE:-}" ]; then
+    ota_fw_layout="${OTA_BOOT_MODE}"
+else
+    ota_fw_layout="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null || true)"
+fi
+if [ "${ota_fw_layout}" = "raw-fit" ]; then
     OTA_ENV_NORMAL_BOOT='run ota_normal_boot_fit'
     OTA_ENV_RESCUE_BOOT='run ota_rescue_boot_fit'
+else
+    OTA_ENV_NORMAL_BOOT_FIT='echo "PLAIN: raw FIT boot refused"'
+    OTA_ENV_RESCUE_BOOT_FIT='echo "PLAIN: raw FIT boot refused"'
 fi
 OTA_ENV_BOOTCMD='if test -z "${devtype}"; then run rkimg_bootdev; fi; if test "${ota_in_progress}" = "1"; then if test "${ota_boot_next}" = "normal"; then setenv ota_boot_next recovery; if saveenv; then run ota_normal_boot; fi; run ota_rescue_boot; else run ota_rescue_boot; fi; else run ota_normal_boot; run ota_rescue_boot; fi'
 
@@ -198,16 +234,18 @@ OTA_RESCUE_ROOT_DEFAULT="${OTA_RESCUE_ROOT_DEFAULT:-LABEL=armbi_root}"
 
 # Write the complete routing env with the given flag values
 # ($1 = ota_in_progress, $2 = ota_boot_next). Readback-verified.
+fw_env_splice_root() {
+    # $1 = rescue root spliced into the @ROOT@ placeholder
+    printf '%s' "${OTA_ENV_RESCUE_BOOT_FS_TMPL}" | sed "s|@ROOT@|$1|"
+}
+
 fw_env_write_routing_set() {
     in_prog="$1"
     next="$2"
 
-    # single-quoted except for the rescue root splice: the ${devtype}/$
-    # {kernel_addr_r}/... tokens must stay literal for U-Boot, so they cannot
-    # sit inside a double-quoted argument
-    rescue_fs='ext4load ${devtype} ${devnum}:1 ${kernel_addr_r} /recovery/Image && ext4load ${devtype} ${devnum}:1 ${ramdisk_addr_r} /recovery/uInitrd && ext4load ${devtype} ${devnum}:1 ${fdt_addr_r} /recovery/board.dtb && setenv bootargs "root='"${OTA_RESCUE_ROOT_DEFAULT}"' rootwait rootfstype=ext4 console=ttyFIQ0,1500000n8 armbian.bootdev=${devtype} armbian.bootdevnum=${devnum} armbian.ota_role=recovery" && booti ${kernel_addr_r} ${ramdisk_addr_r} ${fdt_addr_r}'
+    rescue_fs="$(fw_env_splice_root "${OTA_RESCUE_ROOT_DEFAULT}")"
 
-    fw_env_set_multi \
+    fw_env_set_multi --full-set \
         "ota_in_progress=${in_prog}" \
         "ota_boot_next=${next}" \
         "ota_normal_boot_fs=${OTA_ENV_NORMAL_BOOT_FS}" \
