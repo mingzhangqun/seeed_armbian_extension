@@ -5,11 +5,8 @@
 OTA_UBOOT_ENV_OFFSET_HEX="0x3f8000"       # CONFIG_ENV_OFFSET (env/Kconfig, ARCH_ROCKCHIP)
 OTA_UBOOT_ENV_REDUND_OFFSET_HEX="0x3f0000" # CONFIG_ENV_OFFSET_REDUND (redundant copy)
 OTA_UBOOT_ENV_SIZE_HEX="0x8000"           # CONFIG_ENV_SIZE
-# rk3576/rk3588: redundant layout; other boards need the single-copy blob.
-OTA_UBOOT_ENV_REDUNDANT=0
-case "${BOOT_SOC:-}" in
-    rk3576 | rk3588) OTA_UBOOT_ENV_REDUNDANT=1 ;;
-esac
+# Redundant layout for every shipped U-Boot; a single-copy blob is
+# unreadable to it.
 
 # mkenvimage discovery: the build container ships u-boot-tools, but fall back
 # to the binary produced by any local U-Boot compilation so image-only builds
@@ -167,8 +164,8 @@ function ota_uboot_env_prefill_verify() {
     local loop="$1" seek_sector="$2" size="$3"
     local env_info data_skip
 
-    # Redundant layout: CRC(4) + flags(1) + data; single-copy: CRC(4) + data.
-    [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]] && data_skip=5 || data_skip=4
+    # Redundant format: CRC(4) + flags(1) + data.
+    local data_skip=5
     env_info="$(dd if="${loop}" bs=512 skip="${seek_sector}" count="$((size / 512))" status=none |
         python3 -c "
 import struct, sys, zlib
@@ -232,7 +229,7 @@ function post_write_uboot_platform__910_prefill_uboot_env() {
     local size=$((OTA_UBOOT_ENV_SIZE_HEX))
     local seek_sector=$((offset / 512))
     local redund_seek_sector=$((redund_offset / 512))
-    local mkenvimage_bin final_env blob mkenv_flags
+    local mkenvimage_bin final_env blob
 
     mkenvimage_bin="$(ota_uboot_env_prefill_mkenvimage)" ||
         exit_with_error "mkenvimage not found" "install u-boot-tools or run a u-boot build first"
@@ -242,36 +239,24 @@ function post_write_uboot_platform__910_prefill_uboot_env() {
 
     ota_uboot_env_prefill_compose "${final_env}"
     ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_OFFSET_HEX}"
+    ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
 
     # -r = redundant layout (flags=1 both copies: deterministic primary on
-    # first boot, first saveenv alternates). Single boards get 4B header.
-    mkenv_flags=()
-    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
-        mkenv_flags=(-r)
-        ota_uboot_env_prefill_assert_layout "${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
-    fi
-    "${mkenvimage_bin}" "${mkenv_flags[@]}" -s "${size}" -o "${blob}" "${final_env}" ||
-        exit_with_error "mkenvimage failed" "${mkenvimage_bin} ${mkenv_flags[*]}"
+    # first boot, first saveenv alternates).
+    "${mkenvimage_bin}" -r -s "${size}" -o "${blob}" "${final_env}" ||
+        exit_with_error "mkenvimage failed" "${mkenvimage_bin} -r"
     [[ "$(stat -c%s "${blob}")" == "${size}" ]] ||
         exit_with_error "Unexpected blob size" "$(stat -c%s "${blob}") != ${size}"
 
     dd if="${blob}" of="${LOOP}" bs=512 seek="${seek_sector}" conv=notrunc status=none ||
         exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_OFFSET_HEX}"
-    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
-        dd if="${blob}" of="${LOOP}" bs=512 seek="${redund_seek_sector}" conv=notrunc status=none ||
-            exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
-    fi
+    dd if="${blob}" of="${LOOP}" bs=512 seek="${redund_seek_sector}" conv=notrunc status=none ||
+        exit_with_error "Failed to write env blob" "${LOOP} @ ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX}"
     sync
 
     ota_uboot_env_prefill_verify "${LOOP}" "${seek_sector}" "${size}"
-    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
-        ota_uboot_env_prefill_verify "${LOOP}" "${redund_seek_sector}" "${size}"
-    fi
+    ota_uboot_env_prefill_verify "${LOOP}" "${redund_seek_sector}" "${size}"
 
     rm -f "${final_env}" "${blob}"
-    if [[ "${OTA_UBOOT_ENV_REDUNDANT}" == "1" ]]; then
-        display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offsets ${OTA_UBOOT_ENV_OFFSET_HEX} + ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX} (redundant)" "info"
-    else
-        display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offset ${OTA_UBOOT_ENV_OFFSET_HEX} (single copy)" "info"
-    fi
+    display_alert "OTA U-Boot env prefill" "Wrote ${size} bytes at offsets ${OTA_UBOOT_ENV_OFFSET_HEX} + ${OTA_UBOOT_ENV_REDUND_OFFSET_HEX} (redundant)" "info"
 }
