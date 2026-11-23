@@ -210,6 +210,28 @@ function rk_secure_boot_resolve_mkimage() {
         exit_with_error "FIT signing failed: no signing-capable mkimage under" "$(rk_sdk_rkbin_root)"
 }
 
+# Shared FIT-signing prep: prebuilt mkimage, tool rebuild, fit padding.
+# Must run in the parent shell: it resolves RK_SECURE_BOOT_MKIMAGE (lost in a
+# $(...) subshell) and sets RK_SECURE_BOOT_FIT_PADDING instead of stdout.
+function rk_secure_boot_prepare_signing_toolchain() {
+    local uboot_dir="$1"
+
+    # Sign with the static Rockchip prebuilt only; tree-built salt breaks verifiers.
+    [[ -x "${RK_SECURE_BOOT_MKIMAGE:-}" ]] || rk_secure_boot_resolve_mkimage
+
+    # USBPLUG can clobber tools/mkimage; rebuild from the final config.
+    if [[ -x "${uboot_dir}/tools/mkimage" ]] &&
+        "${uboot_dir}/tools/mkimage" -h 2>&1 | grep -q 'Signing / verified boot not supported'; then
+        make -C "${uboot_dir}" -B tools-only >&2 ||
+            exit_with_error "FIT signing failed: unable to rebuild U-Boot host tools" "${uboot_dir}/tools"
+    fi
+
+    RK_SECURE_BOOT_FIT_PADDING="0x1000"
+    if grep -q '^CONFIG_FIT_ENABLE_RSA4096_SUPPORT=y' "${uboot_dir}/.config" 2>/dev/null; then
+        RK_SECURE_BOOT_FIT_PADDING="0x1200"
+    fi
+}
+
 function rk_secure_boot_prepare_fit_workdir() {
     local fit_work="$1"
     local kernel_img_path="$2"
@@ -272,7 +294,7 @@ function rk_secure_boot_resolve_uboot_dir() {
 function rk_secure_boot_run_secondary_fit_signing() {
     local fit_work="$1"
     local uboot_dir="$2"
-    local fit_padding="0x1000"
+    local fit_padding
 
     rm -f "${uboot_dir}/fit/boot.itb" "${uboot_dir}/boot-final.img" 2>/dev/null || true
 
@@ -284,27 +306,8 @@ function rk_secure_boot_run_secondary_fit_signing() {
         return 0
     fi
 
-    if grep -q '^CONFIG_FIT_ENABLE_RSA4096_SUPPORT=y' "${uboot_dir}/.config" 2>/dev/null; then
-        fit_padding="0x1200"
-    fi
-
-    # The boot FIT carries padding = "pss", and the on-board verifiers (SPL /
-    # U-Boot from the radxa v2024.10 tree) only accept maximum-salt PSS
-    # signatures.  A tree-built mkimage linked against OpenSSL >= 3.5 signs
-    # with digest-length salt, which the device rejects.  Sign with the
-    # Rockchip prebuilt mkimage instead: it is statically linked, so its
-    # maximum-salt behaviour is frozen into the binary regardless of the
-    # build container's OpenSSL.
-    [[ -x "${RK_SECURE_BOOT_MKIMAGE}" ]] || rk_secure_boot_resolve_mkimage
-
-    # USBPLUG postprocessing can leave a stale tools/mkimage built from a
-    # temporary config without CONFIG_FIT_SIGNATURE.  That also leaves
-    # fit_check_sign failing with "No RSA key found".  Rebuild the host tools
-    # from the final secure U-Boot configuration before verifying the FIT.
-    if [[ -x "${uboot_dir}/tools/mkimage" ]] &&
-        "${uboot_dir}/tools/mkimage" -h 2>&1 | grep -q 'Signing / verified boot not supported'; then
-        make -C "${uboot_dir}" -B tools-only || exit_with_error "FIT signing failed: unable to rebuild U-Boot host tools" "${uboot_dir}/tools"
-    fi
+    rk_secure_boot_prepare_signing_toolchain "${uboot_dir}"
+    local fit_padding="${RK_SECURE_BOOT_FIT_PADDING}"
 
     display_alert "fit-post-initrd" "Signing final FIT from boot-final.its" "info"
     (
@@ -359,34 +362,17 @@ function rk_secure_boot_stage_final_fit() {
 function rk_secure_boot_remove_boot_fstab_entries() {
     local fstab_file="${MOUNT}/etc/fstab"
 
-    display_alert "fit-flash" "Removing boot settings from fstab" "info"
+    [[ -f "${fstab_file}" ]] || return 0
+    grep -q "/boot" "${fstab_file}" 2>/dev/null || return 0
 
-    if [[ ! -f "${fstab_file}" ]]; then
-        display_alert "fit-flash" "No fstab file" "info"
-        return 0
-    fi
-
-    if ! grep -q "/boot" "${fstab_file}" 2>/dev/null; then
-        display_alert "fit-flash" "No boot entries" "info"
-        return 0
-    fi
-
+    # RAW FIT boot has no /boot filesystem; stale mount entries break boot.
     display_alert "secure-uboot" "Removing boot partition mount entries from fstab" "info"
-    display_alert "secure-uboot" "fstab content before sed execution:" "info"
-    cat "${fstab_file}" 2>/dev/null || true
-
-    cp "${fstab_file}" "${fstab_file}.bak" 2>/dev/null || true
     sed -i '\|/boot|d' "${fstab_file}" 2>/dev/null || true
 
-    display_alert "secure-uboot" "fstab content after sed execution:" "info"
-    cat "${fstab_file}" 2>/dev/null || true
-
-    if ! grep -q "/boot" "${fstab_file}" 2>/dev/null; then
-        rm -f "${fstab_file}.bak" 2>/dev/null || true
-        display_alert "secure-uboot" "Successfully removed boot partition mount entries from fstab" "info"
-    else
+    if grep -q "/boot" "${fstab_file}" 2>/dev/null; then
         display_alert "secure-uboot" "Warning: /boot entries still exist in fstab, please check manually" "warn"
     fi
+    return 0
 }
 
 function rk_secure_boot_disable_kernel_root_symlinks() {
@@ -437,31 +423,30 @@ function rk_secure_boot_capture_raw_boot_partition() {
 
     display_alert "secure-uboot" "RAW boot mode: Save bootpart index and prevent filesystem creation" "debug"
 
-    # Ensure BOOTSIZE is set
-    if [[ -z "${BOOTSIZE}" ]]; then
-        export BOOTSIZE=256
-        display_alert "secure-uboot" "Setting default BOOTSIZE=${BOOTSIZE} MiB" "info"
-    fi
-
-    # Save original bootpart index for later dd write
+    # Save original bootpart index for later dd write. BOOTSIZE is always set
+    # by pre_prepare_partitions__050_set_raw_boot_partition at this point.
     export RAW_BOOT_PART_INDEX="${bootpart}"
     display_alert "secure-uboot" "Saved boot partition index: ${RAW_BOOT_PART_INDEX}" "debug"
 
-    # Delay clearing bootpart variable, clear it in mount_chroot_script stage
-    # This ensures correct use of BOOTSIZE during partition creation
+    # Delay clearing bootpart variable; pre_mount_chroot_script clears it so
+    # BOOTSIZE is still honored during partition creation.
 }
 function rk_secure_boot_create_resource_img() {
     if ! rk_autodecrypt_fit_boot_required; then
         return 0
     fi
 
+    # $1 = DTB path (default: resolved from the kernel worktree)
+    # $2 = output path (default: kernel worktree resource.img)
     local kernel_src="${SRC}/cache/sources/${LINUXSOURCEDIR}"
     local uboot_src="${SRC}/cache/sources/${BOOTSOURCEDIR}"
-    local dtb_path
-    dtb_path="$(resolve_kernel_dtb_path "${kernel_src}")"
+    local dtb_path="${1:-}"
+    local output_resource_img="${2:-${kernel_src}/resource.img}"
+    if [[ -z "${dtb_path}" ]]; then
+        dtb_path="$(resolve_kernel_dtb_path "${kernel_src}")"
+    fi
     display_alert "Creating resource.img" "Using DTB: ${dtb_path:-<not found>}" "info"
     local resource_tool="${uboot_src}/tools/resource_tool"
-    local output_resource_img="${kernel_src}/resource.img"
 
     # Check necessary files and tools
     [[ -f "${dtb_path}" ]] ||
@@ -545,6 +530,7 @@ function rk_secure_boot_package_final_fit() {
     local kernel_src="${SRC}/cache/sources/${LINUXSOURCEDIR}"
     local kernel_img_path
     local resource_path="${kernel_src}/resource.img"
+    local resource_tmp=""
     local fit_work="${TMPDIR:-/tmp}/fit-final-$$"
     local dtb_path
 
@@ -560,6 +546,16 @@ function rk_secure_boot_package_final_fit() {
     [[ -f "${kernel_img_path}" ]] || exit_with_error "FIT packaging failed: kernel image missing" "${kernel_img_path}"
     [[ -f "${dtb_path}" ]] || exit_with_error "FIT packaging failed: DTB missing" "${dtb_path}"
 
+    if [[ ! -f "${resource_path}" ]]; then
+        # Cache-hit builds never run pre_package_kernel_image, so the
+        # worktree resource.img does not exist; build it from the resolved DTB.
+        resource_tmp="${TMPDIR:-/tmp}/fit-resource-$$"
+        display_alert "fit-post-initrd" "Worktree resource.img missing; building at image time" "info"
+        rk_secure_boot_create_resource_img "${dtb_path}" "${resource_tmp}" ||
+            exit_with_error "FIT packaging failed: image-time resource.img build failed" "${resource_tmp}"
+        resource_path="${resource_tmp}"
+    fi
+
     rk_secure_boot_resolve_mkimage
     rk_secure_boot_prepare_fit_workdir "${fit_work}" "${kernel_img_path}" "${dtb_path}" "${resource_path}" "${RK_SECURE_BOOT_RAMDISK_PATH}"
     rk_secure_boot_apply_fit_template "${fit_work}"
@@ -569,6 +565,7 @@ function rk_secure_boot_package_final_fit() {
     rk_secure_boot_stage_final_fit "${fit_work}" "${RK_SECURE_BOOT_UBOOT_DIR}"
 
     rm -rf "${fit_work}" 2>/dev/null || true
+    [[ -n "${resource_tmp}" ]] && rm -f "${resource_tmp}" 2>/dev/null || true
     rk_secure_boot_remove_boot_fstab_entries
 }
 

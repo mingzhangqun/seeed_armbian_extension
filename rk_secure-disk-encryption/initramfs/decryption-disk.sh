@@ -120,39 +120,22 @@ parent_disk_of() {
     printf '%s\n' "/dev/${parent_name}"
 }
 
-# First PARTLABEL=$partlabel partition that is actually a crypto_LUKS
-# container. Must iterate ALL blkid matches: with a second disk carrying a
-# plain (unencrypted) image, the first match is that disk's ext4 partition
-# and a single-match type check silently drops the real LUKS partition --
-# userdata then never gets unlocked and overlayroot falls back to mounting
-# the root lower layer read-write. With an anchor disk the search is
-# STRICT: the token-named boot disk must also supply the container, and a
-# foreign disk carrying the same PARTLABEL (e.g. an encrypted A/B image's
-# rootfs_a next to a recovery boot disk) must never win a fallback. The
-# unanchored two-pass form only serves legacy boots without a token.
+# First crypto_LUKS match for the PARTLABEL, across all blkid matches.
 get_luks_device_by_partlabel() {
     local partlabel="$1"
     local anchor_disk="${2:-${BOOT_DISK:-}}"
-    local dev pass max_pass
+    local dev
 
-    if [ -n "${anchor_disk}" ]; then
-        max_pass=1
-    else
-        max_pass=2
-    fi
-    for pass in 1 2; do
-        [ "${pass}" -le "${max_pass}" ] || break
-        for dev in $(blkid -t "PARTLABEL=$partlabel" -o device 2>/dev/null); do
-            [ "$(blkid -s TYPE -o value "$dev" 2>/dev/null || true)" = "crypto_LUKS" ] || continue
-            if [ "${pass}" -eq 1 ] && [ -n "${anchor_disk}" ]; then
-                case "${dev}" in
-                    "${anchor_disk}"p[0-9]*) ;;
-                    *) continue ;;
-                esac
-            fi
-            printf '%s\n' "${dev}"
-            return 0
-        done
+    for dev in $(blkid -t "PARTLABEL=$partlabel" -o device 2>/dev/null); do
+        [ "$(blkid -s TYPE -o value "$dev" 2>/dev/null || true)" = "crypto_LUKS" ] || continue
+        if [ -n "${anchor_disk}" ]; then
+            case "${dev}" in
+                "${anchor_disk}"p[0-9]*) ;;
+                *) continue ;;
+            esac
+        fi
+        printf '%s\n' "${dev}"
+        return 0
     done
     return 1
 }
@@ -235,8 +218,8 @@ else
     # out the raw passphrase (and the rootfs) in that state closes the
     # loader-swap window while the passphrase is still stored in plaintext.
     if ! keybox_ready; then
-        log_step "[Decryption-disk] Error: raw passphrase path requires OP-TEE (no /dev/tee*; launched by a loader without BL32?)"
-        exit 1
+        log_step "[Decryption-disk] Error: loader/OS mismatch: no OP-TEE/BL32 under this loader"
+        panic "Decryption-disk: this image requires a secure loader (BL32). Boot halted; rootfs stays locked."
     fi
     log_step "[Decryption-disk] No SSKR marker, reading raw passphrase"
     dd if="$SECURITY_DEV" of="$SYSPW_FILE" bs=1 count=64 2>/dev/null || {
