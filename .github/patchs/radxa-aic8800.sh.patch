@@ -2,7 +2,7 @@ diff --git a/extensions/radxa-aic8800.sh b/extensions/radxa-aic8800.sh
 index 946650f..b7c52a9 100644
 --- a/extensions/radxa-aic8800.sh
 +++ b/extensions/radxa-aic8800.sh
-@@ -10,6 +10,85 @@ function extension_finish_config__install_kernel_headers_for_aic8800_dkms() {
+@@ -10,6 +10,87 @@ function extension_finish_config__install_kernel_headers_for_aic8800_dkms() {
  	display_alert "Forcing INSTALL_HEADERS=yes; for use with aic8800 dkms" "${EXTENSION}" "debug"
  }
  
@@ -13,8 +13,10 @@ index 946650f..b7c52a9 100644
 +	declare assets_json="${cache_dir}/release-${latest_version}.json"
 +	declare release_encoded asset_id
 +	declare -a curl_auth=()
-+	if [[ -n "${AIC8800_GITHUB_TOKEN:-}" ]]; then
-+		curl_auth=(--header "Authorization: Bearer ${AIC8800_GITHUB_TOKEN}")
++	# AIC8800_GITHUB_TOKEN is optional; the workflow's GITHUB_TOKEN is the default.
++	declare aic8800_token="${AIC8800_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
++	if [[ -n "${aic8800_token}" ]]; then
++		curl_auth=(--header "Authorization: Bearer ${aic8800_token}")
 +	fi
 +
 +	if [[ ! -f "${assets_json}" ]]; then
