@@ -420,7 +420,11 @@ def reconcile(mirror, releases, depth=0):
     history = list(dict.fromkeys(
         tag for tag in history
         if tag and tag != stable and tag not in missing_history
-    ))[:depth]
+    ))
+    # Retention applies only to promotions: a repair run without a candidate
+    # must never use depth as a license to hard-delete retained history.
+    if promoted:
+        history = history[:depth]
     desired = {
         "stable": stable,
         "pre-release": None if promoted else candidate,
