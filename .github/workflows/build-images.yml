@@ -805,6 +805,9 @@ jobs:
           BOARD: ${{ matrix.board }}
           RELEASE: ${{ matrix.release }}
           DESKTOP_TIER: ${{ inputs.desktop_tier }}
+          # Authenticates in-container GitHub API calls (aic8800 latest-release
+          # lookup): anonymous quota is 60/hour per runner IP and gets exhausted.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Pin the extension to this workflow's repository and commit.

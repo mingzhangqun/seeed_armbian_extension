@@ -11,6 +11,11 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **CI passes `GITHUB_TOKEN` to the image build.** The aic8800
+  latest-release lookup ran unauthenticated (60 req/hour per runner IP,
+  403 on shared IPs) and killed builds after a full kernel compile; the
+  asset-API fallback now reuses the same token instead of the never-wired
+  `AIC8800_GITHUB_TOKEN`.
 - **README passphrase claim was stale.** "Validated non-empty only"
   predates the secure-storage hard gate: the build fails any passphrase
   whose length is not exactly 64; the hex charset stays documentation-only.
