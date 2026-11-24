@@ -762,9 +762,12 @@ jobs:
           path: |
             armbian-build/output/debs
             armbian-build/output/packages-hashed
-          key: debs-arm64-${{ matrix.board }}-vendor-${{ hashFiles('armbian-build/config/sources/families/seeed-rk*.conf', 'armbian-build/config/sources/families/rk35xx.conf', 'armbian-build/config/sources/vendors/seeed-studio/*.inc') }}
-          restore-keys: |
-            debs-arm64-${{ matrix.board }}-vendor-
+          # Include the pinned kernel include: the pin step rewrites it per
+          # LR_COMMIT, so a re-pin misses this key and rebuilds the kernel
+          # instead of reusing a same-version deb from an older commit.
+          key: debs-arm64-${{ matrix.board }}-vendor-${{ hashFiles('armbian-build/config/sources/families/seeed-rk*.conf', 'armbian-build/config/sources/families/rk35xx.conf', 'armbian-build/config/sources/vendors/seeed-studio/*.inc', 'armbian-build/config/sources/families/include/rockchip_vendor_common.inc') }}
+          # No restore-keys fallback: a prefix miss means the pin changed and
+          # the old cache holds a stale kernel deb that must not be reused.
 
       - name: Restore ccache
         uses: actions/cache@v4
