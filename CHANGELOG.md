@@ -487,10 +487,10 @@ Covers the work against the initial import (merge base `9980aee`,
   `https://<owner>.github.io/` with independent Pages concurrency, and the
   generated package index classifies boards by U-Boot package prefix instead
   of dropping new boards into "Other".
-- **AIC8800 release downloads.** CI pins a known-good AIC8800 release, caches
-  validated debs, retries downloads and falls back to GitHub's asset API when
-  release URLs fail; invalid cached packages are discarded. Upstream extension
-  errors during this best-effort download path do not abort the image build.
+- **AIC8800 release downloads.** CI caches validated debs, retries downloads
+  and falls back to GitHub's asset API when release URLs fail; invalid cached
+  packages are discarded. Upstream extension errors during this best-effort
+  download path do not abort the image build.
 - **OP-TEE toolchain selection with ccache.** Auto-decrypt builds bypass
   compiler-only ccache wrapper directories when locating the complete AArch64
   and Arm32 toolchain binaries needed by the TA build.

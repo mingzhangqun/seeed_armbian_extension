@@ -599,9 +599,6 @@ jobs:
       BUILD_SOURCE_REPO: ${{ needs.plan.outputs.release_repo }}
       BUILD_SOURCE_SHA: ${{ needs.plan.outputs.ab_commit }}
       BOARD: ${{ matrix.board }}
-      # Pin the AIC8800 release: skips the github_latest_release_tag API call
-      # and shields the pipeline from upstream release drift.
-      AIC8800_VERSION: 5.0+git20260123.5f7be68d-10
 
     steps:
       # Build uses the exact workflow extension revision.
@@ -712,11 +709,8 @@ jobs:
           # Forward the extension source across the Docker boundary.
           sed -i '/"--env" "CRYPTROOT_PASSPHRASE=/a\\t\t"--env" "SEEED_EXTENSION_REPO=${SEEED_EXTENSION_REPO:-}"\n\t\t"--env" "SEEED_EXTENSION_REF=${SEEED_EXTENSION_REF:-}"' \
               lib/functions/host/docker.sh
-          # Pin the AIC8800 release inside the container (upstream env, no patch needed).
-          sed -i '/"--env" "SEEED_EXTENSION_REF=/a\\t\t"--env" "AIC8800_VERSION=${AIC8800_VERSION:-}"' \
-              lib/functions/host/docker.sh
           echo "=== env forwarding in docker.sh ==="
-          grep -nE 'CRYPTROOT_PASSPHRASE|SEEED_EXTENSION_(REPO|REF)|AIC8800_VERSION' lib/functions/host/docker.sh
+          grep -nE 'CRYPTROOT_PASSPHRASE|SEEED_EXTENSION_(REPO|REF)' lib/functions/host/docker.sh
 
       - name: Patch radxa-aic8800 extension against GitHub flakiness
         # Deb-validate the CI cache and fall back to the GitHub asset API.
