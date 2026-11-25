@@ -19,6 +19,23 @@ BOOT_B_LABEL="armbi_bootb"
 ROOT_A_LABEL="armbi_roota"
 ROOT_B_LABEL="armbi_rootb"
 
+# Slot topology table: the single source for every slot-scoped name.
+# $1 = kind (boot_fs_label|root_fs_label|boot_partlabel|root_partlabel),
+# $2 = slot.
+ab_slot_name() {
+    case "$1:$2" in
+        boot_fs_label:a)  echo "${BOOT_A_LABEL}" ;;
+        boot_fs_label:b)  echo "${BOOT_B_LABEL}" ;;
+        root_fs_label:a)  echo "${ROOT_A_LABEL}" ;;
+        root_fs_label:b)  echo "${ROOT_B_LABEL}" ;;
+        boot_partlabel:a) echo "boot_a" ;;
+        boot_partlabel:b) echo "boot_b" ;;
+        root_partlabel:a) echo "rootfs_a" ;;
+        root_partlabel:b) echo "rootfs_b" ;;
+        *) return 1 ;;
+    esac
+}
+
 ab_other_slot() {
     case "$1" in
         a) echo "b" ;;
@@ -27,42 +44,16 @@ ab_other_slot() {
     esac
 }
 
-ab_get_slot_boot_label() {
-    case "$1" in
-        a) echo "${BOOT_A_LABEL}" ;;
-        b) echo "${BOOT_B_LABEL}" ;;
-        *) return 1 ;;
-    esac
-}
+ab_get_slot_boot_label() { ab_slot_name boot_fs_label "$1"; }
+ab_get_slot_root_label() { ab_slot_name root_fs_label "$1"; }
+ab_get_slot_boot_partlabel() { ab_slot_name boot_partlabel "$1"; }
+ab_get_slot_root_partlabel() { ab_slot_name root_partlabel "$1"; }
 
-ab_get_slot_root_label() {
-    case "$1" in
-        a) echo "${ROOT_A_LABEL}" ;;
-        b) echo "${ROOT_B_LABEL}" ;;
-        *) return 1 ;;
-    esac
-}
-
+# Reverse lookups: any slot-scoped name -> slot.
 ab_get_slot_by_label() {
     case "$1" in
         "${BOOT_A_LABEL}"|"${ROOT_A_LABEL}") echo "a" ;;
         "${BOOT_B_LABEL}"|"${ROOT_B_LABEL}") echo "b" ;;
-        *) return 1 ;;
-    esac
-}
-
-ab_get_slot_boot_partlabel() {
-    case "$1" in
-        a) echo "boot_a" ;;
-        b) echo "boot_b" ;;
-        *) return 1 ;;
-    esac
-}
-
-ab_get_slot_root_partlabel() {
-    case "$1" in
-        a) echo "rootfs_a" ;;
-        b) echo "rootfs_b" ;;
         *) return 1 ;;
     esac
 }
@@ -75,13 +66,14 @@ ab_get_slot_by_root_partlabel() {
     esac
 }
 
+# Filesystem label -> its GPT partlabel (empty when unknown).
 ab_get_slot_partlabel_by_fslabel() {
+    local slot
+
+    slot="$(ab_get_slot_by_label "$1")" || { echo ""; return 0; }
     case "$1" in
-        "${BOOT_A_LABEL}") ab_get_slot_boot_partlabel a ;;
-        "${BOOT_B_LABEL}") ab_get_slot_boot_partlabel b ;;
-        "${ROOT_A_LABEL}") ab_get_slot_root_partlabel a ;;
-        "${ROOT_B_LABEL}") ab_get_slot_root_partlabel b ;;
-        *) echo "" ;;
+        "${BOOT_A_LABEL}"|"${BOOT_B_LABEL}") ab_slot_name boot_partlabel "${slot}" ;;
+        *) ab_slot_name root_partlabel "${slot}" ;;
     esac
 }
 

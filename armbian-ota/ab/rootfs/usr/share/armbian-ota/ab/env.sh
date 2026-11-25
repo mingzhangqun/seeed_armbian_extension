@@ -177,6 +177,16 @@ ab_env_slot_boot_ready() {
         "${bootcmd}" == *"run distro_bootcmd"* ]]
 }
 
+# Retry ceiling from the initial env; every env state transition resets
+# slot_retry_left to it.
+ab_env_retry_max() {
+    local retry_max
+
+    retry_max="$(ab_env_initial_get slot_retry_max)"
+    [ -n "${retry_max}" ] || return 1
+    printf '%s\n' "${retry_max}"
+}
+
 ab_env_prepare() {
     local slot="$1"
     local retry_max
@@ -185,8 +195,7 @@ ab_env_prepare() {
         a|b) ;;
         *) return 1 ;;
     esac
-    retry_max="$(ab_env_initial_get slot_retry_max)"
-    [ -n "${retry_max}" ] || return 1
+    retry_max="$(ab_env_retry_max)" || return 1
     ab_env_set "ota_in_progress=1" "boot_slot=${slot}" \
         "slot_retry_max=${retry_max}" "slot_retry_left=${retry_max}"
 }
@@ -200,8 +209,7 @@ ab_env_mark_success() {
         a|b) ;;
         *) return 1 ;;
     esac
-    retry_max="$(ab_env_initial_get slot_retry_max)"
-    [ -n "${retry_max}" ] || return 1
+    retry_max="$(ab_env_retry_max)" || return 1
     # boot_slot must be set so U-Boot's ab_select_boot_part / ab_select_fit_slot
     # pick the slot on next reset; switch-slot uses ab_env_prepare instead so
     # its target remains an unconfirmed boot trial until health checks pass.
@@ -218,8 +226,7 @@ ab_env_rollback() {
         a|b) ;;
         *) return 1 ;;
     esac
-    retry_max="$(ab_env_initial_get slot_retry_max)"
-    [ -n "${retry_max}" ] || return 1
+    retry_max="$(ab_env_retry_max)" || return 1
     ab_env_set "boot_slot=${slot}" "ota_in_progress=0" \
         "slot_retry_left=${retry_max}"
 }
