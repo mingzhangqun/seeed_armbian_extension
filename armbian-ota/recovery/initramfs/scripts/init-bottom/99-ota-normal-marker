@@ -8,6 +8,9 @@
 # marker read is lower-layer-visible (upper shadowing would be the correct,
 # newer identity anyway). Missing marker (fresh pre-v0.8 root) is not an
 # error here; the health service owns that judgement.
+#
+# Also rebuild a dual-bad env (261124 finding): the Rescue gate needs a
+# healthy env to route, so probe here every normal boot. Fail-open.
 
 PREREQ=""
 
@@ -30,6 +33,35 @@ MARKER_DST_DIR="/run/armbian-ota"
 case " $(cat /proc/cmdline 2>/dev/null) " in
     *" armbian.ota_role=recovery "*) exit 0 ;;
 esac
+
+ota_env_boot_rebuild() {
+    . /usr/share/armbian-ota/fwenv.sh 2>/dev/null || return 0
+    . /usr/share/armbian-ota/find-userdata.sh 2>/dev/null || return 0
+
+    # Anchor on the overlay lower root (mapper or raw partition alike).
+    lower_src="$(awk '$2 == "/media/root-ro" { print $1; exit }' /proc/mounts 2>/dev/null | sed 's~\[.*\]~~')"
+    [ -n "${lower_src}" ] || return 0
+
+    raw_part="$(find_user_data__raw_partition_of "${lower_src}" 2>/dev/null)" || return 0
+    [ -n "${raw_part}" ] || return 0
+
+    disk="$(find_user_data__parent_disk "${raw_part}" 2>/dev/null)" || return 0
+    [ -n "${disk}" ] && [ -b "${disk}" ] || return 0
+
+    fw_env_write_config "${disk}" 2>/dev/null || return 0
+
+    fw_env_crc_bad || return 0
+
+    echo "armbian-ota: env unreadable; rebuilding routing set on ${disk}" >&2
+    if fw_env_write_routing_set "0" "normal" 2>/dev/null; then
+        echo "armbian-ota: env rebuilt (full routing set, ota_in_progress=0)" >&2
+    else
+        echo "armbian-ota: WARNING env rebuild failed; continuing boot" >&2
+    fi
+    return 0
+}
+
+ota_env_boot_rebuild
 
 [ -f "${MARKER_SRC}" ] || exit 0
 

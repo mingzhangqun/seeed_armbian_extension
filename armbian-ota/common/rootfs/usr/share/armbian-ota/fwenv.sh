@@ -248,3 +248,16 @@ fw_env_write_routing_set() {
         "ota_rescue_boot=${OTA_ENV_RESCUE_BOOT}" \
         "bootcmd=${OTA_ENV_BOOTCMD}"
 }
+
+# Drift check for a CRC-valid routing set (stale prefill, foreign blob).
+# Needs OTA_RESCUE_ROOT_DEFAULT set; A/B analog: ab_env_slot_boot_ready.
+fw_env_routing_set_ok() {
+    [ "$(fw_env_get bootcmd)" = "${OTA_ENV_BOOTCMD}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot)" = "${OTA_ENV_NORMAL_BOOT}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot_fs)" = "${OTA_ENV_NORMAL_BOOT_FS}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot_fit)" = "${OTA_ENV_NORMAL_BOOT_FIT}" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot)" = "${OTA_ENV_RESCUE_BOOT}" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot_fs)" = "$(fw_env_splice_root "${OTA_RESCUE_ROOT_DEFAULT}")" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot_fit)" = "${OTA_ENV_RESCUE_BOOT_FIT}" ] || return 1
+    return 0
+}

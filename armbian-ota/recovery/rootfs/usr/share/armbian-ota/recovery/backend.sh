@@ -448,6 +448,11 @@ recovery_arm_env() {
         log_warn "U-Boot env CRC bad at arm time; rebuilding full routing set before arming"
         fw_env_write_routing_set "1" "recovery" ||
             error_exit "Failed to rebuild routing env (bad CRC); transaction NOT started"
+    elif ! fw_env_routing_set_ok; then
+        # CRC-valid but drifted: rewrite, never arm an unknown bootcmd.
+        log_warn "U-Boot env routing set drifts from expected layout; rewriting before arming"
+        fw_env_write_routing_set "1" "recovery" ||
+            error_exit "Failed to rewrite drifted routing env; transaction NOT started"
     else
         fw_env_set_multi "ota_in_progress=1" "ota_boot_next=recovery" ||
             error_exit "Failed to arm U-Boot env (ota_in_progress=1, ota_boot_next=recovery); transaction NOT started"
@@ -567,6 +572,9 @@ recovery_commit_success() {
         error_exit "Cannot resolve boot disk for fw_env; env NOT cleared"
     fw_env_set "ota_in_progress" "0" ||
         error_exit "Failed to clear ota_in_progress; next boot routes to Rescue (harmless, will self-reconcile)"
+    # Same one-shot flip as the rescue path: leave ota_boot_next clean.
+    fw_env_set "ota_boot_next" "normal" ||
+        log_warn "Failed to reset ota_boot_next; inert while ota_in_progress=0"
 
     rm -rf "${OTA_STAGING_DIR}"/* 2>/dev/null || true
     log_info "OTA transaction committed: INSTALLED_ID=${candidate_id} RESTORE_MODE=${restore_mode}"
