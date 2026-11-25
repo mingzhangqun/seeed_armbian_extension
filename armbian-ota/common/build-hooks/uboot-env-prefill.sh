@@ -94,6 +94,9 @@ function ota_uboot_env_prefill_compose() {
     ota_raw_boot_enabled && OTA_BOOT_MODE="raw-fit"
     OTA_RESCUE_ROOT_DEFAULT="LABEL=armbi_root"
     ota_encrypted_rootfs_enabled && OTA_RESCUE_ROOT_DEFAULT="/dev/mapper/armbian-root"
+    # fwenv.sh sources find-userdata.sh; point it at the extension tree copy
+    # (the device path does not exist in the build container).
+    export OTA_FIND_USERDATA_PATH="${OTA_SUPPORT_DIR}/common/rootfs/usr/share/armbian-ota/find-userdata.sh"
     # shellcheck source=/dev/null
     source "${OTA_SUPPORT_DIR}/common/rootfs/usr/share/armbian-ota/fwenv.sh"
 

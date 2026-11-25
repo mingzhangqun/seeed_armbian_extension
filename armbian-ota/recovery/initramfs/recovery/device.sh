@@ -50,20 +50,12 @@ first_match_on_disk() {
 # container restricted to the boot disk. Unanchored first-match remains the
 # last resort for images without the cmdline tokens.
 get_luks_uuid_for_root() {
-    local root_luks_dev disk _dm _slave
+    local root_luks_dev disk
 
     root_luks_dev=""
     if [ -e /dev/mapper/armbian-root ]; then
-        for _dm in /sys/class/block/dm-*; do
-            [ -e "${_dm}" ] || continue
-            [ "$(cat "${_dm}/dm/name" 2>/dev/null)" = "armbian-root" ] || continue
-            for _slave in "${_dm}/slaves/"*; do
-                [ -e "${_slave}" ] || continue
-                root_luks_dev="/dev/$(sed -n 's/^DEVNAME=//p' "${_slave}/uevent" 2>/dev/null | head -n1)"
-                break
-            done
-            break
-        done
+        # Shared resolver maps the mapper to its backing partition.
+        root_luks_dev="$(find_user_data__raw_partition_of /dev/mapper/armbian-root 2>/dev/null || true)"
     fi
 
     if [ -z "${root_luks_dev}" ] || [ "$(blkid -s TYPE -o value "${root_luks_dev}" 2>/dev/null || true)" != "crypto_LUKS" ]; then
