@@ -90,6 +90,11 @@ then, still on the **old** system:
 After the reboot the new slot runs through the health check; on success the
 slot is marked good. `armbian-ota status` shows slot + OTA state at any time.
 
+> **Loader constraint:** OTA never reflashes the SPI loader. It assumes the
+> device loader comes from the same image generation (redundant-env layout,
+> FIT trust); a device flashed with an older or different-key loader must
+> reflash via maskrom first, which also upgrades the loader.
+
 ## 4. How rollback works (two layers)
 
 **Layer 1 — systemd** (needs a booting userspace):
