@@ -1,6 +1,7 @@
 #!/bin/sh
 
-# initramfs-tools hook: add tools (rm, tar, gzip) into initramfs
+# initramfs-tools hook: stage OP-TEE client (tee-supplicant, libteec) and
+# the keybox TA into the initramfs.
 
 set -e
 
@@ -22,9 +23,12 @@ esac
 
 echo "[install-optee] adding optee client and ta into initramfs..." >&2
 
-copy_exec /usr/bin/keybox_app /usr/bin
+copy_exec /usr/bin/keybox_app
+copy_exec /lib/optee_armtz/8c6cf810-685d-4654-ae71-8031beee467e.ta
+copy_exec /usr/bin/tee-supplicant
 
-copy_exec /lib/optee_armtz/8c6cf810-685d-4654-ae71-8031beee467e.ta /lib/optee_armtz/
-
-copy_exec /usr/bin/tee-supplicant /usr/bin/
-copy_exec /usr/lib/libteec.so* /usr/lib/
+# copy_exec takes a single source on modern initramfs-tools; a glob would
+# expand into (src, target, ...) argument slots.
+for lib in /usr/lib/libteec.so /usr/lib/libteec.so.1 /usr/lib/libteec.so.1.0 /usr/lib/libteec.so.1.0.0; do
+    copy_exec "${lib}"
+done
