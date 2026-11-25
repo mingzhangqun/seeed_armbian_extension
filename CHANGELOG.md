@@ -7,10 +7,36 @@ date + commit anchors, newest first.
 ## [Unreleased]
 
 m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
-/ metadata-gates / plain-gate / ci-infra) and the redundancy-cleanup series.
+/ metadata-gates / plain-gate / ci-infra), the redundancy-cleanup series, and
+the dev line: cross-flavor OTA consolidation, rk-secure hardening, CI fixes.
 
 ### Fixed
 
+- **Dual-bad env self-heals on both flavors.** A zeroed env used to boot the
+  loader default env forever (rescue rebuild was gated behind routing only a
+  healthy env can set). Recovery probes once per normal boot and rebuilds
+  via the find-userdata resolver (no `armbian.bootdev` token needed, works
+  with trixie real `/dev/mapper` nodes); A/B rebuilds at init-uboot. Settle
+  paths reset `ota_boot_next` so the handoff one-shot no longer reads as a
+  pending OTA.
+- **Pre-OTA `armbianEnv` survives the power-cut window.** The capture is
+  persisted to the transaction store next to the RAM copy; a cut during the
+  boot extract no longer folds baseline onto baseline and silently reverts
+  user overlays to the factory baseline.
+- **Raw-FIT backup read verified against the partition.** `dd` read-back
+  digest plus a `totalsize > 0` guard; a short or zero read could previously
+  publish an empty-but-structurally-valid `boot.itb` backup.
+- **Rescue boot-partition mount failure fails the campaign** into the retry
+  ladder instead of warn-and-skip committing new-rootfs + old-boot.
+- **Dangling unversioned initrd symlinks dropped.** `slim-initrd-img` now
+  removes `initrd.img`/`initrd.img.old` once they dangle (the framework's
+  dangling-link cleanup is FAT-boot only).
+- **`install-optee` `copy_exec` calls corrected.** Bare dir targets copy the
+  binary as a file named `bin` when the target dir is missing; the four
+  `libteec` sonames are staged explicitly instead of via a mis-slotted glob.
+- **aic8800 latest-release lookup authenticated with `GITHUB_TOKEN`.** The
+  unauthenticated path hit the 60 req/h per-IP limit on shared runner IPs
+  and killed builds after a full kernel compile.
 - **README passphrase claim was stale.** "Validated non-empty only"
   predates the secure-storage hard gate: the build fails any passphrase
   whose length is not exactly 64; the hex charset stays documentation-only.
@@ -128,7 +154,15 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Security
 
+- **SSKR keybox collision guard.** A 64-char passphrase starting `SSKR` is
+  rejected at secure-storage write time: it lands at partition offset 0,
+  where decryption probes for the keybox marker, stranding first boot.
+- **A/B keybox migration wipes `/tmp/syspw`** after the round-trip (the raw
+  passphrase used to stay on disk); keybox/TEE logs are tmpfs temp files on
+  both flavors instead of persisting under userdata.
 - **Plan outputs are charset-validated.** A newline in a dispatch repo input
+  could inject or override other `GITHUB_OUTPUT` keys (matrix, tag) and
+  steer the build matrix. A newline in a dispatch repo input
   could inject or override other `GITHUB_OUTPUT` keys (matrix, tag) and
   steer the build matrix.
 
@@ -150,6 +184,30 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Changed
 
+- **Cross-flavor OTA runtime single-sourced.** Shared POSIX helpers (hook
+  contract, blkid probe, env get/set/merge, FIT readback) live in
+  `posix.sh`; stage/verify pipeline, payload id, install helpers,
+  security-partition lookup, OP-TEE keybox and health checks in `common/`.
+  Full-tree audit: zero dead functions, zero dead files.
+- **Payload ids are content-only (v2 tag).** `R=`/`B=` digests plus domain
+  tag and `HAS_ROOTFS`; BOARD/RELEASE/KERNEL/VERSION leave the hash input —
+  provenance rides in `payload.env`, derived by the one `payload-id.sh`.
+- **Recovery fw_env tools install via apt** like A/B; the pinned
+  Debian-bookworm deb download is gone and the version floats with the
+  distro repo (trixie/resolute/bookworm all carry `libubootenv-tool`).
+- **boot-atomic-swap package hook dropped.** Obsolete under the v0.8 rescue
+  topology (torn applies reboot into Rescue regardless) and never enabled;
+  the `OTA_HOOK_API=1` mechanism stays for package-provided hooks.
+- **`init-uboot` sources the common runtime** — logging also lands in
+  `/var/log/armbian-ota/ota.log`, state paths converge on `state.sh`
+  constants.
+- **Dead `pre_mount_chroot_script` hook dropped from rk-secure** — the
+  framework has no such hook point; the flow it tried to enable already
+  works. Shared wrap/path/key-node/sign-tool helpers extracted instead.
+- **Images page slot UX rework.** Loader box collapses below A/B (teal
+  PLAIN / deep red SECURE band), slots accordion one-open, history tags
+  fold into one History bar; the pre-release pill now renders when no
+  stable release exists.
 - **README leads with the official Armbian board pages.** The not-yet-live
   images page and its releases are no longer advertised; the Documentation
   index lists one entry per line.
