@@ -697,6 +697,20 @@ verify_payload_archives() {
 
 # ota_is_fit_image lives in posix.sh (shared with the initramfs).
 
+# ===== basic boot sanity (health services) ====================================
+
+# Shared pre-checks of both health services: prints one failure item per
+# line, empty output = pass. Callers own the failure policy (A/B exits,
+# recovery accumulates and reboots).
+ota_basic_boot_failures() {
+    local fs_mount
+
+    [ -r /proc/version ] || printf '%s\n' "/proc/version not readable"
+    for fs_mount in /proc /sys /dev; do
+        mountpoint -q "${fs_mount}" || printf '%s\n' "${fs_mount} not mounted"
+    done
+}
+
 # ===== raw-FIT layout probes (recovery backend + health check) ==============
 
 # First PARTLABEL=boot device with no filesystem (raw signed FIT at

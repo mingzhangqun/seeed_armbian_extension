@@ -103,11 +103,9 @@ ota_health_boot_is_raw_fit() {
 }
 
 # --- the six checks -----------------------------------------------------------
-[ -r /proc/version ] || health_fail "/proc/version unreadable"
-
-for fs_mount in /proc /sys /dev; do
-    mountpoint -q "${fs_mount}" || health_fail "${fs_mount} not mounted"
-done
+while read -r fail_item; do
+    health_fail "${fail_item}"
+done < <(ota_basic_boot_failures)
 
 root_fstype="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
 [ "${root_fstype}" = "overlay" ] || health_fail "root fstype is '${root_fstype}', expected overlay"
