@@ -1,5 +1,7 @@
 # A/B slot topology and partition discovery helpers.
-# fwenv.sh provides the shared POSIX boot-disk/parent-disk primitives.
+# fwenv.sh provides the shared POSIX boot-disk/parent-disk primitives;
+# common.sh (always sourced before this library) provides
+# ota_root_mount_source.
 
 [ -r "${OTA_RUNTIME_DIR}/fwenv.sh" ] || {
     echo "ERROR: fw_env helper not found: ${OTA_RUNTIME_DIR}/fwenv.sh" >&2
@@ -164,9 +166,8 @@ ab_get_uuid_by_label() {
 ab_get_current_root_slot() {
     local current_slot root_dev root_part root_partlabel root_uuid root_a_uuid root_b_uuid
 
-    root_dev="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-    [ -n "${root_dev}" ] || root_dev="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-    [ -n "${root_dev}" ] || root_dev="$(df / | awk 'NR==2 {print $1}')"
+    # ota_root_mount_source (common.sh) carries the same df / last resort.
+    root_dev="$(ota_root_mount_source || true)"
     [ -n "${root_dev}" ] || return 1
 
     root_part="$(ab_resolve_physical_part_dev "${root_dev}" || true)"

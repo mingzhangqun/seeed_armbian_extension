@@ -123,9 +123,11 @@ ota_check_staging_free_space() {
     log_info "Space gate: staging ${directory} avail=${avail} need=${need} (staged=${payload_bytes}, backup=${extra_bytes}, margin=${margin})"
 }
 
+# df is the last resort (findmnt unavailable); callers validate the result.
 ota_root_mount_source() {
     findmnt -n -o SOURCE /media/root-ro 2>/dev/null ||
-        findmnt -n -o SOURCE / 2>/dev/null
+        findmnt -n -o SOURCE / 2>/dev/null ||
+        df / | awk 'NR==2 {print $1}'
 }
 
 # Single key from /etc/armbian-image-release, empty when absent.
@@ -742,7 +744,6 @@ ota_get_security_part() {
     local dev root_src part disk
 
     root_src="$(ota_root_mount_source || true)"
-    [ -n "${root_src}" ] || root_src="$(df / | awk 'NR==2 {print $1}')"
     part="${root_src}"
     case "${root_src}" in
         /dev/mapper/*|/dev/dm-*)
