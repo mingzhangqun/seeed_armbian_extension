@@ -111,32 +111,18 @@ extract_tar() {
     return 1
 }
 
-# ===== package-provided OTA hook (OTA_HOOK_API=1) =====
+# ===== package-provided OTA hook (OTA_HOOK_API=1, posix.sh) =====
 # Fixed call points around the built-in phase-2 flow (docs/10-ota-package-formats.md):
 # hook_pre_apply / hook_apply / hook_post_apply are invoked by 99-ota-apply.
 # Hook scripts are sourced in every phase and must be definition-only.
-OTA_HOOK_API="1"
-
-# Resolve the staged hook filename: declared OTA_HOOK (legacy OTA_APPLY_HOOK
-# accepted) wins, then conventional ota-hook.sh, then the legacy name.
-ota_hook_name_staged() {
-    hook_name=""
-
-    if [ -f "${OTA_DIR}/package.env" ]; then
-        hook_name="$(sed -n 's/^OTA_HOOK=//p' "${OTA_DIR}/package.env" | head -n1)"
-        [ -z "${hook_name}" ] && hook_name="$(sed -n 's/^OTA_APPLY_HOOK=//p' "${OTA_DIR}/package.env" | head -n1)"
-    fi
-    [ -n "${hook_name}" ] && [ -f "${OTA_DIR}/${hook_name}" ] || hook_name="ota-hook.sh"
-    [ -f "${OTA_DIR}/${hook_name}" ] || hook_name="ota-apply-hook.sh"
-    [ -f "${OTA_DIR}/${hook_name}" ] || return 1
-    printf '%s\n' "${hook_name}"
-}
+# ota_resolve_hook_name / ota_call_hook / OTA_HOOK_* constants come from
+# posix.sh (shared with the rootfs runtime).
 
 # Source the staged hook once; sets OTA_HOOK_PATH. rc 1 = package has no hook.
 ota_source_staged_hook() {
     OTA_HOOK_PATH=""
 
-    hook_name="$(ota_hook_name_staged)" || return 1
+    hook_name="$(ota_resolve_hook_name "${OTA_DIR}")" || return 1
     OTA_HOOK_PATH="${OTA_DIR}/${hook_name}"
     log "OTA hook loaded: ${hook_name} (API ${OTA_HOOK_API})"
     # shellcheck disable=SC1090
@@ -145,16 +131,6 @@ ota_source_staged_hook() {
         return 1
     }
     return 0
-}
-
-# Call $1 if the hook defined it; no-op otherwise, rc passthrough.
-ota_call_hook() {
-    fn="$1"
-    shift
-
-    type "${fn}" >/dev/null 2>&1 || return 0
-    log "OTA hook point: ${fn}"
-    "${fn}" "$@"
 }
 
 # Capture the pre-OTA armbianEnv before a hook can reformat anything, so
@@ -252,7 +228,7 @@ write_raw_boot_itb() {
         return 1
     }
 
-    if ! is_fit_image "${image}"; then
+    if ! ota_is_fit_image "${image}"; then
         log "ERROR: refusing to write invalid FIT image: ${image}"
         return 1
     fi
@@ -288,82 +264,6 @@ write_raw_boot_itb() {
     else
         log "WARN: sha256sum unavailable in initramfs; skipping post-write verification"
     fi
-}
-
-# ===== validate recovery state on mounted rootfs =====
-# Returns 1 (caller unmounts+skips) when state/payload is not applicable.
-ota_validate_recovery_state() {
-    if [ ! -f "${STATE_FILE}" ]; then
-        log "no OTA state file at ${STATE_FILE}, unmount and skip"
-        return 1
-    fi
-
-    if ! grep -q '^OTA_MODE=recovery$' "${STATE_FILE}" 2>/dev/null ||
-       ! grep -q '^STATUS=prepared$' "${STATE_FILE}" 2>/dev/null; then
-        log "OTA state is not recovery/prepared, unmount and skip"
-        return 1
-    fi
-
-    # check OTA payload: rootfs.tar.gz is required, boot.tar.gz is optional
-    if [ ! -d "${OTA_DIR}" ] || [ ! -f "${ROOTFS_TAR}" ]; then
-        log "no rootfs OTA payload at ${OTA_DIR}, unmount and skip"
-        return 1
-    fi
-
-    # Payload/system encryption match (phase-2 backstop; phase 1 already
-    # rejects the mismatched pairs before anything is touched). The .enc blob
-    # stays staged after the phase-1 decrypt, so its presence still marks an
-    # encrypted package here.
-    if [ -f "${OTA_DIR}/rootfs.tar.xz.enc" ] || [ -f "${OTA_DIR}/rootfs.tar.gz.enc" ]; then
-        pkg_encrypted=1
-    else
-        pkg_encrypted=0
-    fi
-    if [ "${pkg_encrypted}" != "${AUTO_DECRYPT_MODE:-0}" ]; then
-        log "ERROR: payload/system encryption mismatch (encrypted payload=${pkg_encrypted}, auto-decrypt mode=${AUTO_DECRYPT_MODE:-0}), abort"
-        return 1
-    fi
-
-    # If a payload manifest shipped (encrypted payload was decrypted in phase 1),
-    # re-check the plaintext rootfs tar sha256 against it before applying, so a
-    # tamper of the transaction store between phase 1 and phase 2 is caught.
-    if [ -f "${OTA_DIR}/payload.manifest" ]; then
-        if ! command -v sha256sum >/dev/null 2>&1; then
-            log "ERROR: sha256sum unavailable in initramfs; cannot re-check plaintext rootfs sha; abort"
-            return 1
-        fi
-        expected_root_sha="$(sed -n 's/^OTA_PAYLOAD_ROOTFS_SHA256=//p' "${OTA_DIR}/payload.manifest" | head -n1)"
-        if [ -n "${expected_root_sha}" ]; then
-            actual_root_sha="$(sha256sum "${ROOTFS_TAR}" | awk '{print $1}')"
-            if [ "${actual_root_sha}" != "${expected_root_sha}" ]; then
-                log "ERROR: plaintext rootfs sha256 (${actual_root_sha}) != manifest (${expected_root_sha}); possible tamper, abort"
-                return 1
-            fi
-            log "recovery: plaintext rootfs sha256 matches payload manifest"
-        fi
-    fi
-
-    HAS_BOOT_TAR=0
-    [ -f "${BOOT_TAR}" ] && HAS_BOOT_TAR=1
-    HAS_BOOT_ITB=0
-    [ -f "${BOOT_ITB}" ] && HAS_BOOT_ITB=1
-
-    # Package-requested deferral of the built-in boot refresh
-    # (OTA_BOOT_REFRESH=0 in package.env): ota_apply_boot is skipped so the
-    # package hook owns a per-file atomic swap instead
-    # (recovery/hooks/boot-atomic-swap.sh). Absent key keeps legacy behavior.
-    OTA_BOOT_HOOK_MODE=0
-    if [ "${HAS_BOOT_TAR}" -eq 1 ]; then
-        bsw_flag="$(sed -n 's/^OTA_BOOT_REFRESH=//p' "${OTA_DIR}/package.env" 2>/dev/null | head -n1)"
-        if [ "${bsw_flag}" = "0" ]; then
-            OTA_BOOT_HOOK_MODE=1
-            HAS_BOOT_TAR=0
-            log "boot refresh deferred to OTA hook (package.env OTA_BOOT_REFRESH=0)"
-        fi
-    fi
-
-    log "found rootfs OTA payload, HAS_BOOT_PART=${HAS_BOOT_PART}, HAS_BOOT_TAR=${HAS_BOOT_TAR}, HAS_BOOT_ITB=${HAS_BOOT_ITB}, hook_mode=${OTA_BOOT_HOOK_MODE}"
-    return 0
 }
 
 # ===== rebuild rootfs via mkfs (fast path over rm -rf clean) =====
@@ -513,7 +413,7 @@ ota_apply_boot() {
     # Hook mode: hook_pre_apply already performed the atomic boot swap and
     # left BOOT_MNT/DO_BOOT_OTA in place for ota_patch_config. Skip the
     # built-in extract entirely -- recomputing DO_BOOT_OTA here would clobber
-    # the handoff (OTA_BOOT_HOOK_MODE set in ota_validate_recovery_state).
+    # the handoff (OTA_BOOT_HOOK_MODE set in run_campaign).
     if [ "${OTA_BOOT_HOOK_MODE:-0}" -eq 1 ]; then
         if [ "${DO_BOOT_OTA:-0}" -eq 1 ] && [ -n "${BOOT_MNT:-}" ]; then
             log "boot OTA handled by hook (BOOT_MNT=${BOOT_MNT} mounted for config patch)"

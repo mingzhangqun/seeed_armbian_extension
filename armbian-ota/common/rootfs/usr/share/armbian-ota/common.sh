@@ -315,10 +315,6 @@ OTA_RUNTIME_VERSION="1.4"
 # images without zstd then refuse zst packages at negotiation.
 OTA_RUNTIME_FORMATS="gz xz"
 command -v zstd >/dev/null 2>&1 && OTA_RUNTIME_FORMATS="${OTA_RUNTIME_FORMATS} zst"
-OTA_HOOK_API="1"
-OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
-# Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.
-OTA_HOOK_LEGACY_NAME="ota-apply-hook.sh"
 
 # Magic-byte sniff: the payload's first bytes must match its suffix so a
 # renamed archive cannot bypass format negotiation.
@@ -373,34 +369,7 @@ ota_check_package_requirements() {
     fi
 }
 
-# Resolve the hook filename for a staged work dir: declared name wins (OTA_HOOK,
-# legacy OTA_APPLY_HOOK accepted), then conventional ota-hook.sh, then the
-# legacy ota-apply-hook.sh. Empty when the package carries no hook.
-ota_resolve_hook_name() {
-    local work_dir="$1" declared
-
-    # Read the staged package.env directly: this must not depend on the
-    # metadata cache being loaded (mirrors the initramfs implementation).
-    if [ -f "${work_dir}/package.env" ]; then
-        declared="$(sed -n 's/^OTA_HOOK=//p' "${work_dir}/package.env" | head -n1)"
-        if [ -z "${declared}" ]; then
-            declared="$(sed -n 's/^OTA_APPLY_HOOK=//p' "${work_dir}/package.env" | head -n1)"
-        fi
-    fi
-    if [ -n "${declared}" ] && [ -f "${work_dir}/${declared}" ]; then
-        printf '%s\n' "${declared}"
-        return 0
-    fi
-    if [ -f "${work_dir}/${OTA_HOOK_DEFAULT_NAME}" ]; then
-        printf '%s\n' "${OTA_HOOK_DEFAULT_NAME}"
-        return 0
-    fi
-    if [ -f "${work_dir}/${OTA_HOOK_LEGACY_NAME}" ]; then
-        printf '%s\n' "${OTA_HOOK_LEGACY_NAME}"
-        return 0
-    fi
-    return 1
-}
+# ota_resolve_hook_name lives in posix.sh (shared with the initramfs).
 
 # Source the staged hook (definition-only convention: hooks must contain
 # nothing but function definitions -- the script is sourced at every phase).
@@ -419,18 +388,7 @@ ota_source_hook() {
     return 0
 }
 
-# Call the named hook function if the hook defined it; a no-op otherwise.
-# The function's return code is passed through.
-ota_call_hook() {
-    local fn="$1"
-    shift
-
-    if ! type "${fn}" >/dev/null 2>&1; then
-        return 0
-    fi
-    log_info "OTA hook point: ${fn}"
-    "${fn}" "$@"
-}
+# ota_call_hook lives in posix.sh (shared with the initramfs).
 
 # Phase-1 hook point (live system): hook_after_unpack runs once extraction,
 # checksum and negotiation all passed, before state=prepared is written.
@@ -457,6 +415,7 @@ OTA_SYSPW_FILE="/tmp/syspw"
 
 COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${COMMON_LIB_DIR}/state.sh"
+. "${COMMON_LIB_DIR}/posix.sh"
 unset COMMON_LIB_DIR
 
 ota_source_library() {
@@ -498,6 +457,11 @@ log_error() {
 error_exit() {
     log_error "$@"
     exit 1
+}
+
+# posix.sh logging adapter (shared with the busybox initramfs).
+ota_lib_log() {
+    log_info "$@"
 }
 
 ensure_root() {
@@ -719,13 +683,7 @@ verify_payload_archives() {
     fi
 }
 
-ota_is_fit_image() {
-    local image="$1" magic
-
-    [ -f "${image}" ] || return 1
-    magic="$(dd if="${image}" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [ "${magic}" = "d00dfeed" ]
-}
+# ota_is_fit_image lives in posix.sh (shared with the initramfs).
 
 # ===== raw-FIT layout probes (recovery backend + health check) ==============
 

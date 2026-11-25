@@ -4,9 +4,9 @@
 # Stage into a package with the build variables
 #   OTA_HOOK_SCRIPT=<extension>/armbian-ota/recovery/hooks/boot-atomic-swap.sh
 #   OTA_BOOT_REFRESH=0
-# The flag lands in package.env and makes ota_validate_recovery_state defer
-# the built-in boot extract (OTA_BOOT_HOOK_MODE=1), so this hook owns the
-# boot partition instead of the legacy tar-over-live-files path.
+# The flag lands in package.env and makes run_campaign defer the built-in
+# boot extract (OTA_BOOT_HOOK_MODE=1), so this hook owns the boot
+# partition instead of the legacy tar-over-live-files path.
 #
 # hook_pre_apply swaps only the files this board actually boots -- kernel
 # three-piece set, board dtb (+ EEPROM-detectable family) and referenced

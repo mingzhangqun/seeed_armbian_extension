@@ -120,12 +120,7 @@ file_size_bytes() {
     wc -c < "${file}" 2>/dev/null | awk '{print $1}'
 }
 
-is_fit_image() {
-    file="$1"
-
-    magic="$(dd if="${file}" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [ "${magic}" = "d00dfeed" ]
-}
+# ota_is_fit_image lives in posix.sh (shared with the rootfs runtime).
 
 # ===== detect firmware mode and root/boot devices =====
 # Sets globals: ROOT_DEV, ROOT_UUID, BOOT_DEV, BOOT_UUID, HAS_BOOT_PART,

@@ -104,6 +104,7 @@ function ota_install_recovery_initramfs() {
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/state.sh"
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/find-userdata.sh"
             sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/fwenv.sh"
+            sha256sum "${OTA_ROOTFS_RUNTIME_DIR}/posix.sh"
             sha256sum "etc/initramfs-tools/hooks/99-copy-tools"
             sha256sum "etc/u-boot-initial-env"
             for entry in "${initramfs_file_list[@]}"; do

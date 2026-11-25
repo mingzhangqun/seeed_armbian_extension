@@ -446,20 +446,8 @@ recovery_start_ota() {
 
 # ===== terminal commit (health pass or mark-success) ==========================
 
-recovery_verify_payload_full() {
-    local dir="$1"
-
-    [ -d "${dir}" ] || return 1
-    [ -f "${dir}/payload.env" ] || return 1
-    (cd "${dir}" && sha256sum -c rootfs.sha256 >/dev/null 2>&1) || {
-        log_warn "Backup verification: rootfs.sha256 failed for ${dir}"
-        return 1
-    }
-    (cd "${dir}" && sha256sum -c boot.sha256 >/dev/null 2>&1) || {
-        log_warn "Backup verification: boot.sha256 failed for ${dir}"
-        return 1
-    }
-}
+# ota_payload_verify_full lives in posix.sh (shared with the initramfs
+# exhaustion decision point).
 
 # Roll the backup pointer to the freshly confirmed payload (15.5): verify the
 # complete candidate first, then state, delete the old directory second. A
@@ -476,7 +464,7 @@ recovery_roll_backup() {
         log_error "Confirmed payload ${candidate_id} is not staged; keeping backup ${old_backup:-none}"
         return 1
     }
-    recovery_verify_payload_full "${new_dir}" || {
+    ota_payload_verify_full "${new_dir}" || {
         log_error "Confirmed payload ${candidate_id} failed full verification; keeping backup ${old_backup:-none}"
         return 1
     }

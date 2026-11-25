@@ -26,6 +26,7 @@ esac
 . /usr/share/armbian-ota/state.sh
 . /usr/share/armbian-ota/find-userdata.sh
 . /usr/share/armbian-ota/fwenv.sh
+. /usr/share/armbian-ota/posix.sh
 . /usr/share/armbian-ota/recovery/log.sh
 . /usr/share/armbian-ota/recovery/device.sh
 . /usr/share/armbian-ota/recovery/payload.sh
@@ -185,23 +186,8 @@ ota_sync_reboot() {
     ota_reboot
 }
 
-# Full-content verification of a payload directory (used at the exhaustion
-# decision point only -- section 15.4 note 4: minutes are acceptable there).
-ota_payload_verify_full() {
-    dir="$1"
-
-    [ -d "${dir}" ] || return 1
-    [ -f "${dir}/payload.env" ] || return 1
-    (cd "${dir}" && sha256sum -c rootfs.sha256 >/dev/null 2>&1) || {
-        log "backup verification: rootfs.sha256 failed for ${dir}"
-        return 1
-    }
-    (cd "${dir}" && sha256sum -c boot.sha256 >/dev/null 2>&1) || {
-        log "backup verification: boot.sha256 failed for ${dir}"
-        return 1
-    }
-    return 0
-}
+# ota_payload_verify_full lives in posix.sh (minutes are acceptable at the
+# exhaustion decision point only -- section 15.4 note 4).
 
 # ===== campaign failure ladder ================================================
 
@@ -294,13 +280,8 @@ run_campaign() {
     BOOT_TAR="$(ota_resolve_payload "${OTA_DIR}" boot)"
     BOOT_ITB="${OTA_DIR}/boot.itb"
 
-    # v0.8 dropped the ota_validate_recovery_state call that used to
-    # compute these flags, so ota_apply_boot's gates evaluated EMPTY
-    # operands: '[ "" -eq 1 ]' -> 'sh: bad number' -> DO_BOOT_OTA stayed 0
-    # and every campaign skipped the boot refresh while replacing the
-    # rootfs (new rootfs + old boot, rk3588 SD rig 2026-10-29). Compute
-    # them here, including the package-requested deferral to the boot
-    # hook (OTA_BOOT_REFRESH=0 keeps legacy semantics).
+    # Flags live here, not inside ota_apply_boot: empty operands made its
+    # gates misfire and skip the boot refresh (rk3588 SD rig, 2026-10-29).
     HAS_BOOT_TAR=0
     [ -f "${BOOT_TAR}" ] && HAS_BOOT_TAR=1
     HAS_BOOT_ITB=0
