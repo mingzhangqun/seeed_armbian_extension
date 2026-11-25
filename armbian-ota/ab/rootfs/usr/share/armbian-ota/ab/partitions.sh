@@ -1,23 +1,29 @@
 # A/B slot topology and partition discovery helpers.
-# fwenv.sh provides the shared POSIX boot-disk/parent-disk primitives.
-
-[ -r "${OTA_RUNTIME_DIR}/fwenv.sh" ] || {
-    echo "ERROR: fw_env helper not found: ${OTA_RUNTIME_DIR}/fwenv.sh" >&2
-    return 1
-}
-. "${OTA_RUNTIME_DIR}/fwenv.sh"
-# ota_blkid_first_on_disk lives in posix.sh (sourced with common.sh on CLI
-# paths; direct env.sh consumers re-source it here, which is idempotent).
-[ -r "${OTA_RUNTIME_DIR}/posix.sh" ] || {
-    echo "ERROR: POSIX helper library not found: ${OTA_RUNTIME_DIR}/posix.sh" >&2
-    return 1
-}
-. "${OTA_RUNTIME_DIR}/posix.sh"
+# Runtime deps, loaded by every consumer before this library: common.sh
+# (posix.sh, ota_root_mount_source), fwenv.sh (sourced by ab/env.sh right
+# after this file -- only function definitions run at source time here).
 
 BOOT_A_LABEL="armbi_boota"
 BOOT_B_LABEL="armbi_bootb"
 ROOT_A_LABEL="armbi_roota"
 ROOT_B_LABEL="armbi_rootb"
+
+# Slot topology table: the single source for every slot-scoped name.
+# $1 = kind (boot_fs_label|root_fs_label|boot_partlabel|root_partlabel),
+# $2 = slot.
+ab_slot_name() {
+    case "$1:$2" in
+        boot_fs_label:a)  echo "${BOOT_A_LABEL}" ;;
+        boot_fs_label:b)  echo "${BOOT_B_LABEL}" ;;
+        root_fs_label:a)  echo "${ROOT_A_LABEL}" ;;
+        root_fs_label:b)  echo "${ROOT_B_LABEL}" ;;
+        boot_partlabel:a) echo "boot_a" ;;
+        boot_partlabel:b) echo "boot_b" ;;
+        root_partlabel:a) echo "rootfs_a" ;;
+        root_partlabel:b) echo "rootfs_b" ;;
+        *) return 1 ;;
+    esac
+}
 
 ab_other_slot() {
     case "$1" in
@@ -27,42 +33,16 @@ ab_other_slot() {
     esac
 }
 
-ab_get_slot_boot_label() {
-    case "$1" in
-        a) echo "${BOOT_A_LABEL}" ;;
-        b) echo "${BOOT_B_LABEL}" ;;
-        *) return 1 ;;
-    esac
-}
+ab_get_slot_boot_label() { ab_slot_name boot_fs_label "$1"; }
+ab_get_slot_root_label() { ab_slot_name root_fs_label "$1"; }
+ab_get_slot_boot_partlabel() { ab_slot_name boot_partlabel "$1"; }
+ab_get_slot_root_partlabel() { ab_slot_name root_partlabel "$1"; }
 
-ab_get_slot_root_label() {
-    case "$1" in
-        a) echo "${ROOT_A_LABEL}" ;;
-        b) echo "${ROOT_B_LABEL}" ;;
-        *) return 1 ;;
-    esac
-}
-
+# Reverse lookups: any slot-scoped name -> slot.
 ab_get_slot_by_label() {
     case "$1" in
         "${BOOT_A_LABEL}"|"${ROOT_A_LABEL}") echo "a" ;;
         "${BOOT_B_LABEL}"|"${ROOT_B_LABEL}") echo "b" ;;
-        *) return 1 ;;
-    esac
-}
-
-ab_get_slot_boot_partlabel() {
-    case "$1" in
-        a) echo "boot_a" ;;
-        b) echo "boot_b" ;;
-        *) return 1 ;;
-    esac
-}
-
-ab_get_slot_root_partlabel() {
-    case "$1" in
-        a) echo "rootfs_a" ;;
-        b) echo "rootfs_b" ;;
         *) return 1 ;;
     esac
 }
@@ -75,13 +55,14 @@ ab_get_slot_by_root_partlabel() {
     esac
 }
 
+# Filesystem label -> its GPT partlabel (empty when unknown).
 ab_get_slot_partlabel_by_fslabel() {
+    local slot
+
+    slot="$(ab_get_slot_by_label "$1")" || { echo ""; return 0; }
     case "$1" in
-        "${BOOT_A_LABEL}") ab_get_slot_boot_partlabel a ;;
-        "${BOOT_B_LABEL}") ab_get_slot_boot_partlabel b ;;
-        "${ROOT_A_LABEL}") ab_get_slot_root_partlabel a ;;
-        "${ROOT_B_LABEL}") ab_get_slot_root_partlabel b ;;
-        *) echo "" ;;
+        "${BOOT_A_LABEL}"|"${BOOT_B_LABEL}") ab_slot_name boot_partlabel "${slot}" ;;
+        *) ab_slot_name root_partlabel "${slot}" ;;
     esac
 }
 
@@ -172,9 +153,8 @@ ab_get_uuid_by_label() {
 ab_get_current_root_slot() {
     local current_slot root_dev root_part root_partlabel root_uuid root_a_uuid root_b_uuid
 
-    root_dev="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-    [ -n "${root_dev}" ] || root_dev="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-    [ -n "${root_dev}" ] || root_dev="$(df / | awk 'NR==2 {print $1}')"
+    # ota_root_mount_source (common.sh) carries the same df / last resort.
+    root_dev="$(ota_root_mount_source || true)"
     [ -n "${root_dev}" ] || return 1
 
     root_part="$(ab_resolve_physical_part_dev "${root_dev}" || true)"

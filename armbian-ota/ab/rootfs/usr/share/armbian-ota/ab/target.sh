@@ -157,21 +157,15 @@ _ab_update_armbian_env_file() {
     [ -f "${env_file}" ] || return 0
 
     if [ "${root_type}" = "crypto_LUKS" ]; then
-        if grep -q '^rootdev=' "${env_file}"; then
-            sed -i 's|^rootdev=.*$|rootdev=/dev/mapper/armbian-root|' "${env_file}" || return 1
-        else
-            printf '\nrootdev=/dev/mapper/armbian-root\n' >> "${env_file}" || return 1
-        fi
-
+        # ota_env_set_key (posix.sh) replaces-or-appends the whole key.
+        ota_env_set_key "${env_file}" rootdev "/dev/mapper/armbian-root" || return 1
         [ -n "${root_uuid}" ] || return 0
-        if grep -q '^cryptdevice=' "${env_file}"; then
-            sed -i "s|^cryptdevice=.*$|cryptdevice=UUID=${root_uuid}:armbian-root|" "${env_file}" || return 1
-        else
-            printf 'cryptdevice=UUID=%s:armbian-root\n' "${root_uuid}" >> "${env_file}" || return 1
-        fi
+        ota_env_set_key "${env_file}" cryptdevice "UUID=${root_uuid}:armbian-root" || return 1
         return 0
     fi
 
+    # Plain targets only rewrite UUID=/PARTUUID= rootdev forms; a device-path
+    # rootdev must survive for layouts that address partitions directly.
     [ -n "${root_uuid}" ] || return 0
     if grep -q '^rootdev=' "${env_file}"; then
         sed -i "s|^rootdev=UUID=.*$|rootdev=UUID=${root_uuid}|" "${env_file}" || return 1
@@ -306,6 +300,15 @@ ab_write_target_boot_itb() {
         error_exit "Written FIT boot image does not match source: ${target}"
 }
 
+# Unmount (warn-only) and drop a failed target-boot staging mount; the rm
+# runs only when the umount succeeded, so a live mount is never rm'd through.
+_ab_drop_boot_mount() {
+    local mnt="$1"
+
+    umount "${mnt}" 2>/dev/null || log_warn "Failed to unmount boot staging mount ${mnt}"
+    if ! mountpoint -q "${mnt}" 2>/dev/null; then rm -rf "${mnt}"; fi
+}
+
 ab_update_target_bootfs() {
     local temp_work="$1"
     local target_boot_dev="$2"
@@ -323,14 +326,12 @@ ab_update_target_bootfs() {
     if [ -f "${temp_work}/${OTA_PAYLOAD_BOOT_TAR}" ]; then
         empty_mount_dir "${boot_mnt}" || {
             log_error "Failed to clear target boot partition"
-            umount "${boot_mnt}" 2>/dev/null || log_warn "Failed to unmount target boot partition after clear failure"
-            if ! mountpoint -q "${boot_mnt}" 2>/dev/null; then rm -rf "${boot_mnt}"; fi
+            _ab_drop_boot_mount "${boot_mnt}"
             return 1
         }
         ab_extract_tar_payload "${temp_work}/${OTA_PAYLOAD_BOOT_TAR}" "${boot_mnt}" "boot" || {
             log_error "Failed to extract boot payload"
-            umount "${boot_mnt}" 2>/dev/null || log_warn "Failed to unmount target boot partition after extraction failure"
-            if ! mountpoint -q "${boot_mnt}" 2>/dev/null; then rm -rf "${boot_mnt}"; fi
+            _ab_drop_boot_mount "${boot_mnt}"
             return 1
         }
         sync
@@ -339,8 +340,7 @@ ab_update_target_bootfs() {
     arm_env="${boot_mnt}/armbianEnv.txt"
     if ! ab_update_armbian_env "${arm_env}" "${target_root_type}" "${target_root_uuid}"; then
         log_error "Failed to update target boot environment"
-        umount "${boot_mnt}" 2>/dev/null || log_warn "Failed to unmount target boot partition after environment update failure"
-        if ! mountpoint -q "${boot_mnt}" 2>/dev/null; then rm -rf "${boot_mnt}"; fi
+        _ab_drop_boot_mount "${boot_mnt}"
         return 1
     fi
     ab_merge_env_overlays "${arm_env}" ||
@@ -550,7 +550,7 @@ ab_update_target_partition() {
 
     if [ "${target_root_type}" = "crypto_LUKS" ]; then
         command -v cryptsetup >/dev/null 2>&1 || error_exit "cryptsetup is required for encrypted AB OTA target partition"
-        security_dev="$(ab_get_security_part)"
+        security_dev="$(ota_get_security_part)"
         [ -n "${security_dev}" ] || error_exit "Security partition not found for encrypted AB OTA"
 
         key_file="$(make_ota_temp_file "ab-key")"
@@ -582,18 +582,22 @@ ab_update_target_partition() {
     fi
 
     root_mnt="$(make_ota_work_dir "ab-root-mnt")"
+    # Nested failure exit (bash dynamic scope over the locals above): clean
+    # the target mount/mapper, then fail the transaction.
+    _ab_target_fail() {
+        ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
+        error_exit "$1"
+    }
     rootfs_prebuilt=0
     ab_reformat_target_root "${target_root_mount_dev}" "${target_root_label}" "${target_root_type}"
     fmt_rc=$?
     if [ "${fmt_rc}" -eq 2 ]; then
-        ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-        error_exit "Failed to rebuild target root filesystem"
+        _ab_target_fail "Failed to rebuild target root filesystem"
     fi
     [ "${fmt_rc}" -eq 0 ] && rootfs_prebuilt=1
 
     mount -t ext4 -o rw "${target_root_mount_dev}" "${root_mnt}" || {
-        ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-        error_exit "Failed to mount target root partition"
+        _ab_target_fail "Failed to mount target root partition"
     }
 
     # OTA hook points (docs/10-ota-package-formats.md): the staged hook is
@@ -612,20 +616,17 @@ ab_update_target_partition() {
     export OTA_HOOK_API OTA_HOOK_MODE OTA_HOOK_PATH OTA_DIR ROOTFS_TAR BOOT_TAR BOOT_ITB
 
     if ! ota_call_hook hook_pre_apply; then
-        ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-        error_exit "OTA hook hook_pre_apply failed"
+        _ab_target_fail "OTA hook hook_pre_apply failed"
     fi
 
     if type hook_apply >/dev/null 2>&1; then
         log_info "OTA hook hook_apply takes over payload application"
         hook_apply || {
-            ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-            error_exit "OTA hook hook_apply failed"
+            _ab_target_fail "OTA hook hook_apply failed"
         }
     else
         ab_apply_target_rootfs "${temp_work}" "${root_mnt}" "${package_path}" "${current_slot}" "${target_slot}" "${rootfs_prebuilt}" || {
-            ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-            error_exit "Failed to apply rootfs payload"
+            _ab_target_fail "Failed to apply rootfs payload"
         }
     fi
 
@@ -639,27 +640,22 @@ ab_update_target_partition() {
         log_info "OTA hook hook_apply owns target boot update as well"
     else
         ab_update_target_boot "${temp_work}" "${root_mnt}" "${target_boot_dev}" "${target_slot}" "${target_root_type}" "${target_root_uuid}" || {
-            ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-            error_exit "Failed to update target boot partition"
+            _ab_target_fail "Failed to update target boot partition"
         }
     fi
     ab_update_target_filesystem_config "${root_mnt}" "${target_root_label}" "${target_boot_label}" "${target_root_type}" "${target_root_uuid}" "${target_boot_uuid}" || {
-        ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-        error_exit "Failed to update target filesystem configuration"
+        _ab_target_fail "Failed to update target filesystem configuration"
     }
 
     # Carry the hook into the target slot when it wants a firstboot run.
     if type hook_firstboot >/dev/null 2>&1 && [ -n "${OTA_HOOK_PATH:-}" ]; then
         mkdir -p "${root_mnt}/usr/share/armbian-ota"
-        cp "${OTA_HOOK_PATH}" "${root_mnt}/usr/share/armbian-ota/firstboot-hook.sh" || {
-            ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-            error_exit "Failed to stage firstboot hook into target slot"
-        }
+        cp "${OTA_HOOK_PATH}" "${root_mnt}/usr/share/armbian-ota/firstboot-hook.sh" ||
+            _ab_target_fail "Failed to stage firstboot hook into target slot"
     fi
 
     if ! ota_call_hook hook_post_apply; then
-        ab_cleanup_target_root "${root_mnt}" "${luks_mapper}" "${luks_opened}" || true
-        error_exit "OTA hook hook_post_apply failed"
+        _ab_target_fail "OTA hook hook_post_apply failed"
     fi
 
     sync

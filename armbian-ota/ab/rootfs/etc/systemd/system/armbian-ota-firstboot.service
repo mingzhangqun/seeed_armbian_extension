@@ -1,6 +1,6 @@
 [Unit]
 Description=Armbian AB OTA First Boot Health Check
-Documentation=https://docs.armbian.com
+Documentation=file:///usr/share/armbian-ota
 DefaultDependencies=no
 After=local-fs.target armbian-ota-init-uboot.service
 OnFailure=armbian-ota-rollback.service
@@ -10,31 +10,22 @@ ConditionPathExists=/var/lib/armbian-ota/ota-state.env
 Type=oneshot
 ExecCondition=/usr/bin/grep -qxF OTA_MODE=ab /var/lib/armbian-ota/ota-state.env
 ExecCondition=/usr/bin/grep -Eq '^STATUS=(ready_to_boot|boot_verifying)$' /var/lib/armbian-ota/ota-state.env
-# Require U-Boot ota_in_progress=1 so state and U-Boot must agree an OTA boot
-# is pending; a crash that left state ready_to_boot but uboot unset won't
-# false-trigger mark-success on a non-target boot.
-# (ExecCondition skip is not a failure, so it does not invoke the rollback path.)
+# U-Boot ota_in_progress=1 required: state and U-Boot must agree an OTA boot
+# is pending, so a crashed state flip cannot false-mark success. An
+# ExecCondition skip is not a failure (rollback not triggered).
 ExecCondition=/bin/sh -c '[ "$(fw_printenv -n ota_in_progress 2>/dev/null || true)" = 1 ]'
 ExecStart=/usr/lib/armbian/armbian-ota-health-check
 ExecStartPost=/usr/sbin/armbian-ota mark-success
-# reconcile must run on the rolled-back boot, where U-Boot already cleared
-# ota_in_progress and the third ExecCondition above exits 1 -- systemd then
-# SKIPS the remaining start commands (ExecStart and ExecStartPost are not
-# run; verified: unit Result=success, OnFailure not triggered). ExecStopPost
-# is the one hook systemd still runs after an ExecCondition skip, so that is
-# where the stale pending state gets reconciled. On a health-check pass
-# mark-success has already finished the transaction and reconcile is a no-op;
-# on a health-check failure ota_in_progress is still 1 and reconcile defers
-# to the OnFailure rollback service.
+# On the rolled-back boot U-Boot cleared ota_in_progress and the third
+# ExecCondition exits 1: systemd skips the start commands (verified:
+# Result=success, OnFailure untriggered) and ExecStopPost is the only hook
+# still run -- so reconcile lands there. Pass: no-op (mark-success done);
+# failure: ota_in_progress still 1, defers to the rollback service.
 ExecStopPost=/usr/sbin/armbian-ota reconcile
 RemainAfterExit=yes
 TimeoutStartSec=300
 StandardOutput=journal+console
 StandardError=journal+console
-
-# Health check only runs while an AB OTA boot is pending verification.
-# A successful check synchronously confirms the boot; either step failing
-# triggers the rollback service.
 
 [Install]
 WantedBy=multi-user.target

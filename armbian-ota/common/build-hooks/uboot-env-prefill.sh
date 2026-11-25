@@ -68,14 +68,12 @@ function ota_uboot_env_prefill_compose() {
         local mode_override_env
         mode_override_env="$(mktemp)" || exit_with_error "mktemp failed"
         if ota_raw_boot_enabled; then
-            # Raw-FIT images must take the bootcmd's raw-fit branch from the
-            # very first boot. The else-branch runs distro_bootcmd first, and
-            # its per-device boot_android calls repoint android_get_bootdev()
-            # at whatever device was scanned last (the SPI mtd on boards with
-            # NOR flash), so the trailing boot_fit then searches the wrong
-            # device and dies with "No boot partition" (RK3588 SD boot,
-            # 2026-09-03). ota-init only sets this mode after a bootstrapped
-            # first boot, which never happens without this injection.
+            # Raw-FIT images must take the raw-fit bootcmd branch from the
+            # first boot: distro_bootcmd's per-device boot_android repoints
+            # android_get_bootdev() at whatever was scanned last, so the
+            # trailing boot_fit dies with "No boot partition" (RK3588 SD
+            # boot, 2026-09-03). ota-init only sets this mode after a
+            # bootstrapped first boot, which never happens without it.
             printf 'ab_boot_mode=raw-fit\n' > "${mode_override_env}"
         else
             # Plain A/B: stamp the fs branch; plain FIT boots stay a manual console action.
@@ -103,11 +101,8 @@ function ota_uboot_env_prefill_compose() {
     ota_uboot_env_prefill_check_sync "${default_env}"
 
     # v0.8 routing env (design section 3.2): transaction flags + the p1
-    # anchored boot pair + a bootcmd that (a) saves ota_boot_next=recovery
-    # BEFORE booting a candidate, (b) routes to Rescue on every normal
-    # return, (c) never scans external media. The Seeed boot.scr already
-    # carries the armbian.bootdev tokens in its own bootargs, and the rescue
-    # branches inject them directly, so no bootargs prefixing is needed here.
+    # anchored boot pair + a bootcmd that saves ota_boot_next BEFORE booting,
+    # routes to Rescue on every normal return, and never scans external media.
     routing_env="$(mktemp)" || exit_with_error "mktemp failed"
     {
         printf '%s\n' 'ota_in_progress=0'
@@ -125,11 +120,9 @@ function ota_uboot_env_prefill_compose() {
     rm -f "${routing_env}"
 }
 
-# Validate that the env area fits between the u-boot loader blob and
-# partition 1. Only the blob starting at sector 64 can reach the env gap
-# below 4 MiB: secure images split the loader (idbloader.img at sector 64 +
-# u-boot.itb at sector 16384) and the FIT lands inside partition 1 by
-# design, far beyond the env area.
+# Validate that the env area fits between the sector-64 loader blob and
+# partition 1: only that blob can reach the env gap below 4 MiB (secure
+# images split the loader, and the FIT lands inside partition 1 by design).
 function ota_uboot_env_prefill_assert_layout() {
     local offset_hex="$1"
     local offset=$((offset_hex))
@@ -182,11 +175,9 @@ for entry in blob[skip:].split(b'\0'):
         break
     print(entry.decode('utf-8', 'replace'))
 ")" || exit_with_error "Env blob readback failed" "${env_info}"
-    # Verify the tokens the composed env actually carries.  A/B blobs anchor
-    # on the armbian.bootdev bootcmd from /etc/u-boot-initial-env (plus the
-    # raw-fit override on secure images); only recovery blobs carry the v0.8
-    # transactional routing script.  Checking the recovery tokens on an A/B
-    # blob always fails and kills every A/B leg at image assembly.
+    # A/B blobs anchor on the armbian.bootdev bootcmd (+ the raw-fit override
+    # on secure images); only recovery blobs carry the v0.8 routing script --
+    # checking recovery tokens on an A/B blob kills every A/B leg.
     if [[ "${AB_PART_OTA:-}" == "yes" ]]; then
         grep -q '^bootcmd=.*armbian\.bootdev' <<< "${env_info}" ||
             exit_with_error "Prefilled A/B env lacks bootdev bootcmd" "bootcmd not carried into blob"

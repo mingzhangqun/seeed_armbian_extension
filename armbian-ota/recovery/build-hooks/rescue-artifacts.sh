@@ -1,21 +1,13 @@
-# Rescue boot assets (v0.8 patch #1): the independent rescue kernel,
-# initrd and dtb that U-Boot loads directly (no container).
-#
-# Two flavors, one goal -- a boot path that never depends on the rootfs:
-#   ext4 boot partition (plain/auto-decrypt): Image/uInitrd/board.dtb in
-#     boot/recovery/, loaded by ota_rescue_boot_fs (ext4load + booti)
-#   raw-FIT layout (secure boot): the same signed boot.itb flashed to the
-#     dedicated PARTLABEL=recovery partition, booted by ota_rescue_boot_fit
-#     (vendor boot_fit; FIT signature verification included). The FIT's
-#     ramdisk component is the same-build initramfs, so the rescue boots
-#     straight into the 99-ota-apply Rescue role.
-#
-# Ordering: runs as pre_umount_final_image__900, BEFORE the payload package
-# hook (901). The secure FIT hook (package_fit) sorts at 500 -- before every
-# numbered hook -- so the signed boot.itb already exists when this hook runs.
-# The package side stages the boot partition with recovery/ excluded, so the
-# rescuer never ships inside an OTA package and can never be deleted by one
-# (design section 1: OTA 禁止删除或覆盖 boot/recovery/ 及 recovery 分区).
+# Rescue boot assets (v0.8 patch #1): a boot path that never depends on the
+# rootfs. ext4 boot partitions carry Image/uInitrd/board.dtb in boot/
+# recovery/ (loaded by ota_rescue_boot_fs); raw-FIT layouts flash the same
+# signed boot.itb to the dedicated PARTLABEL=recovery partition (booted by
+# vendor boot_fit with FIT verification; the FIT ramdisk is the same-build
+# initramfs booting straight into the 99-ota-apply Rescue role).
+
+# Ordering: hook 900 runs BEFORE the package hook (901); the secure FIT hook
+# sorts at 500, so boot.itb already exists. The package hook stages boot/
+# with recovery/ excluded (design section 1: OTA never deletes the rescuer).
 
 # Canonical signed kernel FIT produced by rk_secure_boot_package_final_fit
 # (secure-boot-image.sh); the OTA package hook reads the same path.
@@ -42,15 +34,12 @@ function ota_rescue_artifacts_resolve_dtb() {
     return $?
 }
 
-# Stamp the layout flavor into the rootfs so the runtime health service can
-# branch without probing block devices (plain recovery stamps "filesystem").
-# The initramfs also needs this stamp: 99-copy-tools runs immediately after
-# pre_update_initramfs and copies it for fwenv.sh. The final rescue hook below
-# reasserts it after installing the corresponding assets.
-# Hard failure, not a warning: the Rescue success-reconciliation treats the
-# stamp as the deciding input on raw-FIT devices (HAS_BOOT_PART=0), so a
-# warn-only write could ship a rootfs whose next reconciliation wedges in
-# rescue_shell with an unclearable STATUS=success.
+# Stamp the layout flavor into the rootfs for the runtime health service and
+# the initramfs (99-copy-tools copies it for fwenv.sh right after
+# pre_update_initramfs). Hard failure: the Rescue success-reconciliation
+# treats the stamp as the deciding input on raw-FIT devices (HAS_BOOT_PART=0),
+# so a warn-only write could ship a rootfs whose next reconciliation wedges
+# in rescue_shell with an unclearable STATUS=success.
 function ota_rescue_stamp_boot_mode() {
     local mode="$1"
     local stamp_dir="${MOUNT}/usr/share/armbian-ota"
@@ -62,13 +51,12 @@ function ota_rescue_stamp_boot_mode() {
         exit_with_error "Recovery rescue assets" "failed to stamp boot-mode=${mode}"
 }
 
-# Resolve the rescue partition from the loop's partition table by
-# PARTLABEL. The RECOVERY_RESCUE_PART_INDEX variable set by the partition
-# hook does not survive across hook rounds (same host/container split that
-# hit BOOT_RAW_MODE); parsing the live table needs no cross-hook state.
-# Emits "<node> <start-sector> <size-in-sectors>" -- the sector is what the
-# flash uses (this stage's loop is attached without -P and carries no
-# partition device nodes), the size feeds the FIT-vs-partition bound check.
+# Resolve the rescue partition by PARTLABEL from the live table: the
+# RECOVERY_RESCUE_PART_INDEX variable does not survive across hook rounds
+# (same host/container split that hit BOOT_RAW_MODE). Emits
+# "<node> <start-sector> <size-in-sectors>": this stage's loop is attached
+# without -P, so the sector is what the flash uses; the size feeds the
+# FIT-vs-partition bound check.
 function ota_rescue_recovery_partition() {
     sfdisk -J "${LOOP}" 2>/dev/null | python3 -c '
 import json, sys
@@ -146,10 +134,9 @@ function pre_umount_final_image__900_install_recovery_rescue() {
     cp "${dtb}" "${rescue_dir}/board.dtb" ||
         exit_with_error "Recovery rescue assets" "failed to copy board dtb"
 
-    # No identity file lives here: the rescue set is frozen at image build
-    # and never updated by OTA, and a self-stored digest proves nothing (it
-    # can be tampered with alongside the assets). Verify against the build
-    # log or the original image when in doubt.
+    # No identity file here: the rescue set is frozen at image build, never
+    # updated by OTA, and a self-stored digest proves nothing (tamperable
+    # alongside the assets). Verify against the build log or original image.
 
     sync
     ota_rescue_stamp_boot_mode "filesystem"

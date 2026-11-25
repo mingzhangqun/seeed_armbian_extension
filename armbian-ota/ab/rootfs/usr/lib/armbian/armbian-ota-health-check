@@ -12,17 +12,12 @@ OTA_RUNTIME_DIR="/usr/share/armbian-ota"
 ota_source_library "${OTA_RUNTIME_DIR}/ab/env.sh" "A/B U-Boot environment helper" || exit 1
 
 require_basic_system_health() {
-    local root_opts
+    local fail_item root_opts
 
-    [ -r /proc/version ] || {
-        log_error "/proc/version is not readable"
+    while read -r fail_item; do
+        log_error "${fail_item}"
         return 1
-    }
-
-    mountpoint -q /proc && mountpoint -q /sys && mountpoint -q /dev || {
-        log_error "required pseudo filesystems are not mounted"
-        return 1
-    }
+    done < <(ota_basic_boot_failures)
 
     root_opts="$(findmnt -n -o OPTIONS / 2>/dev/null || true)"
     case ",${root_opts}," in

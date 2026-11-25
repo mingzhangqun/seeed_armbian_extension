@@ -2,30 +2,15 @@
 
 readonly AB_INITIAL_ENV="/etc/u-boot-initial-env"
 
-AB_PARTITIONS_LIB="${OTA_RUNTIME_DIR}/ab/partitions.sh"
-[ -r "${AB_PARTITIONS_LIB}" ] || {
-    echo "ERROR: A/B partition helper not found: ${AB_PARTITIONS_LIB}" >&2
-    return 1
-}
-# The || propagates partitions.sh's missing-fwenv guard through callers
-# without set -e (CLI bare source, health-check's ota_source_library).
-. "${AB_PARTITIONS_LIB}" || return 1
+# Load failures propagate through callers without set -e (CLI bare source,
+# init-uboot's ota_source_library ... || exit 1).
+ota_source_library "${OTA_RUNTIME_DIR}/ab/partitions.sh" "A/B partition helper" || return 1
 
 # fw_env_* helpers: shared with recovery via the common runtime.
-FW_ENV_LIB="${OTA_RUNTIME_DIR}/fwenv.sh"
-[ -r "${FW_ENV_LIB}" ] || {
-    echo "ERROR: fw_env helper not found: ${FW_ENV_LIB}" >&2
-    return 1
-}
-. "${FW_ENV_LIB}"
+ota_source_library "${OTA_RUNTIME_DIR}/fwenv.sh" "fw_env helper" || return 1
 
 # Repair key spec, single-sourced with the build-time completeness check.
-AB_ENV_KEYS_LIB="${OTA_RUNTIME_DIR}/ab/env-keys.sh"
-[ -r "${AB_ENV_KEYS_LIB}" ] || {
-    echo "ERROR: A/B env key spec not found: ${AB_ENV_KEYS_LIB}" >&2
-    return 1
-}
-. "${AB_ENV_KEYS_LIB}"
+ota_source_library "${OTA_RUNTIME_DIR}/ab/env-keys.sh" "A/B env key spec" || return 1
 
 ab_env_get() {
     fw_env_get "$@"
@@ -83,9 +68,10 @@ ab_env_healthy() {
     ! fw_env_crc_bad
 }
 
-# State-file read without state.sh side effects (state_init would seed an
-# idle file and flip service conditions).
-AB_STATE_FILE="${AB_STATE_FILE:-/var/lib/armbian-ota/ota-state.env}"
+# State-file read without state_init side effects (state_init would seed an
+# idle file and flip service conditions). Every env.sh consumer sources
+# common.sh first, so state.sh's OTA_STATE_FILE is already set.
+AB_STATE_FILE="${AB_STATE_FILE:-${OTA_STATE_FILE}}"
 
 ab_env_state_value() {
     local key="$1"
@@ -177,6 +163,16 @@ ab_env_slot_boot_ready() {
         "${bootcmd}" == *"run distro_bootcmd"* ]]
 }
 
+# Retry ceiling from the initial env; every env state transition resets
+# slot_retry_left to it.
+ab_env_retry_max() {
+    local retry_max
+
+    retry_max="$(ab_env_initial_get slot_retry_max)"
+    [ -n "${retry_max}" ] || return 1
+    printf '%s\n' "${retry_max}"
+}
+
 ab_env_prepare() {
     local slot="$1"
     local retry_max
@@ -185,8 +181,7 @@ ab_env_prepare() {
         a|b) ;;
         *) return 1 ;;
     esac
-    retry_max="$(ab_env_initial_get slot_retry_max)"
-    [ -n "${retry_max}" ] || return 1
+    retry_max="$(ab_env_retry_max)" || return 1
     ab_env_set "ota_in_progress=1" "boot_slot=${slot}" \
         "slot_retry_max=${retry_max}" "slot_retry_left=${retry_max}"
 }
@@ -200,8 +195,7 @@ ab_env_mark_success() {
         a|b) ;;
         *) return 1 ;;
     esac
-    retry_max="$(ab_env_initial_get slot_retry_max)"
-    [ -n "${retry_max}" ] || return 1
+    retry_max="$(ab_env_retry_max)" || return 1
     # boot_slot must be set so U-Boot's ab_select_boot_part / ab_select_fit_slot
     # pick the slot on next reset; switch-slot uses ab_env_prepare instead so
     # its target remains an unconfirmed boot trial until health checks pass.
@@ -218,8 +212,7 @@ ab_env_rollback() {
         a|b) ;;
         *) return 1 ;;
     esac
-    retry_max="$(ab_env_initial_get slot_retry_max)"
-    [ -n "${retry_max}" ] || return 1
+    retry_max="$(ab_env_retry_max)" || return 1
     ab_env_set "boot_slot=${slot}" "ota_in_progress=0" \
         "slot_retry_left=${retry_max}"
 }

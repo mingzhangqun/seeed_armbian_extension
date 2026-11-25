@@ -138,10 +138,10 @@ uploads — the u-boot payload is identical across the other legs of the same
 `board+security`. Promote only flips the tag pointers; loader files stay
 inside their tag tree.
 
-The download page renders them per board as a first-class **Loader** mode
-box (chip icon, teal/orange buttons) at the top of each security group
-(green PLAIN / red SECURE frames with inverted corner labels). All image
-and loader links come from the tag's OneDrive manifest.
+The download page renders them per board as a collapsed **Loader** box
+below the slot list, banded teal (PLAIN) / deep red (SECURE); factory
+artifacts stay off the primary download path. All image and loader links
+come from the tag's OneDrive manifest.
 
 Everything CI does is the documented local flow — the wrapper staging step,
 profiles, and secrets map 1:1 to [02-build-reference.md](02-build-reference.md).

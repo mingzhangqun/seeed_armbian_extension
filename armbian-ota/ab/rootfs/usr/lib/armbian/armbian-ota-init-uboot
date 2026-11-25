@@ -8,30 +8,19 @@
 set -e
 
 OTA_RUNTIME_DIR="/usr/share/armbian-ota"
-AB_ENV_LIB="${OTA_RUNTIME_DIR}/ab/env.sh"
-[ -r "${AB_ENV_LIB}" ] || {
-    echo "ERROR: A/B U-Boot environment helper not found: ${AB_ENV_LIB}" >&2
+[ -f "${OTA_RUNTIME_DIR}/common.sh" ] || {
+    echo "ERROR: OTA runtime libraries not found at ${OTA_RUNTIME_DIR}" >&2
     exit 1
 }
-. "${AB_ENV_LIB}"
+. "${OTA_RUNTIME_DIR}/common.sh"
+
+ota_source_library "${OTA_RUNTIME_DIR}/ab/env.sh" "A/B U-Boot environment helper" || exit 1
+
+init_logging
 
 # Env geometry (OTA_FW_ENV_*) and fw_env_* helpers come from fwenv.sh,
 # sourced via ab/env.sh.
-readonly AB_STATE_DIR="/var/lib/armbian-ota"
-readonly AB_UBOOT_INITIALIZED_FILE="${AB_STATE_DIR}/uboot_initialized"
-
-# Logging
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-}
-
-log_info() {
-    log "INFO: $@"
-}
-
-log_error() {
-    log "ERROR: $@" >&2
-}
+readonly AB_UBOOT_INITIALIZED_FILE="${OTA_STATE_DIR}/uboot_initialized"
 
 # /dev/nvme0n1p1 -> 1
 get_partition_number_from_dev() {
@@ -73,9 +62,8 @@ detect_ab_boot_partitions() {
     boot_a_dev="$(ab_get_part_by_label "${BOOT_A_LABEL}")"
     boot_b_dev="$(ab_get_part_by_label "${BOOT_B_LABEL}")"
     if [ -z "${boot_a_dev}" ] || [ -z "${boot_b_dev}" ]; then
-        log_error "Cannot find one or more A/B boot partitions by label"
-        log_error "boot_a=${boot_a_dev:-<none>} boot_b=${boot_b_dev:-<none>}"
-        exit 1
+        error_exit "Cannot find one or more A/B boot partitions by label" \
+             "boot_a=${boot_a_dev:-<none>} boot_b=${boot_b_dev:-<none>}"
     fi
 }
 
@@ -83,9 +71,8 @@ detect_ab_root_partitions() {
     root_a_dev="$(ab_get_part_by_label "${ROOT_A_LABEL}")"
     root_b_dev="$(ab_get_part_by_label "${ROOT_B_LABEL}")"
     if [ -z "${root_a_dev}" ] || [ -z "${root_b_dev}" ]; then
-        log_error "Cannot find one or more A/B root partitions by label"
-        log_error "root_a=${root_a_dev:-<none>} root_b=${root_b_dev:-<none>}"
-        exit 1
+        error_exit "Cannot find one or more A/B root partitions by label" \
+             "root_a=${root_a_dev:-<none>} root_b=${root_b_dev:-<none>}"
     fi
 
     # Use detected partition mapping to support custom layouts, such as ones
@@ -96,9 +83,8 @@ detect_ab_root_partitions() {
     ROOT_B_PART=$(get_partition_number_from_dev "${root_b_dev}" || true)
 
     if [ -z "${BOOT_A_PART}" ] || [ -z "${BOOT_B_PART}" ] || [ -z "${ROOT_A_PART}" ] || [ -z "${ROOT_B_PART}" ]; then
-        log_error "Failed to parse one or more partition numbers from device names"
-        log_error "boot_a=${boot_a_dev} boot_b=${boot_b_dev} root_a=${root_a_dev} root_b=${root_b_dev}"
-        exit 1
+        error_exit "Failed to parse one or more partition numbers from device names" \
+             "boot_a=${boot_a_dev} boot_b=${boot_b_dev} root_a=${root_a_dev} root_b=${root_b_dev}"
     fi
 }
 
@@ -117,8 +103,7 @@ detect_ab_boot_configuration() {
         read -r BOOT_DEVTYPE BOOT_DEVNUM <<< "$(get_uboot_bootdev_from_part "${boot_a_dev}" || true)"
     fi
     if [ -z "${BOOT_DEVTYPE}" ] || [ -z "${BOOT_DEVNUM}" ]; then
-        log_error "Unsupported boot_a device for U-Boot bootcmd generation: ${boot_a_dev}"
-        exit 1
+        error_exit "Unsupported boot_a device for U-Boot bootcmd generation: ${boot_a_dev}"
     fi
 
     boot_a_uuid="$(ab_get_uuid_by_label "${BOOT_A_LABEL}")"
@@ -132,8 +117,7 @@ detect_ab_boot_configuration() {
     elif [ -n "${boot_a_fstype}" ] && [ -n "${boot_b_fstype}" ]; then
         AB_BOOT_MODE="filesystem"
     else
-        log_error "A/B boot partitions use inconsistent formats: boot_a=${boot_a_fstype:-<raw>} boot_b=${boot_b_fstype:-<raw>}"
-        exit 1
+        error_exit "A/B boot partitions use inconsistent formats: boot_a=${boot_a_fstype:-<raw>} boot_b=${boot_b_fstype:-<raw>}"
     fi
     CURRENT_SLOT="$(ab_get_current_root_slot || echo "a")"
 
@@ -187,7 +171,7 @@ configure_ab_boot_environment() {
 }
 
 mark_uboot_initialized() {
-    mkdir -p "${AB_STATE_DIR}" || return 1
+    mkdir -p "${OTA_STATE_DIR}" || return 1
     cat > "${AB_UBOOT_INITIALIZED_FILE}" << EOF
 # u-boot AB partition environment initialized
 $(date)
@@ -220,8 +204,7 @@ fi
 
 # Check if fw_setenv/fw_printenv exists
 if ! command -v fw_printenv >/dev/null 2>&1 || ! command -v fw_setenv >/dev/null 2>&1; then
-    log_error "fw_printenv/fw_setenv not found"
-    exit 1
+    error_exit "fw_printenv/fw_setenv not found"
 fi
 
 log_info "=== Initializing u-boot AB partition boot environment ==="

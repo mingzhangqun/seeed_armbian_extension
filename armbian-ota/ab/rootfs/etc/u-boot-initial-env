@@ -15,26 +15,20 @@ ab_preboot=if test "${ota_in_progress}" = "1"; then if test "${slot_retry_left}"
 # Select only the active A/B boot partition on the configured boot device.
 ab_select_boot_part=if test "${devtype}" = "${ab_boot_devtype}" && test "${devnum}" = "${ab_boot_devnum}"; then if test "${boot_slot}" = "b"; then setenv devplist ${distro_bootpart_b}; else setenv devplist ${distro_bootpart_a}; fi; else part list ${devtype} ${devnum} -bootable devplist; env exists devplist || setenv devplist 1; fi
 
-# No boot_android here: our images carry no android boot partition, and each
-# call stomps android_dev_desc, which boot_fit later uses as its device
-# pointer — a scan over mtd/spi repointed it and boot_fit died with
-# "No boot partition" (RK3588 SD boot, 2026-09-03).
-# No fstype guard here: the v2025.04 vendor tree ships no fstype command, and
-# the load inside scan_dev_for_boot already fails cleanly on unsupported
-# filesystems, so the guard was redundant even where fstype exists.
+# No boot_android: our images carry no android partition, and each call
+# stomps android_dev_desc, which boot_fit uses as its device pointer (an
+# mtd/spi scan repointed it; "No boot partition", RK3588 SD, 2026-09-03).
+# No fstype guard: the v2025.04 vendor tree ships no fstype, and the load
+# inside scan_dev_for_boot already fails cleanly on bad filesystems.
 scan_dev_for_boot_part=run ab_select_boot_part; for distro_bootpart in ${devplist}; do run scan_dev_for_boot; done
 
 # Raw FIT boot path
 ab_select_fit_slot=if test "${boot_slot}" = "b"; then setenv boot_fit_part boot_b; else setenv boot_fit_part boot_a; fi
 
-# Dispatch to the path detected by armbian-ota-init-uboot.
-# armbian.bootdev/bootdevnum pass the storage U-Boot actually loaded the OS
-# image from (set by atags/rkimg_bootdev before bootcmd runs) so the initramfs
-# and userspace can anchor security/rootfs partition lookup to that disk when
-# several disks carry identical cloned images. The append sits AFTER ab_preboot
-# and BEFORE the mode dispatch so every branch (raw-fit slot boot, recovery
-# boot_fit) carries the token. It must stay after ab_preboot: that script
-# saveenv's during OTA retry handling and must never persist the mutated
-# bootargs, or the token accumulates across retry boots. No bootrkp tail: the
-# command does not exist in the u-boot we ship.
+# Dispatch to the mode set by armbian-ota-init-uboot. The armbian.bootdev
+# token (set by rkimg_bootdev: the storage U-Boot loaded from) anchors the
+# initramfs/userspace partition lookup in multi-disk clones. Appended AFTER
+# ab_preboot (whose retry saveenv's must never persist the mutated bootargs)
+# and BEFORE the mode dispatch, so every branch carries it. No bootrkp
+# tail: not in the u-boot we ship.
 bootcmd=run ab_preboot; setenv bootargs "${bootargs} armbian.bootdev=${devtype} armbian.bootdevnum=${devnum}"; if test "${ab_boot_mode}" = "raw-fit"; then run ab_select_fit_slot; setenv bootargs "${bootargs} armbian.slot=${boot_slot}"; boot_fit; else run distro_bootcmd; fi

@@ -12,14 +12,12 @@ function ota_require_gpt_partition_table() {
     fi
 }
 
-# Raw-FIT boot layout (signed kernel FIT on a raw partition). BOOT_RAW_MODE is
-# exported by rk-secure-boot's pre_prepare_partitions__050 hook, but its
-# visibility in later hooks is timing-dependent across the host/container
-# hook rounds (observed: the same build produced the rescue partition in one
-# run and silently dropped it in the next). Re-derive the mode from the same
-# inputs rk_autodecrypt_fit_boot_required() uses -- RK_SECURE_UBOOT_ENABLE,
-# or auto-decrypt with the OP-TEE bootchain -- so every caller agrees.
-# KEEP IN SYNC with rk_secure-disk-encryption/build-hooks/common.sh.
+# Raw-FIT boot layout (signed kernel FIT on a raw partition). BOOT_RAW_MODE
+# is exported by rk-secure-boot's 050 hook, but its visibility is
+# timing-dependent across host/container hook rounds (observed: the same
+# build produced the rescue partition in one run, dropped it in the next),
+# so re-derive the mode from the same inputs rk_autodecrypt_fit_boot_
+# required() uses. KEEP IN SYNC with rk_secure-disk-encryption/build-hooks/common.sh.
 function ota_raw_boot_enabled() {
     if [[ "${BOOT_RAW_MODE:-}" == "yes" ]]; then
         return 0
@@ -33,8 +31,10 @@ function ota_raw_boot_enabled() {
     return 1
 }
 
-function ota_install_overlayroot_dependencies() {
-    add_packages_to_image overlayroot busybox-static
+# Runtime packages every flavor needs: overlayroot + busybox for the
+# overlay layout, distro fw_env tools, zstd for payload compression.
+function ota_install_ota_dependencies() {
+    add_packages_to_image overlayroot busybox-static libubootenv-tool zstd
 }
 
 # Partition-size policy
@@ -122,4 +122,17 @@ function ota_partition_format_luks_ext4() {
     }
     run_host_command_logged cryptsetup luksClose "${mapper_name}" ||
         exit_with_error "Failed to close encrypted ${description}" "${mapper_dev}"
+}
+
+# Userdata partition: LUKS+ext4 when the flavor encrypts, else plain ext4.
+# Label armbi_usrdata is the runtime resolver contract; the mapper name is
+# flavor-scoped so parallel A/B and recovery builds never collide.
+function ota_format_userdata_partition() {
+    local title="$1" dev="$2" mapper_name="$3"
+
+    if ota_encrypted_rootfs_enabled; then
+        ota_partition_format_luks_ext4 "${title}" "${dev}" "${mapper_name}" "armbi_usrdata" "userdata"
+    else
+        ota_partition_format_ext4 "${title}" "${dev}" "armbi_usrdata" "userdata"
+    fi
 }

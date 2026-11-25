@@ -126,6 +126,11 @@ reboot
 
 Then reboot. The initramfs does the rest — see next section.
 
+> **Loader constraint:** OTA never reflashes the SPI loader. It assumes the
+> device loader comes from the same image generation (redundant-env layout,
+> FIT trust); a device flashed with an older or different-key loader must
+> reflash via maskrom first, which also upgrades the loader.
+
 After the update reboot:
 
 ```bash

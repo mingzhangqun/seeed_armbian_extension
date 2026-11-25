@@ -1,14 +1,8 @@
-# Boot-partition slimming (v0.8 patch #7): drop the unversioned raw
-# update-initramfs byproduct initrd.img-* from /boot before image finalization.
-#
-# Rationale:
-#   - Rockchip U-Boot loads uInitrd-* (mkimage-wrapped), never initrd.img-*.
-#   - rk_secure_boot_find_ramdisk was reworked to prefer uInitrd-* (stripping
-#     the 64-byte mkimage header) when initrd.img-* is absent, so secure-boot
-#     FIT packaging keeps working without the raw file.
-#
-# Ordering: pre_umount_final_image__899, just BEFORE rescue-artifacts (900)
-# so the rescue payload and the live /boot agree on the file set.
+# Boot-partition slimming (v0.8 patch #7): drop initrd.img-* from /boot.
+# U-Boot loads uInitrd-* (mkimage-wrapped), never the raw file, and
+# rk_secure_boot_find_ramdisk prefers uInitrd-*, so secure FIT packaging
+# survives the prune. Runs at 899, just before rescue-artifacts (900), so the
+# rescue payload and the live /boot agree on the file set.
 
 function pre_umount_final_image__899_slim_initrd_img() {
     local boot_dir="${MOUNT}/boot"
@@ -34,6 +28,16 @@ function pre_umount_final_image__899_slim_initrd_img() {
         removed+=("$(basename "${img}")")
         rm -f "${img}" ||
             exit_with_error "Boot slim" "failed to remove ${img}"
+    done
+
+    # The unversioned initrd.img[.old] symlinks now dangle: U-Boot loads
+    # uInitrd only, and the framework's dangling-link cleanup is FAT-only.
+    local link
+    for link in "${boot_dir}/initrd.img" "${boot_dir}/initrd.img.old"; do
+        [[ -L "${link}" && ! -e "${link}" ]] || continue
+        rm -f "${link}" ||
+            exit_with_error "Boot slim" "failed to remove ${link}"
+        removed+=("$(basename "${link}")")
     done
 
     ((${#removed[@]})) || return 0

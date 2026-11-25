@@ -1,14 +1,10 @@
 # OTA Package Creation Helpers
 
-# Payload compression selector. "xz" (default) archives the inner payload as
-# multi-block .tar.xz (xz -T0) and ships the final package as an uncompressed
-# tar: compression happens exactly once, decode parallelizes on device
-# (xz >= 5.7 threaded decompression), and metadata members are readable
-# without decompression. "gz" reproduces the legacy double-gzip layout.
-# "zstd" mirrors the xz layout with .tar.zst payloads (the target runtime
-# must list zstd in OTA_RUNTIME_FORMATS). See docs/10-ota-package-formats.md.
-# v0.8: recovery payloads pin zstd (the device-side lazy backup uses the
-# same format; one format, one extract path). A/B keeps the xz default.
+# Payload codec. xz (A/B default): multi-block .tar.xz inner payload, outer
+# plain tar -- one compression pass, decode parallelizes on device (xz >= 5.7).
+# zstd (recovery default, v0.8): pins the lazy-backup format, one extract
+# path; the runtime must list zstd in OTA_RUNTIME_FORMATS. gz reproduces the
+# legacy double-gzip layout. See docs/10-ota-package-formats.md.
 OTA_PAYLOAD_COMP_DEFAULT="xz"
 [[ "${AB_PART_OTA:-}" != "yes" ]] && OTA_PAYLOAD_COMP_DEFAULT="zstd"
 OTA_PAYLOAD_COMP="${OTA_PAYLOAD_COMP:-${OTA_PAYLOAD_COMP_DEFAULT}}"
@@ -208,10 +204,8 @@ EOF
     if [[ -n "${OTA_MIN_RUNTIME_VERSION:-}" ]]; then
         echo "MIN_RUNTIME_VERSION=${OTA_MIN_RUNTIME_VERSION}" >> "${ota_mode_file}"
     fi
-    # Capacity stamps consumed by the device-side gate (ota_check_payload_
-    # capacity). Only stamped when the build-side measurement succeeded, so
-    # absence means a pre-gate package -- which the device skips with a
-    # warning instead of refusing.
+    # Capacity stamps for the device-side gate; only stamped when measurement
+    # succeeded, so absence means a pre-gate package (device warns, not refuses).
     if [[ "${OTA_ROOTFS_BYTES:-}" =~ ^[0-9]+$ ]]; then
         echo "ROOTFS_BYTES=${OTA_ROOTFS_BYTES}" >> "${ota_mode_file}"
     fi
@@ -248,24 +242,16 @@ EOF
 }
 
 # Per-payload identity card staged inside the package (copied verbatim into
-# payloads/<PAYLOAD_ID>/ by the device-side start flow).
-function ota_write_payload_env() {
+# payloads/<PAYLOAD_ID>/ by the device-side start flow). ota_write_payload_env
+# (payload-id.sh, sourced above) is the single writer.
+function ota_stage_payload_env() {
     local ota_temp_dir="$1"
     local manifest_mode="$2"
 
     [[ "${manifest_mode}" == "recovery" && -n "${OTA_RECOVERY_PAYLOAD_ID:-}" ]] || return 0
-
-    cat > "${ota_temp_dir}/payload.env" << EOF
-PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID}
-KIND=full
-FMT=${OTA_PAYLOAD_TAR_SUFFIX#tar.}
-HAS_ROOTFS=1
-BOARD=${BOARD}
-RELEASE=${RELEASE}
-KERNEL=${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}
-VERSION=${IMAGE_VERSION:-${REVISION}}
-OTA_MODE=recovery
-EOF
+    ota_write_payload_env "${ota_temp_dir}" "${OTA_RECOVERY_PAYLOAD_ID}" \
+        "${OTA_PAYLOAD_TAR_SUFFIX#tar.}" "${BOARD}" "${RELEASE}" \
+        "${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}" "${IMAGE_VERSION:-${REVISION}}" || return 1
     display_alert "OTA payload identity" "payload.env staged (PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID})" "info"
 }
 
@@ -319,12 +305,9 @@ function ota_create_final_tarball() {
     local ota_temp_dir="$1"
     local ota_output_path="$2"
 
-    # The payload members are already compressed; the outer pass is a
-    # presentation shell (a bare .tar handed to end users reads as careless),
-    # so it always compresses -- same codec as the payload at a fast level,
-    # ratio is irrelevant. Piped codecs because tar -I takes a single-word
-    # program and the speed flags need to reach xz/zstd themselves. The
-    # on-device reader (tar -xOf) auto-detects the compression.
+    # Presentation shell around already-compressed payloads: always the
+    # payload codec at a fast level. Piped codecs because tar -I takes a
+    # single-word program; the on-device reader auto-detects compression.
     local -a outer_codec=()
     case "${OTA_PAYLOAD_COMP}" in
         gz)   outer_codec=("$(ota_gzip_prog)" -1) ;;
@@ -671,16 +654,12 @@ function ota_create_payload_archives_impl() {
     local payload_id
 
     if [[ "${ota_security_mode}" == "secure-boot-encrypted-rootfs" ]]; then
-        # Raw-FIT/secure payload (v0.8): the boot payload is the signed
-        # boot.itb instead of a boot partition tree, but the identity flow
-        # below is shared with plain -- without a PAYLOAD_ID the device side
-        # refuses the package (recovery_check_package_metadata) and no
-        # campaign can ever arm. The boot tree for the identity is the FIT
-        # itself (hardlinked -- same bytes, no multi-MB copy); clearing
-        # boot_partition skips the ext4 staging, the boot.tar seal and the
-        # /boot stamp in the shared tail (the applier dd-writes boot.itb to
-        # the raw partition via write_raw_boot_itb, and the health service
-        # skips the /boot marker check on raw-fit layouts).
+        # Raw-FIT payload: the signed boot.itb replaces the boot tree, but
+        # the identity flow stays shared with plain -- no PAYLOAD_ID and the
+        # device refuses the package, no campaign can arm. The identity tree
+        # is a hardlink to the FIT itself; the applier dd-writes boot.itb
+        # (write_raw_boot_itb) and the health service skips the /boot marker
+        # check on raw-fit layouts.
         OTA_BOOT_KIND="itb"
         ota_copy_secure_boot_itb "${ota_temp_dir}" || return 1
         mkdir -p "${boot_stage}"
@@ -754,15 +733,11 @@ function ota_create_payload_archives_impl() {
             display_alert "OTA payload identity" "failed to stamp boot payload-id" "warn"
     fi
 
-    # 5) capacity stamps for the device-side gate (ota_check_payload_capacity
-    #    in common.sh): apparent-size bytes of exactly what gets extracted
-    #    into each target partition. The rootfs measure mirrors the payload
-    #    tar's --one-file-system + exclude list (run from inside MOUNT with
-    #    the same relative patterns), so it cannot count the mounted boot
-    #    partition or runtime mounts, and it uses the same measurement basis
-    #    as the build framework's rootfs_size (partition sizing and the gate
-    #    agree on units). The boot measure is the staged boot tree itself
-    #    (the raw-FIT hardlink counts once).
+    # 5) capacity stamps for the device-side gate (ota_check_payload_capacity):
+    # apparent-size bytes of exactly what gets extracted per partition. The
+    # rootfs measure mirrors the payload tar's --one-file-system + exclude
+    # patterns from inside MOUNT (same units as the framework's rootfs_size);
+    # the boot measure is the staged tree (the raw-FIT hardlink counts once).
     OTA_ROOTFS_BYTES="$(
         cd "${MOUNT}" 2>/dev/null && du --apparent-size -sb --one-file-system \
             --exclude="./dev" --exclude="./proc" --exclude="./sys" \
@@ -802,7 +777,7 @@ function ota_finalize_payload_package() {
     mkdir -p "${DEST}/images/${BOARD}/ota/"
 
     ota_write_package_env "${ota_temp_dir}" "${manifest_mode}"
-    ota_write_payload_env "${ota_temp_dir}" "${manifest_mode}"
+    ota_stage_payload_env "${ota_temp_dir}" "${manifest_mode}"
     ota_write_version_file "${ota_temp_dir}" "${base_image_name}"
 
     if ota_payload_encryption_enabled; then
@@ -832,6 +807,26 @@ function ota_finalize_payload_package() {
 
 # Build Hooks (execution order)
 
+# Packaging steps between temp-dir creation and the single cleanup site.
+function ota_payload_packaging_pipeline() {
+    local ota_temp_dir="$1"
+    local ota_security_mode="$2"
+    local resolved_boot_partition=""
+
+    ota_resolve_boot_partition "${ota_security_mode}" resolved_boot_partition || return 1
+    ota_report_payload_sources "${ota_security_mode}" "${resolved_boot_partition}"
+
+    ota_create_payload_archives "${ota_temp_dir}" "${ota_security_mode}" \
+        "${resolved_boot_partition}" || return 1
+
+    if ota_payload_encryption_enabled; then
+        ota_require_host_tools openssl od || return 1
+        ota_encrypt_rootfs_payload "${ota_temp_dir}" || return 1
+    fi
+
+    ota_finalize_payload_package "${ota_temp_dir}" "${ota_security_mode}" || return 1
+}
+
 function pre_umount_final_image__901_create_ota_payload_pkg() {
 
     display_alert "pre_umount_final_image__901 Extracting partition images from loop device" "Detecting and extracting partitions from ${LOOP}" "info"
@@ -851,58 +846,29 @@ function pre_umount_final_image__901_create_ota_payload_pkg() {
         display_alert "Encrypted auto-decrypt OTA" "Non-secure boot mode: use mapper rootfs and package plain boot partition" "info"
     fi
 
-    ota_require_host_tools \
-        tar mount umount mountpoint lsblk grep sort blkid blockdev stat find wc \
-        sha256sum md5sum awk cp head basename cat date mkdir rm || return 1
-
-    if [[ "${OTA_PAYLOAD_COMP}" == "xz" ]] && ! ota_require_host_tools xz; then
-        return 1
-    fi
-    if [[ "${OTA_PAYLOAD_COMP}" == "zstd" ]] && ! ota_require_host_tools zstd; then
-        return 1
-    fi
+    local -a required_tools=(
+        tar mount umount mountpoint lsblk grep sort blkid blockdev stat find wc
+        sha256sum md5sum awk cp head basename cat date mkdir rm
+    )
+    case "${OTA_PAYLOAD_COMP}" in
+        xz)   required_tools+=(xz) ;;
+        zstd) required_tools+=(zstd) ;;
+    esac
+    ota_require_host_tools "${required_tools[@]}" || return 1
 
     # Create a fresh temporary directory for OTA package building.
     local ota_temp_dir="${WORKDIR}/ota_package_build_$$"
     ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
     mkdir -p "${ota_temp_dir}" || return 1
 
-    # Check if loop device exists
     if [[ ! -b "${LOOP}" ]]; then
         display_alert "Error: Loop device not found" "${LOOP}" "err"
         ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
         return 1
     fi
 
-    local resolved_boot_partition=""
-
-    ota_resolve_boot_partition "${ota_security_mode}" resolved_boot_partition || {
-        ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-        return 1
-    }
-    ota_report_payload_sources "${ota_security_mode}" "${resolved_boot_partition}"
-
-    ota_create_payload_archives "${ota_temp_dir}" "${ota_security_mode}" \
-        "${resolved_boot_partition}" || {
-        ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-        return 1
-    }
-
-    if ota_payload_encryption_enabled; then
-        ota_require_host_tools openssl od || {
-            ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-            return 1
-        }
-        ota_encrypt_rootfs_payload "${ota_temp_dir}" || {
-            ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-            return 1
-        }
-    fi
-
-    ota_finalize_payload_package "${ota_temp_dir}" "${ota_security_mode}" || {
-        ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-        return 1
-    }
-
+    ota_payload_packaging_pipeline "${ota_temp_dir}" "${ota_security_mode}"
+    local rc=$?
     ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
+    return "${rc}"
 }

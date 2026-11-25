@@ -346,12 +346,8 @@ run_campaign() {
     if [ -n "${OTA_HOOK_PATH}" ] && type hook_apply >/dev/null 2>&1; then
         log "hook_apply takes over payload application"
         ota_capture_pre_ota_env
-        start_heartbeat "OTA hook hook_apply running"
-        hook_apply
-        hook_rc=$?
-        stop_heartbeat
-        [ "${hook_rc}" -eq 0 ] ||
-            campaign_fail "hook_apply failed rc=${hook_rc}"
+        ota_run_step "OTA hook hook_apply running" hook_apply ||
+            campaign_fail "hook_apply failed rc=$?"
         if [ "${HAS_BOOT_PART:-0}" -eq 1 ] && ! mountpoint -q "${BOOT_MNT:-/mnt/boot}"; then
             BOOT_MNT="/mnt/boot"
             mkdir -p "${BOOT_MNT}"

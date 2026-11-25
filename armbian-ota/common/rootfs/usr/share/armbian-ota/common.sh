@@ -112,6 +112,8 @@ ota_check_staging_free_space() {
     local directory="$1" package_path="$2" extra_bytes="${3:-0}"
     local avail need payload_bytes margin
 
+    load_package_env_metadata "${package_path}" ||
+        error_exit "Cannot read OTA package metadata for staging estimation: ${package_path}"
     avail="$(df -B1 --output=avail "${directory}" 2>/dev/null | tail -n1)"
     [ -n "${avail}" ] || error_exit "Cannot read OTA staging free space: ${directory}"
     payload_bytes="$(ota_staging_payload_bytes "${package_path}")" || return 1
@@ -123,12 +125,25 @@ ota_check_staging_free_space() {
     log_info "Space gate: staging ${directory} avail=${avail} need=${need} (staged=${payload_bytes}, backup=${extra_bytes}, margin=${margin})"
 }
 
+# df is the last resort (findmnt unavailable); callers validate the result.
+ota_root_mount_source() {
+    findmnt -n -o SOURCE /media/root-ro 2>/dev/null ||
+        findmnt -n -o SOURCE / 2>/dev/null ||
+        df / | awk 'NR==2 {print $1}'
+}
+
+# Single key from /etc/armbian-image-release, empty when absent.
+ota_image_release_field() {
+    local key="$1"
+
+    sed -n "s/^${key}=//p" /etc/armbian-image-release 2>/dev/null | head -n1
+}
+
 ota_system_encrypted() {
     local src
 
     [ -s /run/armbian-luks-passphrase ] && return 0
-    src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-    [ -n "${src}" ] || src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    src="$(ota_root_mount_source || true)"
     case "${src}" in
         /dev/mapper/*|/dev/dm-*) return 0 ;;
     esac
@@ -174,8 +189,8 @@ ota_check_board_release() {
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
     # Snapshot only: armbian-release is package-owned and can drift.
-    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
-    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    sys_board="$(ota_image_release_field BOARD)"
+    sys_release="$(ota_image_release_field RELEASE)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -194,7 +209,7 @@ ota_check_image_variant() {
     local package_variant system_variant
 
     package_variant="$(package_env_get_value "IMAGE_VARIANT" || true)"
-    system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    system_variant="$(ota_image_release_field IMAGE_VARIANT)"
     if [ -z "${package_variant}" ] || [ -z "${system_variant}" ]; then
         log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping variant gate"
         return 0
@@ -379,8 +394,7 @@ ota_source_hook() {
 
     OTA_HOOK_NAME=""
     OTA_HOOK_PATH=""
-    ota_resolve_hook_name "${work_dir}" >/dev/null 2>&1 || return 1
-    OTA_HOOK_NAME="$(ota_resolve_hook_name "${work_dir}")"
+    OTA_HOOK_NAME="$(ota_resolve_hook_name "${work_dir}")" || return 1
     OTA_HOOK_PATH="${work_dir}/${OTA_HOOK_NAME}"
     # shellcheck disable=SC1090
     . "${OTA_HOOK_PATH}" 2>/dev/null || error_exit "Failed to source OTA hook ${OTA_HOOK_PATH}"
@@ -397,7 +411,6 @@ ota_run_phase1_hooks() {
     local work_dir="$1"
 
     ota_source_hook "${work_dir}" || return 0
-    OTA_HOOK_API="${OTA_HOOK_API}"
     OTA_HOOK_MODE="$(state_get OTA_MODE 2>/dev/null || echo unknown)"
     export OTA_HOOK_API OTA_HOOK_MODE OTA_HOOK_PATH
     if ! ota_call_hook hook_after_unpack; then
@@ -549,20 +562,13 @@ package_env_get_value() {
         | grep -E "^${key}=" | tail -n1 | cut -d'=' -f2-
 }
 
-read_package_env_value() {
-    local package_path="$1"
-    local key="$2"
-
-    load_package_env_metadata "${package_path}" || return 1
-    package_env_get_value "${key}"
-}
-
 assert_package_mode_matches() {
     local package_path="$1"
     local expected_mode="$2"
     local manifest_mode
 
-    manifest_mode="$(read_package_env_value "${package_path}" "OTA_MODE" || true)"
+    load_package_env_metadata "${package_path}" || true
+    manifest_mode="$(package_env_get_value "OTA_MODE" || true)"
     if [ -z "${manifest_mode}" ]; then
         error_exit "OTA package metadata missing OTA_MODE; refusing to continue"
     fi
@@ -669,21 +675,21 @@ verify_sha256() {
     [ -n "${tmp_sha}" ] && rm -f "${tmp_sha}"
 }
 
-verify_payload_archives() {
-    local work_dir="$1"
-    local rootfs_tar="$2"
-    local rootfs_sha="$3"
-    local boot_tar="$4"
-    local boot_sha="$5"
-
-    verify_sha256 "${work_dir}/${rootfs_tar}" "${work_dir}/${rootfs_sha}" "${rootfs_tar}"
-
-    if [ -f "${work_dir}/${boot_tar}" ]; then
-        verify_sha256 "${work_dir}/${boot_tar}" "${work_dir}/${boot_sha}" "${boot_tar}"
-    fi
-}
-
 # ota_is_fit_image lives in posix.sh (shared with the initramfs).
+
+# ===== basic boot sanity (health services) ====================================
+
+# Shared pre-checks of both health services: prints one failure item per
+# line, empty output = pass. Callers own the failure policy (A/B exits,
+# recovery accumulates and reboots).
+ota_basic_boot_failures() {
+    local fs_mount
+
+    [ -r /proc/version ] || printf '%s\n' "/proc/version not readable"
+    for fs_mount in /proc /sys /dev; do
+        mountpoint -q "${fs_mount}" || printf '%s\n' "${fs_mount} not mounted"
+    done
+}
 
 # ===== raw-FIT layout probes (recovery backend + health check) ==============
 
@@ -731,9 +737,7 @@ ota_manifest_get() {
 ota_get_security_part() {
     local dev root_src part disk
 
-    root_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-    [ -n "${root_src}" ] || root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-    [ -n "${root_src}" ] || root_src="$(df / | awk 'NR==2 {print $1}')"
+    root_src="$(ota_root_mount_source || true)"
     part="${root_src}"
     case "${root_src}" in
         /dev/mapper/*|/dev/dm-*)
@@ -759,12 +763,61 @@ ota_get_security_part() {
     echo "${dev}"
 }
 
+# ===== OP-TEE keybox mechanism (shared with ab/security.sh) ==================
+
+# Restart tee-supplicant in the current rootfs namespace: a stale initramfs
+# instance still holds /dev/teepriv0, blocking keybox_app's TA access.
+# Sets OTA_TEE_PID; rc 1 = supplicant unusable. Logs go to tmpfs only.
+ota_start_tee_supplicant() {
+    OTA_TEE_PID=""
+
+    [ -x /usr/bin/tee-supplicant ] || return 0
+
+    local tee_log
+    tee_log="$(make_ota_temp_file tee-supplicant)"
+    pkill -9 -x tee-supplicant >/dev/null 2>&1 || true
+    sleep 1
+    /usr/bin/tee-supplicant >"${tee_log}" 2>&1 &
+    OTA_TEE_PID="$!"
+    sleep 1
+    if ! kill -0 "${OTA_TEE_PID}" 2>/dev/null; then
+        [ -s "${tee_log}" ] && log_error "tee-supplicant log: $(tail -n1 "${tee_log}")"
+        rm -f "${tee_log}"
+        return 1
+    fi
+    rm -f "${tee_log}"
+    return 0
+}
+
+ota_stop_tee_supplicant() {
+    if [ -n "${OTA_TEE_PID}" ] && kill -0 "${OTA_TEE_PID}" 2>/dev/null; then
+        kill "${OTA_TEE_PID}" >/dev/null 2>&1 || true
+        wait "${OTA_TEE_PID}" 2>/dev/null || true
+    fi
+    OTA_TEE_PID=""
+}
+
+# One keybox_app invocation with the supplicant up: rc 2 = supplicant
+# unusable, 1 = keybox_app failed. keybox_app writes its result to
+# OTA_SYSPW_FILE.
+ota_run_keybox_app() {
+    local keybox_log rc=0
+
+    ota_start_tee_supplicant || return 2
+    keybox_log="$(make_ota_temp_file keybox)"
+    /usr/bin/keybox_app "$@" >"${keybox_log}" 2>&1 || rc=$?
+    [ "${rc}" -eq 0 ] || log_error "keybox_app failed: $(tail -n1 "${keybox_log}" 2>/dev/null)"
+    rm -f "${keybox_log}"
+    ota_stop_tee_supplicant
+    return "${rc}"
+}
+
 # Retrieve the LUKS passphrase into out_file (mode 600). Read-only (no keybox
 # migration): OTA only needs the current passphrase to derive the payload key.
 # Mirrors the initramfs decryption-disk.sh raw / SSKR behavior.
 ota_get_security_passphrase_file() {
     local out_file="$1"
-    local security_dev marker tee_log keybox_log tee_pid
+    local security_dev marker
 
     [ -n "${out_file}" ] || return 1
     : > "${out_file}" || return 1
@@ -787,26 +840,11 @@ ota_get_security_passphrase_file() {
 
     if [ "${marker}" = "SSKR" ]; then
         [ -x /usr/bin/keybox_app ] || { log_error "SSKR marker but /usr/bin/keybox_app missing"; return 1; }
-        tee_log="$(make_ota_temp_file tee-supplicant)"
-        keybox_log="$(make_ota_temp_file keybox)"
-        if [ -x /usr/bin/tee-supplicant ]; then
-            pkill -9 -x tee-supplicant >/dev/null 2>&1 || true
-            sleep 1
-            /usr/bin/tee-supplicant >"${tee_log}" 2>&1 &
-            tee_pid="$!"
-            sleep 1
-        fi
         rm -f "${OTA_SYSPW_FILE}" 2>/dev/null || true
-        if ! /usr/bin/keybox_app >"${keybox_log}" 2>&1; then
-            [ -n "${tee_pid}" ] && kill "${tee_pid}" 2>/dev/null || true
-            log_error "keybox_app read failed: $(tail -n1 "${keybox_log}" 2>/dev/null)"
-            rm -f "${tee_log}" "${keybox_log}"
-            return 1
-        fi
-        [ -n "${tee_pid}" ] && { kill "${tee_pid}" 2>/dev/null || true; wait "${tee_pid}" 2>/dev/null || true; }
-        [ -s "${OTA_SYSPW_FILE}" ] || { log_error "keybox_app produced no passphrase"; rm -f "${tee_log}" "${keybox_log}"; return 1; }
-        cp "${OTA_SYSPW_FILE}" "${out_file}" || { rm -f "${OTA_SYSPW_FILE}" "${tee_log}" "${keybox_log}"; return 1; }
-        rm -f "${OTA_SYSPW_FILE}" "${tee_log}" "${keybox_log}"
+        ota_run_keybox_app || { rm -f "${OTA_SYSPW_FILE}" 2>/dev/null || true; return 1; }
+        [ -s "${OTA_SYSPW_FILE}" ] || { log_error "keybox_app produced no passphrase"; return 1; }
+        cp "${OTA_SYSPW_FILE}" "${out_file}" || return 1
+        rm -f "${OTA_SYSPW_FILE}" 2>/dev/null || true
         return 0
     fi
 
@@ -915,7 +953,10 @@ ota_verify_payload() {
         ota_process_encrypted_payload "${work_dir}" "${rootfs_tar}"
     fi
 
-    verify_payload_archives "${work_dir}" "${rootfs_tar}" "${rootfs_sha}" "${boot_tar}" "${boot_sha}"
+    verify_sha256 "${work_dir}/${rootfs_tar}" "${work_dir}/${rootfs_sha}" "${rootfs_tar}"
+    if [ -f "${work_dir}/${boot_tar}" ]; then
+        verify_sha256 "${work_dir}/${boot_tar}" "${work_dir}/${boot_sha}" "${boot_tar}"
+    fi
 
     if [ -f "${work_dir}/${boot_itb}" ]; then
         verify_sha256 "${work_dir}/${boot_itb}" "${work_dir}/${boot_sha}" "${boot_itb}"

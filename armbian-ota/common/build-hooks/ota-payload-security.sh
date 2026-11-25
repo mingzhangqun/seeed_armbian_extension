@@ -1,16 +1,10 @@
-# OTA payload encryption + signing build hooks.
-#
-# When the rootfs is encrypted (CRYPTROOT_ENABLE=yes + RK_AUTO_DECRYP=yes) the
-# OTA payload (rootfs.tar.gz) is itself plaintext, which leaks the full rootfs
-# over the distribution channel and defeats LUKS at-rest protection. These
-# helpers let the packaging stage encrypt the payload (AES-256-CBC, key derived
-# via HKDF from the LUKS passphrase) and sign a manifest with the secure-boot
-# RSA key, so the device can both decrypt and authenticate the update.
-#
-# Decryption and signature verification happen on-device in the rootfs runtime
-# phase (A/B ab_start_ota / Recovery recovery_start_ota). The Recovery initramfs
-# apply stage only extracts the already-decrypted plaintext tar, so no openssl
-# is needed in the initramfs.
+# OTA payload encryption + signing.
+
+# Encrypted rootfs still ships a plaintext payload tar (leaks the rootfs
+# over the distribution channel): encrypt it (AES-256-CBC, HKDF key from
+# the LUKS passphrase) and sign the manifest with the secure-boot RSA key.
+# Decryption + verification run on-device (ab_start_ota /
+# recovery_start_ota); the initramfs extracts only the decrypted tar.
 
 # Payload encryption mirrors the on-device auto-decrypt capability: only when
 # the device can retrieve the passphrase unattended (security partition /

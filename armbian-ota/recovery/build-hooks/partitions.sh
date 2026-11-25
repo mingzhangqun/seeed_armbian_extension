@@ -1,10 +1,7 @@
 # Recovery partition layout and policy
 
 function extension_prepare_config__install_recovery_ota() {
-    ota_install_overlayroot_dependencies
-    # zstd packs/unpacks the lazy backup and OTA payloads; fw_env tools come
-    # from the distro repo, same as A/B.
-    add_packages_to_image libubootenv-tool zstd
+    ota_install_ota_dependencies
 }
 
 function pre_prepare_partitions__recovery_ota() {
@@ -14,16 +11,12 @@ function pre_prepare_partitions__recovery_ota() {
     ROOTFS_TYPE="ext4"
     ROOT_FS_LABEL="armbi_root"
 
-    # Recovery images always carry a dedicated /boot partition so that U-Boot
-    # reads boot files (armbianEnv.txt, Image, uInitrd, dtb) directly from a
-    # plain ext4 partition instead of the overlayfs-backed rootfs lower layer.
-    # At runtime the boot partition is mounted on top of overlayfs via fstab,
-    # which makes runtime /boot writes (apt kernel upgrades, manual tweaks,
-    # armbian-ota tooling) visible to U-Boot on the next boot.
-    #
-    # Raw boot mode (secure boot, BOOT_RAW_MODE=yes) keeps using a raw FIT
-    # partition; rk-secure-boot.sh clears `bootpart` after partition creation
-    # so Armbian's standard mkfs/mount path is skipped for it.
+    # Recovery always carries a dedicated /boot partition: U-Boot reads boot
+    # files from plain ext4, not the overlayfs-backed rootfs lower layer; at
+    # runtime it mounts on top of overlayfs via fstab, so /boot writes (apt
+    # kernel upgrades, armbianEnv.txt, OTA tooling) reach U-Boot next boot.
+    # Raw boot mode keeps the raw FIT partition instead; rk-secure-boot.sh
+    # clears `bootpart` so Armbian's standard mkfs/mount path is skipped.
     if ! ota_raw_boot_enabled; then
         BOOTPART_REQUIRED="yes"
         BOOTFS_TYPE="ext4"
@@ -113,11 +106,6 @@ function format_partitions__recovery_ota() {
         return 0
     fi
 
-    local userdata_dev="${LOOP}p${RECOVERY_USERDATA_PART_INDEX}"
-    if ota_encrypted_rootfs_enabled; then
-        ota_partition_format_luks_ext4 "Recovery OTA" "${userdata_dev}" \
-            "armbian-recovery-userdata-build" "armbi_usrdata" "userdata"
-    else
-        ota_partition_format_ext4 "Recovery OTA" "${userdata_dev}" "armbi_usrdata" "userdata"
-    fi
+    ota_format_userdata_partition "Recovery OTA" "${LOOP}p${RECOVERY_USERDATA_PART_INDEX}" \
+        "armbian-recovery-userdata-build"
 }

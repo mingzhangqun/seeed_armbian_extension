@@ -122,6 +122,11 @@ ota_detect_devices() {
     # which previously made blkid miss LABEL=armbi_root and silently skip OTA.
     udevadm settle --timeout=10 2>/dev/null || true
 
+    # Boot-disk anchor from the cmdline tokens, resolved once: every scoped
+    # lookup below reuses it (fw_env_boot_disk is pure cmdline input, so the
+    # value cannot change mid-probe).
+    boot_disk="$(fw_env_boot_disk || true)"
+
     # Command-line root= of this boot, parsed once: the auto-decrypt gate
     # below and the standard-mode root detection further down both consume it.
     cmdline_root=""
@@ -162,10 +167,10 @@ ota_detect_devices() {
             luks_root_dev=""
             case "${cmdline_root}" in
                 UUID=*)
-                    luks_root_dev="$(ota_blkid_first_on_disk "UUID=${cmdline_root#UUID=}" "$(fw_env_boot_disk || true)")"
+                    luks_root_dev="$(ota_blkid_first_on_disk "UUID=${cmdline_root#UUID=}" "${boot_disk}")"
                     ;;
                 LABEL=*)
-                    luks_root_dev="$(get_dev_and_uuid_by_label "${cmdline_root#LABEL=}" "$(fw_env_boot_disk || true)" || true)"
+                    luks_root_dev="$(get_dev_and_uuid_by_label "${cmdline_root#LABEL=}" "${boot_disk}" || true)"
                     luks_root_dev="${luks_root_dev%% *}"
                     ;;
                 /dev/*)
@@ -199,7 +204,7 @@ ota_detect_devices() {
         log "no auto-decrypt signal (mapper, cmdline root=/cryptdevice=), using standard recovery OTA mode"
     fi
 
-    boot_info="$(get_dev_and_uuid_by_label "armbi_boot" "$(fw_env_boot_disk || true)" || true)"
+    boot_info="$(get_dev_and_uuid_by_label "armbi_boot" "${boot_disk}" || true)"
 
     if [ "${AUTO_DECRYPT_MODE}" -eq 0 ]; then
         # Standard mode root detection, in anchoring order:
@@ -241,7 +246,7 @@ ota_detect_devices() {
                     _cdev=""
                     _i=0
                     while [ "${_i}" -lt 10 ]; do
-                        _cdev="$(ota_blkid_first_on_disk "UUID=${_cuuid}" "$(fw_env_boot_disk || true)")"
+                        _cdev="$(ota_blkid_first_on_disk "UUID=${_cuuid}" "${boot_disk}")"
                         [ -n "${_cdev}" ] && break
                         sleep 1
                         _i=$((_i + 1))
@@ -254,7 +259,7 @@ ota_detect_devices() {
                     ;;
                 LABEL=*)
                     _clbl="${cmdline_root#LABEL=}"
-                    _cinfo="$(get_dev_and_uuid_by_label "${_clbl}" "$(fw_env_boot_disk || true)" || true)"
+                    _cinfo="$(get_dev_and_uuid_by_label "${_clbl}" "${boot_disk}" || true)"
                     [ -n "${_cinfo}" ] && root_info="${_cinfo}"
                     ;;
                 /dev/*)
@@ -270,7 +275,7 @@ ota_detect_devices() {
 
         if [ -z "${root_info}" ]; then
             log "cmdline root= unavailable or unresolved, fallback to LABEL=armbi_root"
-            root_info="$(get_dev_and_uuid_by_label "armbi_root" "$(fw_env_boot_disk || true)" || true)"
+            root_info="$(get_dev_and_uuid_by_label "armbi_root" "${boot_disk}" || true)"
         fi
 
         if [ -n "${root_info}" ]; then

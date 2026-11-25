@@ -1,9 +1,5 @@
 # Recovery OTA rootfs and initramfs installation hooks
 
-readonly OTA_ROOTFS_RUNTIME_DIR="usr/share/armbian-ota"
-readonly OTA_COMMON_INITRAMFS="${OTA_SUPPORT_DIR}/common/initramfs"
-
-
 # fw_setenv -f rebuild base; 99-copy-tools stages it into the initramfs.
 function ota_recovery_write_initial_env() {
     local root_dir="$1" default_env
@@ -22,57 +18,17 @@ function ota_recovery_write_initial_env() {
 
 function ota_install_recovery_runtime_to_rootfs() {
     local root_dir="$1"
+    local title="Recovery OTA runtime"
 
     ota_install_common_runtime_to_rootfs "${root_dir}" || return 1
-    ota_sync_rootfs "Recovery OTA runtime" "${OTA_RECOVERY_ROOTFS}" "${root_dir}"
+    ota_sync_rootfs "${title}" "${OTA_RECOVERY_ROOTFS}" "${root_dir}"
     ota_recovery_write_initial_env "${root_dir}" || return 1
-
-    display_alert "Recovery OTA runtime" "Enabling firstboot hook service" "info"
-    chroot "${root_dir}" systemctl enable armbian-ota-firstboot-hook.service \
-        || display_alert "Recovery OTA runtime" "Failed to enable armbian-ota-firstboot-hook.service" "warn"
-
-    display_alert "Recovery OTA runtime" "Enabling health confirmation service" "info"
-    chroot "${root_dir}" systemctl enable armbian-ota-health.service \
-        || display_alert "Recovery OTA runtime" "Failed to enable armbian-ota-health.service" "warn"
+    ota_enable_rootfs_service "${root_dir}" armbian-ota-firstboot-hook.service "${title}"
+    ota_enable_rootfs_service "${root_dir}" armbian-ota-health.service "${title}"
 }
 
-function ota_install_recovery_initramfs_file() {
-    local source="$1" destination="$2" mode="$3"
-
-    [[ -f "${source}" ]] || {
-        display_alert "Recovery OTA initramfs" "Missing source file: ${source}" "err"
-        return 1
-    }
-    install -D -m "${mode}" "${source}" "${destination}" || {
-        display_alert "Recovery OTA initramfs" "Failed to install: ${source}" "err"
-        return 1
-    }
-}
-
-# Install Seeed OTA *common* initramfs pieces shared by recovery and A/B
-# images: the userdata resolver (00-seeed-bind-userdata) plus its hook and
-# helper library. Anchoring userdata to the boot disk must happen in both
-# modes or root-rw ends up on the wrong disk when multiple disks carry the
-# same image.
-function ota_install_common_initramfs() {
-    local root_dir="$1"
-    local title="Seeed OTA common initramfs"
-    local -a common_initramfs_file_list=(
-        "hooks/98-seeed-bind-userdata:etc/initramfs-tools/hooks/98-seeed-bind-userdata:0755"
-        "scripts/init-bottom/00-seeed-bind-userdata:etc/initramfs-tools/scripts/init-bottom/00-seeed-bind-userdata:0755"
-        "scripts/init-bottom/zz-seeed-mount-boot:etc/initramfs-tools/scripts/init-bottom/zz-seeed-mount-boot:0755"
-    )
-    local entry source_path destination_path mode
-
-    display_alert "${title}" "Installing userdata resolver" "info"
-    for entry in "${common_initramfs_file_list[@]}"; do
-        IFS=: read -r source_path destination_path mode <<< "${entry}"
-        ota_install_recovery_initramfs_file \
-            "${OTA_COMMON_INITRAMFS}/${source_path}" \
-            "${root_dir}/${destination_path}" "${mode}" || return 1
-    done
-}
-
+# The /boot fstab entry is removed by pre_update_initramfs__896 below;
+# zz-seeed-mount-boot (initramfs) mounts /boot anchored to the rootfs disk.
 function ota_install_recovery_initramfs() {
     local root_dir="$1"
     local title="Recovery OTA initramfs"
@@ -84,18 +40,14 @@ function ota_install_recovery_initramfs() {
         "recovery/device.sh:etc/initramfs-tools/ota/recovery/device.sh:0644"
         "recovery/payload.sh:etc/initramfs-tools/ota/recovery/payload.sh:0644"
     )
-    local entry source_path destination_path mode
 
     display_alert "${title}" "Preparing recovery OTA hooks for initramfs" "info"
 
-    ota_install_common_initramfs "${root_dir}" || return 1
+    ota_install_common_initramfs "${root_dir}" \
+        "scripts/init-bottom/zz-seeed-mount-boot:etc/initramfs-tools/scripts/init-bottom/zz-seeed-mount-boot:0755" || return 1
 
-    for entry in "${initramfs_file_list[@]}"; do
-        IFS=: read -r source_path destination_path mode <<< "${entry}"
-        ota_install_recovery_initramfs_file \
-            "${OTA_RECOVERY_INITRAMFS}/${source_path}" \
-            "${root_dir}/${destination_path}" "${mode}" || return 1
-    done
+    ota_install_file_list "${title}" "${OTA_RECOVERY_INITRAMFS}" "${root_dir}" \
+        "${initramfs_file_list[@]}" || return 1
 }
 
 function pre_update_initramfs__894_install_recovery_ota_hooks() {
@@ -112,13 +64,11 @@ function pre_update_initramfs__894_install_recovery_ota_hooks() {
 }
 
 # Remove the /boot fstab entry: /boot is mounted by the initramfs
-# (zz-seeed-mount-boot, anchored to the rootfs disk) instead. A fstab source
-# is unworkable in multi-disk clone setups -- a UUID flips between clones
-# through udev's duplicate-UUID symlinks, and a hand-made /dev symlink never
-# satisfies systemd's udev-backed device unit (observed as a ~90s stall in
-# "Expecting device dev-armbian-boot.device" and unbootable eMMC images).
-# Raw-FIT (secure boot) layouts never get a /boot entry, so the grep does not
-# match there.
+# (zz-seeed-mount-boot, anchored to the rootfs disk) instead. Any fstab
+# source is racy on multi-disk clones -- a UUID flips between clones through
+# udev's duplicate-UUID symlinks (observed: ~90s stall on "Expecting device
+# dev-armbian-boot.device", unbootable eMMC images). Raw-FIT layouts never
+# get a /boot entry, so the grep does not match there.
 function pre_update_initramfs__896_recovery_boot_anchor_fstab() {
     local fstab="${MOUNT}/etc/fstab"
 

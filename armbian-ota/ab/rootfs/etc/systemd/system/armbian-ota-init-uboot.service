@@ -1,7 +1,6 @@
 [Unit]
 Description=Initialize u-boot environment for AB OTA
-Documentation=https://docs.armbian.com
-# Run as early as possible after local filesystem is mounted
+Documentation=file:///usr/share/armbian-ota
 DefaultDependencies=no
 After=local-fs.target
 Before=armbian-ota-firstboot.service
@@ -13,8 +12,6 @@ Before=multi-user.target
 Type=oneshot
 ExecStart=/usr/lib/armbian/armbian-ota-init-uboot
 RemainAfterExit=yes
-# Allow service to fail without preventing boot
-Restart=no
 
 [Install]
 WantedBy=multi-user.target
