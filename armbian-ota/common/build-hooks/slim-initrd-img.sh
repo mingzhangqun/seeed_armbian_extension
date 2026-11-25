@@ -3,9 +3,6 @@
 #
 # Rationale:
 #   - Rockchip U-Boot loads uInitrd-* (mkimage-wrapped), never initrd.img-*.
-#   - boot-atomic-swap.h's bsw_classify already skips initrd.img* in the OTA
-#     payload, so once this hook removes the file from the golden image the
-#     OTA path stops shipping it too (payload is staged from /boot).
 #   - rk_secure_boot_find_ramdisk was reworked to prefer uInitrd-* (stripping
 #     the 64-byte mkimage header) when initrd.img-* is absent, so secure-boot
 #     FIT packaging keeps working without the raw file.

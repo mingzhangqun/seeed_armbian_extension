@@ -225,8 +225,8 @@ EOF
         itb|tar) echo "BOOT_KIND=${OTA_BOOT_KIND}" >> "${ota_mode_file}" ;;
     esac
     # OTA_BOOT_REFRESH=0 defers the built-in boot-partition refresh to the
-    # package hook (recovery/hooks/boot-atomic-swap.sh); absent or 1 keeps the
-    # legacy built-in extract (docs/10-ota-package-formats.md).
+    # package hook (OTA_HOOK_SCRIPT); absent or 1 keeps the legacy built-in
+    # extract (docs/10-ota-package-formats.md).
     if [[ -n "${OTA_BOOT_REFRESH:-}" ]]; then
         echo "OTA_BOOT_REFRESH=${OTA_BOOT_REFRESH}" >> "${ota_mode_file}"
     fi
@@ -643,10 +643,8 @@ EOF
     }
 }
 
-# Wrapper: the staging dirs are removed on EVERY exit path (the impl's early
-# returns used to duplicate the rm six times and miss two failure paths).
-# Refuse to rm through a still-mounted boot_mount: an impl umount failure
-# leaves it live and rm -rf would gut the image's boot partition content.
+# Wrapper: removes the staging dirs on every exit path; never rm through
+# a still-mounted boot_mount (would gut the image's boot partition).
 function ota_create_payload_archives() {
     local ota_temp_dir="${1:-}"
     if [[ -z "${ota_temp_dir}" ]]; then
@@ -710,11 +708,8 @@ function ota_create_payload_archives_impl() {
             umount "${boot_mount}" 2>/dev/null || true
             return 1
         }
-        # Recovery preserves its rescuer on the target ext4 boot partition
-        # while excluding it from the payload tar; measure it while the
-        # partition is still mounted so the capacity stamp covers it.
-        # Measurement failure degrades like the sibling stamps (warn +
-        # omit), never aborts with the partition still mounted.
+        # Preserved rescue/ never ships in the payload tar; measure it while
+        # mounted so BOOT_BYTES covers it (failure degrades: warn + omit).
         if [[ -d "${boot_mount}/recovery" ]]; then
             rescue_bytes="$(du --apparent-size -sb "${boot_mount}/recovery" 2>/dev/null | tail -n1 | cut -f1)"
             if [[ ! "${rescue_bytes:-}" =~ ^[0-9]+$ ]]; then
