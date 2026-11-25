@@ -550,7 +550,7 @@ ab_update_target_partition() {
 
     if [ "${target_root_type}" = "crypto_LUKS" ]; then
         command -v cryptsetup >/dev/null 2>&1 || error_exit "cryptsetup is required for encrypted AB OTA target partition"
-        security_dev="$(ab_get_security_part)"
+        security_dev="$(ota_get_security_part)"
         [ -n "${security_dev}" ] || error_exit "Security partition not found for encrypted AB OTA"
 
         key_file="$(make_ota_temp_file "ab-key")"
