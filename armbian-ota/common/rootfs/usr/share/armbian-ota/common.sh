@@ -173,11 +173,9 @@ ota_check_board_release() {
     [ -n "${board}" ] || error_exit "OTA package metadata missing BOARD; refusing"
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
-    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
-    # Release truth: identity-file stamp; legacy falls back to /etc/armbian-release.
+    # Snapshot only: armbian-release is package-owned and can drift.
+    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
     sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
-    [ -n "${sys_release}" ] ||
-        sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -196,12 +194,9 @@ ota_check_image_variant() {
     local package_variant system_variant
 
     package_variant="$(package_env_get_value "IMAGE_VARIANT" || true)"
-    # Legacy devices pre-date the armbian-image-release stamp.
     system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
-    [ -n "${system_variant}" ] ||
-        system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
     if [ -z "${package_variant}" ] || [ -z "${system_variant}" ]; then
-        log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping legacy variant gate"
+        log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping variant gate"
         return 0
     fi
     [ "${package_variant}" = "${system_variant}" ] ||

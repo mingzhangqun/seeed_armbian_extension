@@ -45,38 +45,10 @@ function ota_payload_compress_archive() {
     esac
 }
 
-# Deterministic tree hash over a boot staging tree: every file's sha256 in
-# sorted path order, folded into one digest. payload-id is excluded so the
-# identity never hashes its own container. MIRROR of ota_payload_tree_hash in
-# recovery/backend.sh -- the OTA package and the on-device backup MUST derive
-# IDs from the same rule (design section 4).
-function ota_payload_tree_hash() {
-    local tree_dir="$1"
-
-    (
-        cd "${tree_dir}" || exit 1
-        find . -type f ! -name payload-id -print0 | LC_ALL=C sort -z |
-            xargs -0 -r sha256sum
-    ) | awk '{print $1"  "substr($2,3)}' | sha256sum | awk '{print $1}'
-}
-
-function ota_compute_payload_id() {
-    # NB: the sixth local must not be called "version" -- the armbian-build
-    # framework exports a readonly global of that name, so 'local version'
-    # fails ("local: version: readonly variable") and the payload id would
-    # silently hash the framework's version instead of the image's.
-    local rootfs_tar="$1"
-    local boot_tree="$2"
-    local board="$3" release="$4" kernel="$5" img_version="$6"
-    local root_sha boot_sha
-
-    root_sha="$(sha256sum "${rootfs_tar}" | awk '{print $1}')"
-    boot_sha="$(ota_payload_tree_hash "${boot_tree}")"
-
-    printf 'armbian-ota-payload-v1|R=%s|B=%s|BOARD=%s|RELEASE=%s|KERNEL=%s|VERSION=%s|HAS_ROOTFS=1\n' \
-        "${root_sha}" "${boot_sha}" "${board}" "${release}" "${kernel}" "${img_version}" |
-        sha256sum | awk '{print $1}'
-}
+# Deterministic payload identity, shared with the device side via
+# common/rootfs: package and on-device backup derive IDs from one rule.
+# shellcheck source=/dev/null
+source "${OTA_SUPPORT_DIR}/common/rootfs/usr/share/armbian-ota/payload-id.sh"
 
 function ota_payload_list_archive() {
     # $1 = archive to integrity-check (tar -t)
@@ -765,9 +737,7 @@ function ota_create_payload_archives_impl() {
 
     # 3) identity: marker into the staged boot tree, then seal boot.tar
     payload_id="$(ota_compute_payload_id \
-        "${ota_temp_dir}/rootfs.${OTA_PAYLOAD_TAR_SUFFIX}" "${boot_stage}" \
-        "${BOARD}" "${RELEASE}" "${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}" \
-        "${IMAGE_VERSION:-${REVISION}}")"
+        "${ota_temp_dir}/rootfs.${OTA_PAYLOAD_TAR_SUFFIX}" "${boot_stage}")"
     printf '%s\n' "${payload_id}" > "${boot_stage}/payload-id"
     OTA_RECOVERY_PAYLOAD_ID="${payload_id}"
 
