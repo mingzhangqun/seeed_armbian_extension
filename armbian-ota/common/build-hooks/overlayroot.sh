@@ -13,18 +13,12 @@ function ota_set_config_option() {
 }
 
 function ota_overlayroot_device_options() {
-    # recurse=0 keeps overlayfs on / only; other fstab mounts (notably the
-    # dedicated /boot partition) stay as direct mounts instead of being
-    # wrapped in a per-directory overlay whose upper layer lives on userdata.
-    # Without this, runtime /boot writes (apt kernel upgrades, armbianEnv.txt
-    # edits, OTA tooling) are captured by the overlay upper and stay invisible
-    # to U-Boot on next boot, even with a separate boot partition in place.
-    #
-    # Both modes reference /dev/armbian-userdata. The initramfs hook
-    # 00-seeed-bind-userdata creates that symlink at boot, pointing at the
-    # userdata partition on the same physical disk as the rootfs. This avoids
-    # the multi-disk race where udev's /dev/disk/by-label/armbi_usrdata flips
-    # between disks when an external drive with the same image is plugged in.
+    # recurse=0 keeps /boot (and other fstab mounts) as direct mounts: an
+    # overlaid /boot would capture runtime writes in the overlay upper and
+    # hide them from U-Boot.
+    # Both modes reference /dev/armbian-userdata, created by the initramfs
+    # 00-seeed-bind-userdata hook on the rootfs disk, dodging the multi-disk
+    # duplicate-LABEL udev race.
     if ota_encrypted_rootfs_enabled; then
         printf '%s\n' 'dev=/dev/mapper/armbian-userdata,timeout=30,recurse=0'
     else

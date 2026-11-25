@@ -1,20 +1,12 @@
-# Stage the Seeed rescue-default-env U-Boot patch (recovery OTA v0.8 design
-# section 3.4) into the userpatches overlay for EVERY build flavor.
-#
-# The patch's default bootcmd is self-routing: ota_rescue_boot boots the
-# /recovery/ assets only when they exist and falls through to
-# distro_bootcmd otherwise, so the same compiled U-Boot is correct for
-# recovery-OTA, plain and A/B images. Staging unconditionally keeps:
-#   - one stable U-Boot artifact hash across flavors sharing a checkout
-#     (patches_hash covers this location; a gated patch used to bump the
-#     artifact version and thrash the cache whenever flavors alternated);
-#   - no stale-patch risk window (the previous stage/sweep pair had to run
-#     on every single build or a recovery build's patch leaked into the
-#     next plain build's U-Boot).
-#
-# Staging targets USERPATCHES_PATH (not SRC/patch) so the framework tree
-# stays untouched. The patch versions together with the rest of the v0.8
-# pieces under this repository's release tags.
+# Stage the rescue-default-env U-Boot patch (v0.8 design section 3.4) into
+# the userpatches overlay for EVERY build flavor: the patch's bootcmd is
+# self-routing (boots /recovery/ only when present, else distro_bootcmd),
+# so one compiled U-Boot is correct for recovery, plain and A/B alike.
+
+# Unconditional staging keeps a stable artifact hash across flavors
+# (patches_hash covers this location; a gated patch thrashed the cache on
+# flavor alternation) and no stale-patch leak window. USERPATCHES_PATH
+# keeps the framework tree untouched.
 
 # Copy a U-Boot patch from patches/ into the userpatches overlay for the
 # next U-Boot compile; see the file header for why staging is unconditional.

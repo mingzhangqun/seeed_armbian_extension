@@ -64,13 +64,11 @@ function pre_update_initramfs__894_install_recovery_ota_hooks() {
 }
 
 # Remove the /boot fstab entry: /boot is mounted by the initramfs
-# (zz-seeed-mount-boot, anchored to the rootfs disk) instead. A fstab source
-# is unworkable in multi-disk clone setups -- a UUID flips between clones
-# through udev's duplicate-UUID symlinks, and a hand-made /dev symlink never
-# satisfies systemd's udev-backed device unit (observed as a ~90s stall in
-# "Expecting device dev-armbian-boot.device" and unbootable eMMC images).
-# Raw-FIT (secure boot) layouts never get a /boot entry, so the grep does not
-# match there.
+# (zz-seeed-mount-boot, anchored to the rootfs disk) instead. Any fstab
+# source is racy on multi-disk clones -- a UUID flips between clones through
+# udev's duplicate-UUID symlinks (observed: ~90s stall on "Expecting device
+# dev-armbian-boot.device", unbootable eMMC images). Raw-FIT layouts never
+# get a /boot entry, so the grep does not match there.
 function pre_update_initramfs__896_recovery_boot_anchor_fstab() {
     local fstab="${MOUNT}/etc/fstab"
 

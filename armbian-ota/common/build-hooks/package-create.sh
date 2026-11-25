@@ -1,14 +1,10 @@
 # OTA Package Creation Helpers
 
-# Payload compression selector. "xz" (default) archives the inner payload as
-# multi-block .tar.xz (xz -T0) and ships the final package as an uncompressed
-# tar: compression happens exactly once, decode parallelizes on device
-# (xz >= 5.7 threaded decompression), and metadata members are readable
-# without decompression. "gz" reproduces the legacy double-gzip layout.
-# "zstd" mirrors the xz layout with .tar.zst payloads (the target runtime
-# must list zstd in OTA_RUNTIME_FORMATS). See docs/10-ota-package-formats.md.
-# v0.8: recovery payloads pin zstd (the device-side lazy backup uses the
-# same format; one format, one extract path). A/B keeps the xz default.
+# Payload codec. xz (A/B default): multi-block .tar.xz inner payload, outer
+# plain tar -- one compression pass, decode parallelizes on device (xz >= 5.7).
+# zstd (recovery default, v0.8): pins the lazy-backup format, one extract
+# path; the runtime must list zstd in OTA_RUNTIME_FORMATS. gz reproduces the
+# legacy double-gzip layout. See docs/10-ota-package-formats.md.
 OTA_PAYLOAD_COMP_DEFAULT="xz"
 [[ "${AB_PART_OTA:-}" != "yes" ]] && OTA_PAYLOAD_COMP_DEFAULT="zstd"
 OTA_PAYLOAD_COMP="${OTA_PAYLOAD_COMP:-${OTA_PAYLOAD_COMP_DEFAULT}}"
@@ -208,10 +204,8 @@ EOF
     if [[ -n "${OTA_MIN_RUNTIME_VERSION:-}" ]]; then
         echo "MIN_RUNTIME_VERSION=${OTA_MIN_RUNTIME_VERSION}" >> "${ota_mode_file}"
     fi
-    # Capacity stamps consumed by the device-side gate (ota_check_payload_
-    # capacity). Only stamped when the build-side measurement succeeded, so
-    # absence means a pre-gate package -- which the device skips with a
-    # warning instead of refusing.
+    # Capacity stamps for the device-side gate; only stamped when measurement
+    # succeeded, so absence means a pre-gate package (device warns, not refuses).
     if [[ "${OTA_ROOTFS_BYTES:-}" =~ ^[0-9]+$ ]]; then
         echo "ROOTFS_BYTES=${OTA_ROOTFS_BYTES}" >> "${ota_mode_file}"
     fi
@@ -319,12 +313,9 @@ function ota_create_final_tarball() {
     local ota_temp_dir="$1"
     local ota_output_path="$2"
 
-    # The payload members are already compressed; the outer pass is a
-    # presentation shell (a bare .tar handed to end users reads as careless),
-    # so it always compresses -- same codec as the payload at a fast level,
-    # ratio is irrelevant. Piped codecs because tar -I takes a single-word
-    # program and the speed flags need to reach xz/zstd themselves. The
-    # on-device reader (tar -xOf) auto-detects the compression.
+    # Presentation shell around already-compressed payloads: always the
+    # payload codec at a fast level. Piped codecs because tar -I takes a
+    # single-word program; the on-device reader auto-detects compression.
     local -a outer_codec=()
     case "${OTA_PAYLOAD_COMP}" in
         gz)   outer_codec=("$(ota_gzip_prog)" -1) ;;
@@ -671,16 +662,12 @@ function ota_create_payload_archives_impl() {
     local payload_id
 
     if [[ "${ota_security_mode}" == "secure-boot-encrypted-rootfs" ]]; then
-        # Raw-FIT/secure payload (v0.8): the boot payload is the signed
-        # boot.itb instead of a boot partition tree, but the identity flow
-        # below is shared with plain -- without a PAYLOAD_ID the device side
-        # refuses the package (recovery_check_package_metadata) and no
-        # campaign can ever arm. The boot tree for the identity is the FIT
-        # itself (hardlinked -- same bytes, no multi-MB copy); clearing
-        # boot_partition skips the ext4 staging, the boot.tar seal and the
-        # /boot stamp in the shared tail (the applier dd-writes boot.itb to
-        # the raw partition via write_raw_boot_itb, and the health service
-        # skips the /boot marker check on raw-fit layouts).
+        # Raw-FIT payload: the signed boot.itb replaces the boot tree, but
+        # the identity flow stays shared with plain -- no PAYLOAD_ID and the
+        # device refuses the package, no campaign can arm. The identity tree
+        # is a hardlink to the FIT itself; the applier dd-writes boot.itb
+        # (write_raw_boot_itb) and the health service skips the /boot marker
+        # check on raw-fit layouts.
         OTA_BOOT_KIND="itb"
         ota_copy_secure_boot_itb "${ota_temp_dir}" || return 1
         mkdir -p "${boot_stage}"
@@ -754,15 +741,11 @@ function ota_create_payload_archives_impl() {
             display_alert "OTA payload identity" "failed to stamp boot payload-id" "warn"
     fi
 
-    # 5) capacity stamps for the device-side gate (ota_check_payload_capacity
-    #    in common.sh): apparent-size bytes of exactly what gets extracted
-    #    into each target partition. The rootfs measure mirrors the payload
-    #    tar's --one-file-system + exclude list (run from inside MOUNT with
-    #    the same relative patterns), so it cannot count the mounted boot
-    #    partition or runtime mounts, and it uses the same measurement basis
-    #    as the build framework's rootfs_size (partition sizing and the gate
-    #    agree on units). The boot measure is the staged boot tree itself
-    #    (the raw-FIT hardlink counts once).
+    # 5) capacity stamps for the device-side gate (ota_check_payload_capacity):
+    # apparent-size bytes of exactly what gets extracted per partition. The
+    # rootfs measure mirrors the payload tar's --one-file-system + exclude
+    # patterns from inside MOUNT (same units as the framework's rootfs_size);
+    # the boot measure is the staged tree (the raw-FIT hardlink counts once).
     OTA_ROOTFS_BYTES="$(
         cd "${MOUNT}" 2>/dev/null && du --apparent-size -sb --one-file-system \
             --exclude="./dev" --exclude="./proc" --exclude="./sys" \
