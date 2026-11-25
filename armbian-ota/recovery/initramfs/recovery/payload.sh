@@ -4,8 +4,8 @@
 #
 # Sourced by 99-ota-apply; /bin/sh + busybox.
 #
-# Expects globals from the orchestrator: ROOT_MNT, BOOT_MNT, STATE_DIR,
-# STATE_FILE, OTA_DIR, ROOTFS_TAR, BOOT_TAR, BOOT_ITB.
+# Expects globals from the orchestrator: ROOT_MNT, BOOT_MNT,
+# OTA_STAGING_DIR, OTA_DIR, ROOTFS_TAR, BOOT_TAR, BOOT_ITB.
 # Reads globals from ota_detect_devices: ROOT_DEV, ROOT_UUID, BOOT_DEV,
 # BOOT_UUID, HAS_BOOT_PART, AUTO_DECRYPT_MODE.
 # Sets globals: HAS_BOOT_TAR, HAS_BOOT_ITB, DO_BOOT_OTA, BOOT_MNT (reassigned).
@@ -139,9 +139,9 @@ ota_save_pre_ota_env() {
     src="$1"
 
     cp "${src}" "${LOGDIR}/armbianEnv.pre-ota" || return 1
-    if [ ! -f "${STAGING_DIR}/armbianEnv.pre-ota" ]; then
-        mkdir -p "${STAGING_DIR}" 2>/dev/null
-        cp "${src}" "${STAGING_DIR}/armbianEnv.pre-ota" 2>/dev/null ||
+    if [ ! -f "${OTA_STAGING_DIR}/armbianEnv.pre-ota" ]; then
+        mkdir -p "${OTA_STAGING_DIR}" 2>/dev/null
+        cp "${src}" "${OTA_STAGING_DIR}/armbianEnv.pre-ota" 2>/dev/null ||
             log "WARN: cannot persist pre-OTA armbianEnv to staging; RAM copy only"
     fi
     return 0
@@ -533,8 +533,8 @@ ota_patch_config() {
         # Staging copy wins over RAM: it survives the power-cut window
         # between the boot clear and this merge (ota_save_pre_ota_env).
         OTA_OLD_ENV="${LOGDIR}/armbianEnv.pre-ota"
-        if [ -f "${STAGING_DIR}/armbianEnv.pre-ota" ]; then
-            OTA_OLD_ENV="${STAGING_DIR}/armbianEnv.pre-ota"
+        if [ -f "${OTA_STAGING_DIR}/armbianEnv.pre-ota" ]; then
+            OTA_OLD_ENV="${OTA_STAGING_DIR}/armbianEnv.pre-ota"
         fi
         if [ -f "${OTA_OLD_ENV}" ] && grep -q '^overlays=' "${OTA_OLD_ENV}"; then
             old_overlays="$(ota_env_get_key "${OTA_OLD_ENV}" overlays)"

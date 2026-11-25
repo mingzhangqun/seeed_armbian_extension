@@ -41,10 +41,10 @@ ROOT_MNT="/mnt/root"
 BOOT_MNT="/mnt/boot"
 USERDATA_MNT="/mnt/userdata"
 RECOVERY_TRANSACTION_DIR="${USERDATA_MNT}/ota-recovery"
-PAYLOADS_DIR="${RECOVERY_TRANSACTION_DIR}/payloads"
-STAGING_DIR="${RECOVERY_TRANSACTION_DIR}/staging"
-STATE_DIR="${RECOVERY_TRANSACTION_DIR}/state"
-STATE_FILE="${STATE_DIR}/ota-state.env"
+OTA_PAYLOADS_DIR="${RECOVERY_TRANSACTION_DIR}/payloads"
+OTA_STAGING_DIR="${RECOVERY_TRANSACTION_DIR}/staging"
+OTA_STATE_DIR="${RECOVERY_TRANSACTION_DIR}/state"
+OTA_STATE_FILE="${OTA_STATE_DIR}/ota-state.env"
 OTA_DIR=""
 ROOTFS_TAR=""
 BOOT_TAR=""
@@ -209,7 +209,7 @@ campaign_fail() {
     restore_mode="$(state_get RESTORE_MODE)"
     backup_id="$(state_get BACKUP_ID)"
     if [ "${restore_mode}" = "0" ] && [ -n "${backup_id}" ] &&
-        ota_payload_verify_full "${PAYLOADS_DIR}/${backup_id}"; then
+        ota_payload_verify_full "${OTA_PAYLOADS_DIR}/${backup_id}"; then
         log "candidate exhausted; switching to backup campaign ${backup_id}"
         state_switch_restore "${backup_id}" "${reason}" ||
             rescue_shell "cannot persist restore switch"
@@ -276,7 +276,7 @@ reconcile_success_and_clear() {
 run_campaign() {
     candidate_id="$1"
 
-    OTA_DIR="${PAYLOADS_DIR}/${candidate_id}"
+    OTA_DIR="${OTA_PAYLOADS_DIR}/${candidate_id}"
     ROOTFS_TAR="$(ota_resolve_payload "${OTA_DIR}" rootfs)"
     BOOT_TAR="$(ota_resolve_payload "${OTA_DIR}" boot)"
     BOOT_ITB="${OTA_DIR}/boot.itb"
@@ -413,14 +413,8 @@ fi
 
 # 2) mount the transaction store (userdata)
 mount_recovery_transaction_store
-# state.sh's library default points at the rootfs-side mirror
-# (/var/lib/armbian-ota), which never exists inside the rescue initramfs;
-# state_init would then seed a fresh idle template there and the gate
-# would arm-check against idle no matter what the transaction store says
-# (observed twice on the rk3588 SD rig, 2026-10-29). Alias the library
-# vars onto the transaction store before any state_init/state_get.
-OTA_STATE_DIR="${STATE_DIR}"
-OTA_STATE_FILE="${STATE_FILE}"
+# state.sh defaults to /var/lib/armbian-ota, absent here; the OTA_STATE_*
+# definitions above repoint it at the store (rk3588 SD rig 2026-10-29).
 state_init
 
 # 3) env access + reconciliation (section 6)
