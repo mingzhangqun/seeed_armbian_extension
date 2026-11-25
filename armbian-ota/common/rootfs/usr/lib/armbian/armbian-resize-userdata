@@ -262,38 +262,10 @@ find_userdata_partition() {
 }
 
 # Resolve any block device (raw partition, LUKS mapper, /dev/dm-N) to the
-# underlying raw partition. Raw partitions pass through unchanged; device-
-# mapper devices are walked via sysfs slaves/ to their backing partition.
-# Returns 1 for whole disks or anything without a partition backing it.
+# underlying raw partition. Thin delegate to the shared resolver in
+# find-userdata.sh (which also handles /dev/mapper real nodes).
 _resize_userdata__raw_partition_of() {
-    local dev="$1" base resolved first_slave
-    case "${dev}" in
-        /dev/*) ;;
-        *) dev="/dev/${dev}" ;;
-    esac
-    resolved="$(readlink -f "${dev}" 2>/dev/null || true)"
-    [ -n "${resolved}" ] && dev="${resolved}"
-    [ -e "${dev}" ] || return 1
-
-    base="$(basename "${dev}")"
-
-    # Already a real partition (sysfs partition attribute exists).
-    if [ -f "/sys/class/block/${base}/partition" ]; then
-        printf '%s\n' "${dev}"
-        return 0
-    fi
-
-    # Device-mapper: first slave is the backing partition (one level is
-    # enough for plain LUKS; nested stacks are not a supported layout).
-    if [ -d "/sys/class/block/${base}/slaves" ]; then
-        first_slave="$(ls "/sys/class/block/${base}/slaves" 2>/dev/null | head -n1)"
-        if [ -n "${first_slave}" ] && [ -e "/sys/class/block/${first_slave}/partition" ]; then
-            printf '/dev/%s\n' "${first_slave}"
-            return 0
-        fi
-    fi
-
-    return 1
+    find_user_data__raw_partition_of "$1"
 }
 
 # Walk through overlayfs to find the underlying rootfs partition device
