@@ -12,12 +12,10 @@
 
 OTA_RUNTIME_DIR="/usr/share/armbian-ota"
 . "${OTA_RUNTIME_DIR}/common.sh"
-. "${OTA_RUNTIME_DIR}/fwenv.sh"
-
-RECOVERY_OVERLAY_BACKING_DIR="/media/root-rw"
-RECOVERY_TRANSACTION_DIR="${RECOVERY_OVERLAY_BACKING_DIR}/ota-recovery"
-OTA_STATE_DIR="${RECOVERY_TRANSACTION_DIR}/state"
-OTA_STATE_FILE="${OTA_STATE_DIR}/ota-state.env"
+# backend.sh is function-only but carries the recovery transaction layout
+# (state/payloads dirs) and the fwenv/payload-id sources -- the same load
+# order the CLI uses.
+. "${OTA_RUNTIME_DIR}/recovery/backend.sh"
 
 HEALTH_FAIL_ITEMS=""
 
@@ -128,7 +126,6 @@ fi
 [ -n "${HEALTH_FAIL_ITEMS}" ] && ota_health_schedule_reboot
 
 # --- pass: terminal commit ----------------------------------------------------
-. "${OTA_RUNTIME_DIR}/recovery/backend.sh"
 
 acquire_lock || {
     echo "OTA health: cannot acquire lock; deferring commit (next boot retries)"

@@ -2,30 +2,15 @@
 
 readonly AB_INITIAL_ENV="/etc/u-boot-initial-env"
 
-AB_PARTITIONS_LIB="${OTA_RUNTIME_DIR}/ab/partitions.sh"
-[ -r "${AB_PARTITIONS_LIB}" ] || {
-    echo "ERROR: A/B partition helper not found: ${AB_PARTITIONS_LIB}" >&2
-    return 1
-}
-# The || propagates partitions.sh's missing-fwenv guard through callers
-# without set -e (CLI bare source, health-check's ota_source_library).
-. "${AB_PARTITIONS_LIB}" || return 1
+# Load failures propagate through callers without set -e (CLI bare source,
+# init-uboot's ota_source_library ... || exit 1).
+ota_source_library "${OTA_RUNTIME_DIR}/ab/partitions.sh" "A/B partition helper" || return 1
 
 # fw_env_* helpers: shared with recovery via the common runtime.
-FW_ENV_LIB="${OTA_RUNTIME_DIR}/fwenv.sh"
-[ -r "${FW_ENV_LIB}" ] || {
-    echo "ERROR: fw_env helper not found: ${FW_ENV_LIB}" >&2
-    return 1
-}
-. "${FW_ENV_LIB}"
+ota_source_library "${OTA_RUNTIME_DIR}/fwenv.sh" "fw_env helper" || return 1
 
 # Repair key spec, single-sourced with the build-time completeness check.
-AB_ENV_KEYS_LIB="${OTA_RUNTIME_DIR}/ab/env-keys.sh"
-[ -r "${AB_ENV_KEYS_LIB}" ] || {
-    echo "ERROR: A/B env key spec not found: ${AB_ENV_KEYS_LIB}" >&2
-    return 1
-}
-. "${AB_ENV_KEYS_LIB}"
+ota_source_library "${OTA_RUNTIME_DIR}/ab/env-keys.sh" "A/B env key spec" || return 1
 
 ab_env_get() {
     fw_env_get "$@"

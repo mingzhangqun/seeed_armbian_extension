@@ -112,6 +112,8 @@ ota_check_staging_free_space() {
     local directory="$1" package_path="$2" extra_bytes="${3:-0}"
     local avail need payload_bytes margin
 
+    load_package_env_metadata "${package_path}" ||
+        error_exit "Cannot read OTA package metadata for staging estimation: ${package_path}"
     avail="$(df -B1 --output=avail "${directory}" 2>/dev/null | tail -n1)"
     [ -n "${avail}" ] || error_exit "Cannot read OTA staging free space: ${directory}"
     payload_bytes="$(ota_staging_payload_bytes "${package_path}")" || return 1
@@ -409,7 +411,6 @@ ota_run_phase1_hooks() {
     local work_dir="$1"
 
     ota_source_hook "${work_dir}" || return 0
-    OTA_HOOK_API="${OTA_HOOK_API}"
     OTA_HOOK_MODE="$(state_get OTA_MODE 2>/dev/null || echo unknown)"
     export OTA_HOOK_API OTA_HOOK_MODE OTA_HOOK_PATH
     if ! ota_call_hook hook_after_unpack; then
@@ -561,20 +562,13 @@ package_env_get_value() {
         | grep -E "^${key}=" | tail -n1 | cut -d'=' -f2-
 }
 
-read_package_env_value() {
-    local package_path="$1"
-    local key="$2"
-
-    load_package_env_metadata "${package_path}" || return 1
-    package_env_get_value "${key}"
-}
-
 assert_package_mode_matches() {
     local package_path="$1"
     local expected_mode="$2"
     local manifest_mode
 
-    manifest_mode="$(read_package_env_value "${package_path}" "OTA_MODE" || true)"
+    load_package_env_metadata "${package_path}" || true
+    manifest_mode="$(package_env_get_value "OTA_MODE" || true)"
     if [ -z "${manifest_mode}" ]; then
         error_exit "OTA package metadata missing OTA_MODE; refusing to continue"
     fi
@@ -679,20 +673,6 @@ verify_sha256() {
         error_exit "${label} checksum verification failed"
     }
     [ -n "${tmp_sha}" ] && rm -f "${tmp_sha}"
-}
-
-verify_payload_archives() {
-    local work_dir="$1"
-    local rootfs_tar="$2"
-    local rootfs_sha="$3"
-    local boot_tar="$4"
-    local boot_sha="$5"
-
-    verify_sha256 "${work_dir}/${rootfs_tar}" "${work_dir}/${rootfs_sha}" "${rootfs_tar}"
-
-    if [ -f "${work_dir}/${boot_tar}" ]; then
-        verify_sha256 "${work_dir}/${boot_tar}" "${work_dir}/${boot_sha}" "${boot_tar}"
-    fi
 }
 
 # ota_is_fit_image lives in posix.sh (shared with the initramfs).
@@ -973,7 +953,10 @@ ota_verify_payload() {
         ota_process_encrypted_payload "${work_dir}" "${rootfs_tar}"
     fi
 
-    verify_payload_archives "${work_dir}" "${rootfs_tar}" "${rootfs_sha}" "${boot_tar}" "${boot_sha}"
+    verify_sha256 "${work_dir}/${rootfs_tar}" "${work_dir}/${rootfs_sha}" "${rootfs_tar}"
+    if [ -f "${work_dir}/${boot_tar}" ]; then
+        verify_sha256 "${work_dir}/${boot_tar}" "${work_dir}/${boot_sha}" "${boot_tar}"
+    fi
 
     if [ -f "${work_dir}/${boot_itb}" ]; then
         verify_sha256 "${work_dir}/${boot_itb}" "${work_dir}/${boot_sha}" "${boot_itb}"

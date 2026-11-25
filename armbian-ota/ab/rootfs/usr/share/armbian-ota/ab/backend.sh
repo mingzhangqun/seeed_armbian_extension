@@ -29,13 +29,7 @@ ab_prepare_staging() {
 }
 
 # ===== staging space gate ====================================================
-ab_check_space() {
-    local package_path="$1"
-
-    load_package_env_metadata "${package_path}" ||
-        error_exit "Cannot read OTA package metadata for staging estimation: ${package_path}"
-    ota_check_staging_free_space "${OTA_WORK_DIR}" "${package_path}"
-}
+# ota_check_staging_free_space (common.sh) loads the package metadata itself.
 
 ab_ensure_slot_boot_env() {
     local init_script="/usr/lib/armbian/armbian-ota-init-uboot"
@@ -141,7 +135,7 @@ ab_start_ota() {
     # Stage in the existing userdata overlay upper. Never open or mount its
     # backing ext4 a second time: it is already live at /media/root-rw.
     ab_prepare_staging
-    ab_check_space "${package_path}"
+    ota_check_staging_free_space "${OTA_WORK_DIR}" "${package_path}"
 
     temp_work="$(make_ota_work_dir "ab-package")"
     ota_stage_and_verify "${package_path}" "${temp_work}"

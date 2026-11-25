@@ -1,20 +1,7 @@
 # A/B slot topology and partition discovery helpers.
-# fwenv.sh provides the shared POSIX boot-disk/parent-disk primitives;
-# common.sh (always sourced before this library) provides
-# ota_root_mount_source.
-
-[ -r "${OTA_RUNTIME_DIR}/fwenv.sh" ] || {
-    echo "ERROR: fw_env helper not found: ${OTA_RUNTIME_DIR}/fwenv.sh" >&2
-    return 1
-}
-. "${OTA_RUNTIME_DIR}/fwenv.sh"
-# ota_blkid_first_on_disk lives in posix.sh (sourced with common.sh on CLI
-# paths; direct env.sh consumers re-source it here, which is idempotent).
-[ -r "${OTA_RUNTIME_DIR}/posix.sh" ] || {
-    echo "ERROR: POSIX helper library not found: ${OTA_RUNTIME_DIR}/posix.sh" >&2
-    return 1
-}
-. "${OTA_RUNTIME_DIR}/posix.sh"
+# Runtime deps, loaded by every consumer before this library: common.sh
+# (posix.sh, ota_root_mount_source), fwenv.sh (sourced by ab/env.sh right
+# after this file -- only function definitions run at source time here).
 
 BOOT_A_LABEL="armbi_boota"
 BOOT_B_LABEL="armbi_bootb"

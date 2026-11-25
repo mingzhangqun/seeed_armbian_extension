@@ -78,9 +78,6 @@ recovery_check_space() {
     local package_path="$1" want_backup="$2"
     local backup_est=0
 
-    load_package_env_metadata "${package_path}" ||
-        error_exit "Cannot read OTA package metadata for staging estimation: ${package_path}"
-
     if [ "${want_backup}" = "yes" ]; then
         local lower_used boot_used raw_dev fit_sz
         lower_used="$(du -sb /media/root-ro 2>/dev/null | awk '{print $1}')"
@@ -140,6 +137,18 @@ recovery_sweep_orphan_payloads() {
     return 0
 }
 
+# Atomic payload publish: one id owns one directory under OTA_PAYLOADS_DIR.
+# The rename is the commit point, bracketed by syncs.
+recovery_publish_payload() {
+    local src_dir="$1" payload_id="$2"
+
+    sync
+    mkdir -p "${OTA_PAYLOADS_DIR}"
+    rm -rf "${OTA_PAYLOADS_DIR:?}/${payload_id}"
+    mv "${src_dir}" "${OTA_PAYLOADS_DIR}/${payload_id}" || return 1
+    sync
+}
+
 recovery_stage_payload() {
     local package_path="$1"
     local payload_id="${OTA_CLI_PAYLOAD_ID}"
@@ -165,12 +174,8 @@ recovery_stage_payload() {
             "$(package_env_get_value "VERSION" || true)"
     fi
 
-    sync
-    mkdir -p "${OTA_PAYLOADS_DIR}"
-    rm -rf "${OTA_PAYLOADS_DIR:?}/${payload_id}"
-    mv "${incoming}" "${OTA_PAYLOADS_DIR}/${payload_id}" ||
+    recovery_publish_payload "${incoming}" "${payload_id}" ||
         error_exit "Failed to move staged payload into place"
-    sync
     log_info "Payload ${payload_id} staged at ${OTA_PAYLOADS_DIR}/${payload_id}"
 }
 
@@ -221,6 +226,13 @@ recovery_create_backup() {
     recovery_require_transaction_store
     [ -d "${lower_mnt}" ] || error_exit "Backup source ${lower_mnt} missing (overlayroot lower not mounted)"
 
+    # Nested failure exit (dynamic scope over the locals above), same
+    # pattern as target.sh's _ab_target_fail.
+    _backup_fail() {
+        rm -rf "${work}"
+        error_exit "$1"
+    }
+
     lower_dev="$(ota_root_mount_source)"
     board="$(ota_image_release_field BOARD)"
     release="$(ota_image_release_field RELEASE)"
@@ -238,16 +250,13 @@ recovery_create_backup() {
 
     # 1) rootfs.tar.zst from the quiesced read-only lower layer
     log_info "Packing lower rootfs -> rootfs.tar.zst (zstd ${OTA_BACKUP_ZSTD_LEVEL})"
-    if ! (
-        # pipefail: zstd exits 0 on a truncated stdin, so a failed tar would
-        # otherwise publish a partial archive as the last-good restore point.
+    # pipefail: zstd exits 0 on a truncated stdin, so a failed tar would
+    # otherwise publish a partial archive as the last-good restore point.
+    (
         set -o pipefail
         tar --numeric-owner --xattrs --acls -C "${lower_mnt}" -cf - . |
             zstd -q ${OTA_BACKUP_ZSTD_LEVEL} -T0 -o "${work}/rootfs.tar.zst"
-    ); then
-        rm -rf "${work}"
-        error_exit "Backup: failed to pack lower rootfs"
-    fi
+    ) || _backup_fail "Backup: failed to pack lower rootfs"
     (cd "${work}" && sha256sum rootfs.tar.zst > rootfs.sha256)
 
     # 2) boot staging -- two flavors by layout (section 15.1):
@@ -265,51 +274,34 @@ recovery_create_backup() {
     mkdir -p "${boot_tree}"
     raw_boot_dev="$(recovery_raw_boot_dev || true)"
     if [ -n "${raw_boot_dev}" ]; then
-        fit_size="$(ota_fit_size_bytes "${raw_boot_dev}")" || {
-            rm -rf "${work}"
-            error_exit "Backup: no FIT header on raw boot partition ${raw_boot_dev}"
-        }
-        [ "${fit_size}" -gt 0 ] || {
-            rm -rf "${work}"
-            error_exit "Backup: zero FIT totalsize on ${raw_boot_dev} (corrupt header)"
-        }
+        fit_size="$(ota_fit_size_bytes "${raw_boot_dev}")" ||
+            _backup_fail "Backup: no FIT header on raw boot partition ${raw_boot_dev}"
+        [ "${fit_size}" -gt 0 ] ||
+            _backup_fail "Backup: zero FIT totalsize on ${raw_boot_dev} (corrupt header)"
         log_info "Reading FIT (${fit_size} bytes) from ${raw_boot_dev} -> boot.itb"
-        if ! dd if="${raw_boot_dev}" of="${work}/boot.itb" \
-                 bs=512 count=$(( (fit_size + 511) / 512 )) status=none; then
-            rm -rf "${work}"
-            error_exit "Backup: failed to read FIT from ${raw_boot_dev}"
-        fi
-        truncate -s "${fit_size}" "${work}/boot.itb" || {
-            rm -rf "${work}"
-            error_exit "Backup: failed to trim boot.itb to FIT size"
-        }
+        dd if="${raw_boot_dev}" of="${work}/boot.itb" \
+            bs=512 count=$(( (fit_size + 511) / 512 )) status=none ||
+            _backup_fail "Backup: failed to read FIT from ${raw_boot_dev}"
+        truncate -s "${fit_size}" "${work}/boot.itb" ||
+            _backup_fail "Backup: failed to trim boot.itb to FIT size"
         # Read-back: boot.sha256 is self-consistent, so without this a
         # corrupted dd read would publish a "verified" bad backup.
         ota_fit_readback_verify "${raw_boot_dev}" "${fit_size}" \
-            "$(sha256sum "${work}/boot.itb" | awk '{print $1}')" "${OTA_STAGING_DIR}" || {
-            rm -rf "${work}"
-            error_exit "Backup: FIT readback does not match ${raw_boot_dev}"
-        }
-        ln "${work}/boot.itb" "${boot_tree}/boot.itb" || {
-            rm -rf "${work}"
-            error_exit "Backup: failed to link boot.itb into the identity tree"
-        }
+            "$(sha256sum "${work}/boot.itb" | awk '{print $1}')" "${OTA_STAGING_DIR}" ||
+            _backup_fail "Backup: FIT readback does not match ${raw_boot_dev}"
+        ln "${work}/boot.itb" "${boot_tree}/boot.itb" ||
+            _backup_fail "Backup: failed to link boot.itb into the identity tree"
     else
         mountpoint -q "${boot_mnt}" || error_exit "Backup source ${boot_mnt} is not a mounted boot partition"
-        if ! (
-            # pipefail: cp -a succeeds on whatever files it received, so a failed
-            # find would otherwise stage a partial boot tree unnoticed.
+        # pipefail: cp -a succeeds on whatever files it received, so a failed
+        # find would otherwise stage a partial boot tree unnoticed.
+        (
             set -o pipefail
             (cd "${boot_mnt}" && find . -mindepth 1 -maxdepth 1 \( ${excludes} \) -prune -o -print0) |
                 (cd "${boot_mnt}" && xargs -0 -r cp -a --target-directory="${boot_tree}")
-        ); then
-            rm -rf "${work}"
-            error_exit "Backup: failed to stage boot tree"
-        fi
-        [ -f "${boot_tree}/Image" ] || {
-            rm -rf "${work}"
-            error_exit "Backup: boot staging tree missing Image"
-        }
+        ) || _backup_fail "Backup: failed to stage boot tree"
+        [ -f "${boot_tree}/Image" ] ||
+            _backup_fail "Backup: boot staging tree missing Image"
     fi
 
     # 3) identity, then the boot checksum target (tar on ext4 layouts, the
@@ -320,15 +312,12 @@ recovery_create_backup() {
         (cd "${work}" && sha256sum boot.itb > boot.sha256)
     else
         printf '%s\n' "${payload_id}" > "${boot_tree}/payload-id"
-        if ! (
-            # pipefail: same truncated-stream concern as the rootfs pack above.
+        # pipefail: same truncated-stream concern as the rootfs pack above.
+        (
             set -o pipefail
             tar --numeric-owner -C "${boot_tree}" -cf - . |
                 zstd -q ${OTA_BACKUP_ZSTD_LEVEL} -T0 -o "${work}/boot.tar.zst"
-        ); then
-            rm -rf "${work}"
-            error_exit "Backup: failed to pack boot tree"
-        fi
+        ) || _backup_fail "Backup: failed to pack boot tree"
         (cd "${work}" && sha256sum boot.tar.zst > boot.sha256)
     fi
 
@@ -342,12 +331,8 @@ recovery_create_backup() {
     } > "${work}/version.txt"
 
     # 5) atomic publish + record
-    sync
-    mkdir -p "${OTA_PAYLOADS_DIR}"
-    rm -rf "${OTA_PAYLOADS_DIR:?}/${payload_id}"
-    mv "${work}" "${OTA_PAYLOADS_DIR}/${payload_id}" ||
-        { rm -rf "${work}"; error_exit "Backup: failed to publish payload directory"; }
-    sync
+    recovery_publish_payload "${work}" "${payload_id}" ||
+        _backup_fail "Backup: failed to publish payload directory"
     state_set "BACKUP_ID" "${payload_id}" ||
         error_exit "Backup: failed to persist BACKUP_ID"
     log_info "Last-good backup created: ${payload_id}"
