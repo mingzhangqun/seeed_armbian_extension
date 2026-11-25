@@ -170,6 +170,10 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Changed
 
+- **Recovery fw_env tools install via apt, same as A/B.** The manual
+  Debian-bookworm deb download is deleted: trixie/resolute/bookworm arm64
+  all carry `libubootenv-tool`, and the pinned 0.3.2-1 binaries differ in
+  behavior from the distro's (079a8eec made `fwenv.sh` cover both).
 - **README leads with the official Armbian board pages.** The not-yet-live
   images page and its releases are no longer advertised; the Documentation
   index lists one entry per line.
