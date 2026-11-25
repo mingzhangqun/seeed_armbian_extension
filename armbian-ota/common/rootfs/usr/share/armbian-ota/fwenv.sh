@@ -18,9 +18,11 @@ OTA_FW_ENV_BAD_ERR_RE="bad crc|cannot read environment|failed to read environmen
 # Whole-disk device backing partition device $1, via sysfs parent walk.
 # /dev/mmcblk0p3 -> /dev/mmcblk0, /dev/nvme0n1p3 -> /dev/nvme0n1.
 # find-userdata.sh provides the raw-partition resolver; load it once.
+# OTA_FIND_USERDATA_PATH lets build-time consumers point at the extension
+# tree (the device path does not exist in the build container).
 [ -n "${_OTA_FIND_USERDATA_LOADED:-}" ] || {
     # shellcheck source=/dev/null
-    . /usr/share/armbian-ota/find-userdata.sh
+    . "${OTA_FIND_USERDATA_PATH:-/usr/share/armbian-ota/find-userdata.sh}"
     _OTA_FIND_USERDATA_LOADED=1
 }
 
