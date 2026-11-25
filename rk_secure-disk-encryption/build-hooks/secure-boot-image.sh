@@ -426,15 +426,14 @@ function rk_secure_boot_capture_raw_boot_partition() {
         return 0
     fi
 
-    display_alert "secure-uboot" "RAW boot mode: Save bootpart index and prevent filesystem creation" "debug"
+    display_alert "secure-uboot" "RAW boot mode: saving bootpart index for FIT flash" "debug"
 
     # Save original bootpart index for later dd write. BOOTSIZE is always set
     # by pre_prepare_partitions__050_set_raw_boot_partition at this point.
+    # The framework still mkfs/mounts this partition; the final FIT dd
+    # overwrites it and remove_boot_fstab_entries strips the fstab line.
     export RAW_BOOT_PART_INDEX="${bootpart}"
     display_alert "secure-uboot" "Saved boot partition index: ${RAW_BOOT_PART_INDEX}" "debug"
-
-    # Delay clearing bootpart variable; pre_mount_chroot_script clears it so
-    # BOOTSIZE is still honored during partition creation.
 }
 function rk_secure_boot_create_resource_img() {
     if ! rk_autodecrypt_fit_boot_required; then
