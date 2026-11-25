@@ -3,7 +3,6 @@
 #
 
 rk_secure_boot_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-rk_secure_boot_extension_dir="${rk_secure_boot_dir}"
 
 source "${rk_secure_boot_dir}/build-hooks/common.sh"
 source "${rk_secure_boot_dir}/build-hooks/uboot-package-name.sh"
@@ -114,18 +113,6 @@ function pre_prepare_partitions__change_boot_partition_name() {
 
 function post_create_partitions__handle_raw_boot() {
     rk_secure_boot_capture_raw_boot_partition
-}
-
-function pre_mount_chroot_script__delayed_raw_boot_cleanup() {
-    if ! rk_autodecrypt_fit_boot_required; then
-        return 0
-    fi
-
-    # Delay clearing bootpart to prevent subsequent filesystem creation and mount
-    if [[ "${BOOT_RAW_MODE}" == "yes" ]]; then
-        display_alert "secure-uboot" "Delayed cleanup: Clearing bootpart variable" "debug"
-        bootpart=""
-    fi
 }
 
 function pre_package_kernel_image__create_resource_img() {

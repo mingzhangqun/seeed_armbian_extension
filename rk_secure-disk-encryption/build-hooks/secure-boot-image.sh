@@ -182,6 +182,11 @@ function rk_secure_boot_mkimage_supports_signing() {
     [[ "${help}" != *"Signing / verified boot not supported"* ]]
 }
 
+# True when the FIT public key node key-dev exists under /signature.
+function rk_fit_key_node_present() {
+    fdtget -l "$1" /signature 2>/dev/null | grep -qx 'key-dev'
+}
+
 function rk_secure_boot_resolve_mkimage() {
     local rkbin_dir candidate
 
@@ -221,7 +226,7 @@ function rk_secure_boot_prepare_signing_toolchain() {
 
     # USBPLUG can clobber tools/mkimage; rebuild from the final config.
     if [[ -x "${uboot_dir}/tools/mkimage" ]] &&
-        "${uboot_dir}/tools/mkimage" -h 2>&1 | grep -q 'Signing / verified boot not supported'; then
+        ! rk_secure_boot_mkimage_supports_signing "${uboot_dir}/tools/mkimage"; then
         make -C "${uboot_dir}" -B tools-only >&2 ||
             exit_with_error "FIT signing failed: unable to rebuild U-Boot host tools" "${uboot_dir}/tools"
     fi
@@ -316,7 +321,7 @@ function rk_secure_boot_run_secondary_fit_signing() {
         # The U-Boot build phase already embeds key-dev into u-boot.dtb.
         # Re-injecting it here is redundant and can exhaust DTB free space.
         "${RK_SECURE_BOOT_MKIMAGE}" -f "${fit_work}/boot-final.its" -k keys/ -E -p "${fit_padding}" -r fit/boot.itb || exit 1
-        fdtget -l u-boot.dtb /signature 2>/dev/null | grep -qx 'key-dev' || exit 1
+        rk_fit_key_node_present u-boot.dtb || exit 1
         # Tree-built verifier: same verify code as the running U-Boot, so a
         # salt drift in the signing tool fails the build instead of the boot.
         ./tools/fit_check_sign -f fit/boot.itb -k u-boot.dtb || exit 1
@@ -421,15 +426,14 @@ function rk_secure_boot_capture_raw_boot_partition() {
         return 0
     fi
 
-    display_alert "secure-uboot" "RAW boot mode: Save bootpart index and prevent filesystem creation" "debug"
+    display_alert "secure-uboot" "RAW boot mode: saving bootpart index for FIT flash" "debug"
 
     # Save original bootpart index for later dd write. BOOTSIZE is always set
     # by pre_prepare_partitions__050_set_raw_boot_partition at this point.
+    # The framework still mkfs/mounts this partition; the final FIT dd
+    # overwrites it and remove_boot_fstab_entries strips the fstab line.
     export RAW_BOOT_PART_INDEX="${bootpart}"
     display_alert "secure-uboot" "Saved boot partition index: ${RAW_BOOT_PART_INDEX}" "debug"
-
-    # Delay clearing bootpart variable; pre_mount_chroot_script clears it so
-    # BOOTSIZE is still honored during partition creation.
 }
 function rk_secure_boot_create_resource_img() {
     if ! rk_autodecrypt_fit_boot_required; then

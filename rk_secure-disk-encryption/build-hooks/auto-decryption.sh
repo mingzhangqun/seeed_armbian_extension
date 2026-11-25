@@ -45,7 +45,7 @@ function rk_autodecrypt_install_patch_uboot_target_wrapper() {
         return 0
     fi
 
-    eval "$(declare -f patch_uboot_target | sed '1s/^patch_uboot_target/__rk_autodecrypt_patch_uboot_target_original/')"
+    rk_wrap_function patch_uboot_target __rk_autodecrypt_patch_uboot_target_original
     patch_uboot_target() {
         __rk_autodecrypt_patch_uboot_target_original "$@" || return $?
 
@@ -263,6 +263,13 @@ function rk_secure_storage_write_passphrase() {
     # a non-64-char passphrase makes first boot unlock with NUL padding.
     if [[ "${#CRYPTROOT_PASSPHRASE}" -ne 64 ]]; then
         exit_with_error "secure-storage" "CRYPTROOT_PASSPHRASE must be exactly 64 characters (got ${#CRYPTROOT_PASSPHRASE})"
+    fi
+
+    # A raw passphrase is stored at partition offset 0, where the boot-side
+    # dispatch also probes for the 4-byte "SSKR" keybox marker; a passphrase
+    # with that prefix would be misrouted to the keybox path.
+    if [[ "${CRYPTROOT_PASSPHRASE}" == SSKR* ]]; then
+        exit_with_error "secure-storage" "CRYPTROOT_PASSPHRASE must not start with 'SSKR' (reserved keybox marker)"
     fi
 
     display_alert "secure-storage" "Writing CRYPTROOT_PASSPHRASE to security partition" "info"
