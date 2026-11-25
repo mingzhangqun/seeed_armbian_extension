@@ -265,6 +265,13 @@ function rk_secure_storage_write_passphrase() {
         exit_with_error "secure-storage" "CRYPTROOT_PASSPHRASE must be exactly 64 characters (got ${#CRYPTROOT_PASSPHRASE})"
     fi
 
+    # A raw passphrase is stored at partition offset 0, where the boot-side
+    # dispatch also probes for the 4-byte "SSKR" keybox marker; a passphrase
+    # with that prefix would be misrouted to the keybox path.
+    if [[ "${CRYPTROOT_PASSPHRASE}" == SSKR* ]]; then
+        exit_with_error "secure-storage" "CRYPTROOT_PASSPHRASE must not start with 'SSKR' (reserved keybox marker)"
+    fi
+
     display_alert "secure-storage" "Writing CRYPTROOT_PASSPHRASE to security partition" "info"
     wait_for_disk_sync "before writing to security partition"
 
