@@ -7,8 +7,8 @@ if [[ "$(type -t artifact_uboot_prepare_version || true)" != "function" ]] || \
     exit_with_error "Armbian U-Boot package helpers are unavailable" "cannot apply the secure U-Boot package name"
 fi
 
-eval "$(declare -f artifact_uboot_prepare_version | sed '1s/^artifact_uboot_prepare_version /seeed_upstream_artifact_uboot_prepare_version /')"
-eval "$(declare -f dpkg_deb_build | sed '1s/^dpkg_deb_build /seeed_upstream_dpkg_deb_build /')"
+rk_wrap_function artifact_uboot_prepare_version seeed_upstream_artifact_uboot_prepare_version
+rk_wrap_function dpkg_deb_build seeed_upstream_dpkg_deb_build
 
 function artifact_uboot_prepare_version() {
     seeed_upstream_artifact_uboot_prepare_version "$@"

@@ -6,6 +6,13 @@ function rk_run_host_command() {
         "$@"
     fi
 }
+# Rename a live shell function so a wrapper can replace the original name.
+function rk_wrap_function() {
+    local original="$1" new_name="$2"
+
+    eval "$(declare -f "${original}" | sed "1s/^${original} /${new_name} /")"
+}
+
 function rk_fetch_sdk_tools() {
     local sdk_tools_url="${RKSDK_TOOLS_GIT_URL:-${RKBIN_GIT_URL:-"https://github.com/Seeed-Studio/rockchip_sdk_tools.git"}}"
 
@@ -103,40 +110,35 @@ function rk_resolve_extension_dir() {
     echo "${script_dir}"
 }
 
-function rk_secure_uboot_fit_generator_path() {
-    local extension_dir candidate
+# Resolve a file shipped in this extension: locate the extension root via
+# probe_subdir, then require relpath under it.
+function rk_extension_file_path() {
+    local probe_subdir="$1"
+    local relpath="$2"
+    local candidate
 
-    extension_dir="$(rk_resolve_extension_dir "u-boot/fit-generator")"
-    candidate="${extension_dir}/u-boot/fit-generator/make_fit_atf_optee.sh"
+    candidate="$(rk_resolve_extension_dir "${probe_subdir}")/${relpath}"
     [[ -f "${candidate}" ]] && { echo "${candidate}"; return 0; }
 
     return 1
+}
+
+function rk_secure_uboot_fit_generator_path() {
+    rk_extension_file_path "u-boot/fit-generator" "u-boot/fit-generator/make_fit_atf_optee.sh"
 }
 
 function rk_secure_kernel_fit_template_path() {
-    local platform extension_dir candidate
-
+    local platform
     platform="$(rk_detect_platform)"
     [[ "${platform}" != "unknown" ]] || return 1
-
-    extension_dir="$(rk_resolve_extension_dir "u-boot/fit-kernel")"
-    candidate="${extension_dir}/u-boot/fit-kernel/${platform}_fit_kernel.its"
-    [[ -f "${candidate}" ]] && { echo "${candidate}"; return 0; }
-
-    return 1
+    rk_extension_file_path "u-boot/fit-kernel" "u-boot/fit-kernel/${platform}_fit_kernel.its"
 }
 
 function rk_secure_uboot_config_fragment_path() {
-    local platform extension_dir candidate
-
+    local platform
     platform="$(rk_detect_platform)"
     [[ "${platform}" != "unknown" ]] || return 1
-
-    extension_dir="$(rk_resolve_extension_dir "u-boot/fragments")"
-    candidate="${extension_dir}/u-boot/fragments/${platform}-secure-autodecrypt.config"
-    [[ -f "${candidate}" ]] && { echo "${candidate}"; return 0; }
-
-    return 1
+    rk_extension_file_path "u-boot/fragments" "u-boot/fragments/${platform}-secure-autodecrypt.config"
 }
 function rk_apply_kconfig_fragment() {
     local _config_tool="$1"
