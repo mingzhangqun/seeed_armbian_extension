@@ -29,18 +29,18 @@
             };
         };
 
-		ramdisk {
-			data = /incbin/("@RAMDISK_IMG@");
-			type = "ramdisk";
-			arch = "arm64";
-			os = "linux";
-			compression = "none";
-			load = <0x0a200000>;
+        ramdisk {
+            data = /incbin/("@RAMDISK_IMG@");
+            type = "ramdisk";
+            arch = "arm64";
+            os = "linux";
+            compression = "none";
+            load = <0x0a200000>;
 
-			hash {
-				algo = "sha256";
-			};
-		};
+            hash {
+                algo = "sha256";
+            };
+        };
 
         resource {
             data = /incbin/("@RESOURCE_IMG@");
