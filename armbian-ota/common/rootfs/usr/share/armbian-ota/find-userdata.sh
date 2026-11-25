@@ -135,6 +135,25 @@ find_user_data__root_dev_from_cmdline() {
 
 # Resolve any block device to its raw backing partition (dm: first
 # slave; real mapper nodes: ls maj:min). Returns 1 for whole disks.
+# Shared resolver for both lookup forms: the sysfs block name itself when
+# it is a partition, else its first slave.
+_find_user_data__sys_partition() {
+    sys_base="$1"
+
+    if [ -f "/sys/class/block/${sys_base}/partition" ]; then
+        printf '/dev/%s\n' "${sys_base}"
+        return 0
+    fi
+    if [ -d "/sys/class/block/${sys_base}/slaves" ]; then
+        slave="$(ls "/sys/class/block/${sys_base}/slaves" 2>/dev/null | head -n1)"
+        if [ -n "${slave}" ] && [ -f "/sys/class/block/${slave}/partition" ]; then
+            printf '/dev/%s\n' "${slave}"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 find_user_data__raw_partition_of() {
     dev="$1"
     case "${dev}" in
@@ -145,34 +164,14 @@ find_user_data__raw_partition_of() {
     [ -n "${resolved}" ] && dev="${resolved}"
     [ -e "${dev}" ] || return 1
 
-    base="$(basename "${dev}")"
-    if [ -f "/sys/class/block/${base}/partition" ]; then
-        printf '/dev/%s\n' "${base}"
-        return 0
-    fi
-    if [ -d "/sys/class/block/${base}/slaves" ]; then
-        slave="$(ls "/sys/class/block/${base}/slaves" 2>/dev/null | head -n1)"
-        if [ -n "${slave}" ] && [ -f "/sys/class/block/${slave}/partition" ]; then
-            printf '/dev/%s\n' "${slave}"
-            return 0
-        fi
-    fi
+    _find_user_data__sys_partition "$(basename "${dev}")" && return 0
 
+    # Real /dev/mapper nodes have no sysfs block name; map via maj:min.
     mm="$(ls -l "${dev}" 2>/dev/null | awk '{ gsub(",", "", $5); print $5 ":" $6 }')"
     case "${mm}" in
         [0-9]*:[0-9]*)
             sys_base="$(basename "$(readlink -f "/sys/dev/block/${mm}" 2>/dev/null || true)" 2>/dev/null)"
-            if [ -n "${sys_base}" ] && [ -f "/sys/class/block/${sys_base}/partition" ]; then
-                printf '/dev/%s\n' "${sys_base}"
-                return 0
-            fi
-            if [ -n "${sys_base}" ] && [ -d "/sys/class/block/${sys_base}/slaves" ]; then
-                slave="$(ls "/sys/class/block/${sys_base}/slaves" 2>/dev/null | head -n1)"
-                if [ -n "${slave}" ] && [ -f "/sys/class/block/${slave}/partition" ]; then
-                    printf '/dev/%s\n' "${slave}"
-                    return 0
-                fi
-            fi
+            [ -n "${sys_base}" ] && _find_user_data__sys_partition "${sys_base}" && return 0
             ;;
     esac
     return 1

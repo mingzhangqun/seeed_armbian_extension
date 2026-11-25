@@ -14,6 +14,19 @@
 # Format map (initramfs mirror; keep in sync with common.sh and
 # package-create.sh -- docs/10-ota-package-formats.md).
 #
+# Run one step under the heartbeat shown as $1; the caller owns the error
+# log and the return-code handling.
+ota_run_step() {
+    step_msg="$1"
+    shift
+
+    start_heartbeat "${step_msg}"
+    "$@"
+    step_rc=$?
+    stop_heartbeat
+    return "${step_rc}"
+}
+#
 # Extraction always runs as an explicit "<decompressor> -dc | tar -xf -"
 # pipeline with tools resolved by absolute path (/usr/bin first). Two reasons,
 # both learned on real boards:
@@ -263,13 +276,10 @@ ota_reformat_rootfs() {
         mkfs_opts="${mkfs_opts} -U ${ROOT_UUID}"
     fi
 
-    start_heartbeat "mkfs rootfs at ${ROOT_DEV}"
-    if ! mkfs.ext4 ${mkfs_opts} "${ROOT_DEV}" 2>>"${LOGFILE}"; then
-        stop_heartbeat
+    if ! ota_run_step "mkfs rootfs at ${ROOT_DEV}" mkfs.ext4 ${mkfs_opts} "${ROOT_DEV}" 2>>"${LOGFILE}"; then
         log "ERROR: mkfs.ext4 ${ROOT_DEV} failed, rootfs unrecoverable, abort OTA"
         return 2
     fi
-    stop_heartbeat
 
     if ! mount -t ext4 "${ROOT_DEV}" "${ROOT_MNT}"; then
         log "ERROR: cannot remount ${ROOT_DEV} after mkfs, abort OTA"
@@ -291,6 +301,22 @@ ota_reformat_rootfs() {
 
 # ===== rebuild-or-clean rootfs + extract rootfs.tar.gz =====
 # Returns 1 (caller unmounts+aborts) on reformat/clean/extract failure.
+
+# rm -rf the target root except /boot (dotfiles included).
+ota_clean_rootfs_keep_boot() {
+    (
+        cd "${ROOT_MNT}" || exit 1
+        for f in * .[!.]* ..?*; do
+            case "$f" in
+                "."|".."|"boot")
+                    continue
+                    ;;
+            esac
+            rm -rf "$f"
+        done
+    )
+}
+
 ota_apply_rootfs() {
     # Capture the pre-OTA env before the rootfs tar overwrites /boot content.
     # Only layouts without a boot.tar.gz payload keep the live env in rootfs
@@ -314,33 +340,17 @@ ota_apply_rootfs() {
 
     if [ "${fmt_rc}" -ne 0 ]; then
         log "cleaning ${ROOT_MNT} (except boot)..."
-        start_heartbeat "cleaning rootfs at ${ROOT_MNT}"
-        (
-            cd "${ROOT_MNT}" || exit 1
-            for f in * .[!.]* ..?*; do
-                case "$f" in
-                    "."|".."|"boot")
-                        continue
-                        ;;
-                esac
-                rm -rf "$f"
-            done
-        ) || {
-            stop_heartbeat
+        if ! ota_run_step "cleaning rootfs at ${ROOT_MNT}" ota_clean_rootfs_keep_boot; then
             log "ERROR: failed to clean ${ROOT_MNT}, abort OTA"
             return 1
-        }
-        stop_heartbeat
+        fi
     fi
 
     log "extracting ${ROOTFS_TAR} -> ${ROOT_MNT} ..."
-    start_heartbeat "extracting ${ROOTFS_TAR##*/} to ${ROOT_MNT}"
-    if ! extract_tar "${ROOTFS_TAR}" "${ROOT_MNT}" "rootfs"; then
-        stop_heartbeat
+    if ! ota_run_step "extracting ${ROOTFS_TAR##*/} to ${ROOT_MNT}" extract_tar "${ROOTFS_TAR}" "${ROOT_MNT}" "rootfs"; then
         log "ERROR: extract ${ROOTFS_TAR##*/} failed, abort OTA"
         return 1
     fi
-    stop_heartbeat
 
     sync
 
@@ -431,13 +441,10 @@ ota_apply_boot() {
     }
 
     log "extracting ${BOOT_TAR} -> ${BOOT_MNT} ..."
-    start_heartbeat "extracting ${BOOT_TAR##*/} to ${BOOT_MNT}"
-    if ! extract_tar "${BOOT_TAR}" "${BOOT_MNT}" "boot"; then
-        stop_heartbeat
+    if ! ota_run_step "extracting ${BOOT_TAR##*/} to ${BOOT_MNT}" extract_tar "${BOOT_TAR}" "${BOOT_MNT}" "boot"; then
         log "ERROR: extract ${BOOT_TAR##*/} failed -- FATAL (legacy warn-and-continue removed: it produced 'new rootfs + old boot')"
         return 1
     fi
-    stop_heartbeat
 
     # v0.8: the package must prove its identity on the partition it just
     # wrote; a mismatch means the extract was partial or wrong.
