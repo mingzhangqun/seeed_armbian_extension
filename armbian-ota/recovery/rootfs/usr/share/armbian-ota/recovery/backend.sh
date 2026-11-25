@@ -173,6 +173,9 @@ recovery_stage_payload() {
 
     mkdir -p "${OTA_STAGING_DIR}"
     rm -rf "${incoming}"
+    # New campaign: drop a previous campaign's persisted pre-OTA env (the
+    # retry path never passes through here, so its copy survives the cut).
+    rm -f "${OTA_STAGING_DIR}/armbianEnv.pre-ota"
 
     log_info "Staging payload ${payload_id} (extract + full sha256 verification)"
     ota_stage_and_verify "${package_path}" "${incoming}"

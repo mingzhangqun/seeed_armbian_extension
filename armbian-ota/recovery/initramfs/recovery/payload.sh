@@ -133,19 +133,33 @@ ota_source_staged_hook() {
     return 0
 }
 
+# Persist the pre-OTA armbianEnv past the RAM copy: a power cut between the
+# boot clear and ota_patch_config loses both other copies. First capture wins.
+ota_save_pre_ota_env() {
+    src="$1"
+
+    cp "${src}" "${LOGDIR}/armbianEnv.pre-ota" || return 1
+    if [ ! -f "${STAGING_DIR}/armbianEnv.pre-ota" ]; then
+        mkdir -p "${STAGING_DIR}" 2>/dev/null
+        cp "${src}" "${STAGING_DIR}/armbianEnv.pre-ota" 2>/dev/null ||
+            log "WARN: cannot persist pre-OTA armbianEnv to staging; RAM copy only"
+    fi
+    return 0
+}
+
 # Capture the pre-OTA armbianEnv before a hook can reformat anything, so
 # ota_patch_config's overlays merge keeps working when the built-in apply
 # (which owns this capture) is replaced by hook_apply.
 ota_capture_pre_ota_env() {
     if [ -f "${ROOT_MNT}/boot/armbianEnv.txt" ]; then
-        cp "${ROOT_MNT}/boot/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota" &&
+        ota_save_pre_ota_env "${ROOT_MNT}/boot/armbianEnv.txt" &&
             log "captured pre-OTA armbianEnv.txt from rootfs /boot"
     fi
     if [ "${HAS_BOOT_PART:-0}" -eq 1 ]; then
         mkdir -p /mnt/preenv
         if mount -t ext4 -o ro "${BOOT_DEV}" /mnt/preenv 2>/dev/null; then
             if [ -f /mnt/preenv/armbianEnv.txt ]; then
-                cp /mnt/preenv/armbianEnv.txt "${LOGDIR}/armbianEnv.pre-ota" &&
+                ota_save_pre_ota_env /mnt/preenv/armbianEnv.txt &&
                     log "captured pre-OTA armbianEnv.txt from boot partition"
             fi
             umount /mnt/preenv 2>/dev/null || true
@@ -284,7 +298,7 @@ ota_apply_rootfs() {
     # ota_apply_boot is authoritative and overwrites this copy.
     # Must run before the mkfs rebuild: formatting drops the old /boot.
     if [ "${HAS_BOOT_TAR:-0}" -ne 1 ] && [ -f "${ROOT_MNT}/boot/armbianEnv.txt" ]; then
-        if cp "${ROOT_MNT}/boot/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota"; then
+        if ota_save_pre_ota_env "${ROOT_MNT}/boot/armbianEnv.txt"; then
             log "captured pre-OTA armbianEnv.txt from rootfs /boot"
         else
             log "WARN: failed to capture pre-OTA armbianEnv.txt from rootfs /boot"
@@ -397,7 +411,7 @@ ota_apply_boot() {
         # the clear below deletes it (hard ordering: capture -> clear ->
         # extract; inverting it loses the user's overlays, section 7 step 6).
         if [ -f "${BOOT_MNT}/armbianEnv.txt" ]; then
-            if cp "${BOOT_MNT}/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota"; then
+            if ota_save_pre_ota_env "${BOOT_MNT}/armbianEnv.txt"; then
                 log "captured pre-OTA armbianEnv.txt from boot partition"
             else
                 log "WARN: failed to capture pre-OTA armbianEnv.txt from boot partition"
@@ -516,7 +530,12 @@ ota_patch_config() {
         # build-verified order (the RK3588 GPU stack overlay must stay
         # first-class for the desktop to come up); entries only present in
         # the old value are appended, deduplicated.
+        # Staging copy wins over RAM: it survives the power-cut window
+        # between the boot clear and this merge (ota_save_pre_ota_env).
         OTA_OLD_ENV="${LOGDIR}/armbianEnv.pre-ota"
+        if [ -f "${STAGING_DIR}/armbianEnv.pre-ota" ]; then
+            OTA_OLD_ENV="${STAGING_DIR}/armbianEnv.pre-ota"
+        fi
         if [ -f "${OTA_OLD_ENV}" ] && grep -q '^overlays=' "${OTA_OLD_ENV}"; then
             old_overlays="$(ota_env_get_key "${OTA_OLD_ENV}" overlays)"
             new_overlays="$(ota_env_get_key "${ARM_ENV}" overlays)"
