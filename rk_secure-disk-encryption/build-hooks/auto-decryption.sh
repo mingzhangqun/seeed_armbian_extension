@@ -45,7 +45,7 @@ function rk_autodecrypt_install_patch_uboot_target_wrapper() {
         return 0
     fi
 
-    eval "$(declare -f patch_uboot_target | sed '1s/^patch_uboot_target/__rk_autodecrypt_patch_uboot_target_original/')"
+    rk_wrap_function patch_uboot_target __rk_autodecrypt_patch_uboot_target_original
     patch_uboot_target() {
         __rk_autodecrypt_patch_uboot_target_original "$@" || return $?
 

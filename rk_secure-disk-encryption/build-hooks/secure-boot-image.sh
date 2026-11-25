@@ -182,6 +182,11 @@ function rk_secure_boot_mkimage_supports_signing() {
     [[ "${help}" != *"Signing / verified boot not supported"* ]]
 }
 
+# True when the FIT public key node key-dev exists under /signature.
+function rk_fit_key_node_present() {
+    fdtget -l "$1" /signature 2>/dev/null | grep -qx 'key-dev'
+}
+
 function rk_secure_boot_resolve_mkimage() {
     local rkbin_dir candidate
 
@@ -221,7 +226,7 @@ function rk_secure_boot_prepare_signing_toolchain() {
 
     # USBPLUG can clobber tools/mkimage; rebuild from the final config.
     if [[ -x "${uboot_dir}/tools/mkimage" ]] &&
-        "${uboot_dir}/tools/mkimage" -h 2>&1 | grep -q 'Signing / verified boot not supported'; then
+        ! rk_secure_boot_mkimage_supports_signing "${uboot_dir}/tools/mkimage"; then
         make -C "${uboot_dir}" -B tools-only >&2 ||
             exit_with_error "FIT signing failed: unable to rebuild U-Boot host tools" "${uboot_dir}/tools"
     fi
@@ -316,7 +321,7 @@ function rk_secure_boot_run_secondary_fit_signing() {
         # The U-Boot build phase already embeds key-dev into u-boot.dtb.
         # Re-injecting it here is redundant and can exhaust DTB free space.
         "${RK_SECURE_BOOT_MKIMAGE}" -f "${fit_work}/boot-final.its" -k keys/ -E -p "${fit_padding}" -r fit/boot.itb || exit 1
-        fdtget -l u-boot.dtb /signature 2>/dev/null | grep -qx 'key-dev' || exit 1
+        rk_fit_key_node_present u-boot.dtb || exit 1
         # Tree-built verifier: same verify code as the running U-Boot, so a
         # salt drift in the signing tool fails the build instead of the boot.
         ./tools/fit_check_sign -f fit/boot.itb -k u-boot.dtb || exit 1

@@ -52,6 +52,24 @@ function resolve_platform_bl32_blob() {
     esac
 }
 
+# PATH first, then any rkbin tools dir; rc 1 with no output when absent.
+function rk_resolve_rk_sign_tool() {
+    local tool rkbin_root rkbin_dir
+
+    tool="$(command -v rk_sign_tool 2>/dev/null || true)"
+    [[ -n "${tool}" ]] && { echo "${tool}"; return 0; }
+
+    rkbin_root="$(rk_sdk_rkbin_root)"
+    rkbin_dir="$(resolve_platform_rkbin_dir 2>/dev/null || true)"
+    for tool in \
+        "${rkbin_dir}/tools/rk_sign_tool" \
+        "${rkbin_root}/tools/rk_sign_tool"; do
+        [[ -x "${tool}" ]] && { echo "${tool}"; return 0; }
+    done
+
+    return 1
+}
+
 function rk_secure_boot_prepare_tee_bin() {
     local uboot_workdir="$1"
     local platform bl32_blob bl32_path
@@ -306,7 +324,7 @@ function rk_secure_boot_verify_spl_fit_key_complete() {
     local key_node="/signature/key-dev"
     local property value
 
-    fdtget -l "${spl_dtb}" /signature 2>/dev/null | grep -qx 'key-dev' ||
+    rk_fit_key_node_present "${spl_dtb}" ||
         exit_with_error "SPL FIT public key node missing" "${spl_dtb}"
     for property in rsa,modulus rsa,r-squared rsa,c rsa,np rsa,n0-inverse rsa,exponent; do
         value="$(fdtget -t bx "${spl_dtb}" "${key_node}" "${property}" 2>/dev/null)"
@@ -340,8 +358,7 @@ function rk_secure_boot_sign_uboot_fit() {
     local platform keys_dir rk_sign_tool signed_fit fit_padding
     platform="$(rk_detect_platform)"
     keys_dir="${UBOOT_FIT_KEYS_DIR:-${PWD}/keys}"
-    rk_sign_tool="$(command -v rk_sign_tool 2>/dev/null || true)"
-    [[ -n "${rk_sign_tool}" ]] || rk_sign_tool="$(resolve_platform_rkbin_dir)/tools/rk_sign_tool"
+    rk_sign_tool="$(rk_resolve_rk_sign_tool || true)"
 
     [[ "${platform}" != "unknown" ]] || exit_with_error "Cannot sign U-Boot FIT for unknown Rockchip platform" "BOOT_SOC=${BOOT_SOC:-}"
     [[ -x tools/mkimage && -x tools/fit_check_sign ]] || exit_with_error "Rockchip FIT signing tools missing" "${PWD}"
@@ -373,7 +390,7 @@ function rk_secure_boot_sign_uboot_fit() {
         -E -p "${fit_padding}" -r fit/uboot.itb ||
         exit_with_error "Failed to sign Armbian-built U-Boot FIT" "${platform}"
 
-    fdtget -l spl/u-boot-spl.dtb /signature 2>/dev/null | grep -qx 'key-dev' ||
+    rk_fit_key_node_present spl/u-boot-spl.dtb ||
         exit_with_error "FIT public key was not embedded in SPL DTB" "spl/u-boot-spl.dtb"
 
     fdtget -p fit/uboot.itb /configurations/conf/signature 2>/dev/null | grep -qx 'value' ||
@@ -435,13 +452,7 @@ function rk_secure_boot_prepare_uboot_tree() {
     rk_secure_boot_prepare_tee_bin "${uboot_workdir}"
 
     # Find rk_sign_tool executable (prefer PATH)
-    rk_sign_tool="$(command -v rk_sign_tool 2>/dev/null || true)"
-    if [[ -z "${rk_sign_tool}" && -n "${rkbin_dir}" && -x "${rkbin_dir}/tools/rk_sign_tool" ]]; then
-        rk_sign_tool="${rkbin_dir}/tools/rk_sign_tool"
-    fi
-    if [[ -z "${rk_sign_tool}" && -n "${rkbin_root}" && -x "${rkbin_root}/tools/rk_sign_tool" ]]; then
-        rk_sign_tool="${rkbin_root}/tools/rk_sign_tool"
-    fi
+    rk_sign_tool="$(rk_resolve_rk_sign_tool || true)"
 
     if [[ -z "${rk_sign_tool}" ]]; then
         if rk_full_secure_boot_enabled; then
