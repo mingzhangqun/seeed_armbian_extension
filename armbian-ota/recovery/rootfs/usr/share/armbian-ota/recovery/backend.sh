@@ -295,6 +295,10 @@ recovery_create_backup() {
             rm -rf "${work}"
             error_exit "Backup: no FIT header on raw boot partition ${raw_boot_dev}"
         }
+        [ "${fit_size}" -gt 0 ] || {
+            rm -rf "${work}"
+            error_exit "Backup: zero FIT totalsize on ${raw_boot_dev} (corrupt header)"
+        }
         log_info "Reading FIT (${fit_size} bytes) from ${raw_boot_dev} -> boot.itb"
         if ! dd if="${raw_boot_dev}" of="${work}/boot.itb" \
                  bs=512 count=$(( (fit_size + 511) / 512 )) status=none; then
@@ -304,6 +308,13 @@ recovery_create_backup() {
         truncate -s "${fit_size}" "${work}/boot.itb" || {
             rm -rf "${work}"
             error_exit "Backup: failed to trim boot.itb to FIT size"
+        }
+        # Read-back: boot.sha256 is self-consistent, so without this a
+        # corrupted dd read would publish a "verified" bad backup.
+        ota_fit_readback_verify "${raw_boot_dev}" "${fit_size}" \
+            "$(sha256sum "${work}/boot.itb" | awk '{print $1}')" "${OTA_STAGING_DIR}" || {
+            rm -rf "${work}"
+            error_exit "Backup: FIT readback does not match ${raw_boot_dev}"
         }
         ln "${work}/boot.itb" "${boot_tree}/boot.itb" || {
             rm -rf "${work}"
@@ -532,9 +543,8 @@ recovery_rollback() {
     error_exit "Rollback is not a user command in recovery mode; recovery happens automatically when retries are exhausted (v0.8 design section 15.4)"
 }
 
-# CLI dispatch target (armbian-ota reconcile): in recovery mode the env
-# reconciliation runs on every boot inside armbian-ota-health-recovery,
-# so there is nothing to trigger manually.
+# CLI dispatch target (armbian-ota reconcile): recovery mode reconciles
+# on every boot inside armbian-ota-health-recovery; nothing to trigger.
 recovery_reconcile() {
     log_info "Recovery mode reconciles on every boot (armbian-ota-health-recovery); nothing to do"
 }
