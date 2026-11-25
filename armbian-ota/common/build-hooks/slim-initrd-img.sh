@@ -30,6 +30,16 @@ function pre_umount_final_image__899_slim_initrd_img() {
             exit_with_error "Boot slim" "failed to remove ${img}"
     done
 
+    # The unversioned initrd.img[.old] symlinks now dangle: U-Boot loads
+    # uInitrd only, and the framework's dangling-link cleanup is FAT-only.
+    local link
+    for link in "${boot_dir}/initrd.img" "${boot_dir}/initrd.img.old"; do
+        [[ -L "${link}" && ! -e "${link}" ]] || continue
+        rm -f "${link}" ||
+            exit_with_error "Boot slim" "failed to remove ${link}"
+        removed+=("$(basename "${link}")")
+    done
+
     ((${#removed[@]})) || return 0
     display_alert "Boot slim" "removed initrd.img-* from /boot: ${removed[*]}" "info"
     sync
