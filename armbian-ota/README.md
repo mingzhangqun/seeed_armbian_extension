@@ -271,7 +271,7 @@ Encrypted A/B (auto-decrypt or secure boot):
 ### U-Boot Environment Variables
 
 
-The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy), size `0x8000` each, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. Every shipped U-Boot is patched for the redundant layout (`-r` prefill, unconditional two-entry `fw_env.config`): writes alternate between the copies, so a torn write never destroys the last good copy. A both-bad rebuild runs `fw_setenv -f /etc/u-boot-initial-env` — the same mechanism A/B uses.
+The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy), size `0x8000` each, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. Every shipped U-Boot is patched for the redundant layout (`-r` prefill, unconditional two-entry `fw_env.config`): writes alternate between the copies, so a torn write never destroys the last good copy. A both-bad rebuild runs `fw_setenv -f /etc/u-boot-initial-env` — every boot on A/B (`armbian-ota-init-uboot`), every normal boot on recovery (`99-ota-normal-marker`; the Rescue gate needs a healthy env).
 
 | Variable | Purpose |
 |----------|---------|

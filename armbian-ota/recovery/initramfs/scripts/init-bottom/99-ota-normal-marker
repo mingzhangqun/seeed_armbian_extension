@@ -8,6 +8,9 @@
 # marker read is lower-layer-visible (upper shadowing would be the correct,
 # newer identity anyway). Missing marker (fresh pre-v0.8 root) is not an
 # error here; the health service owns that judgement.
+#
+# Also rebuild a dual-bad env (261124 finding): the Rescue gate needs a
+# healthy env to route, so probe here every normal boot. Fail-open.
 
 PREREQ=""
 
@@ -30,6 +33,47 @@ MARKER_DST_DIR="/run/armbian-ota"
 case " $(cat /proc/cmdline 2>/dev/null) " in
     *" armbian.ota_role=recovery "*) exit 0 ;;
 esac
+
+ota_env_boot_rebuild() {
+    . /usr/share/armbian-ota/fwenv.sh 2>/dev/null || return 0
+    . /usr/share/armbian-ota/find-userdata.sh 2>/dev/null || return 0
+
+    # Anchor on the overlay lower root; real mapper nodes need maj:min.
+    lower_src="$(awk '$2 == "/media/root-ro" { print $1; exit }' /proc/mounts 2>/dev/null | sed 's~\[.*\]~~')"
+    [ -n "${lower_src}" ] || return 0
+
+    majmin="$(awk '$5 == "/media/root-ro" { print $3; exit }' /proc/self/mountinfo 2>/dev/null)"
+    [ -n "${majmin}" ] || return 0
+    base="$(basename "$(readlink -f "/sys/dev/block/${majmin}" 2>/dev/null)" 2>/dev/null)"
+    [ -n "${base}" ] || return 0
+    raw_part=""
+    if [ -f "/sys/class/block/${base}/partition" ]; then
+        raw_part="/dev/${base}"
+    elif [ -d "/sys/class/block/${base}/slaves" ]; then
+        slave="$(ls "/sys/class/block/${base}/slaves" 2>/dev/null | head -n1)"
+        if [ -n "${slave}" ] && [ -f "/sys/class/block/${slave}/partition" ]; then
+            raw_part="/dev/${slave}"
+        fi
+    fi
+    [ -n "${raw_part}" ] || return 0
+
+    disk="$(find_user_data__parent_disk "${raw_part}" 2>/dev/null)" || return 0
+    [ -n "${disk}" ] && [ -b "${disk}" ] || return 0
+
+    fw_env_write_config "${disk}" 2>/dev/null || return 0
+
+    fw_env_crc_bad || return 0
+
+    echo "armbian-ota: env unreadable; rebuilding routing set on ${disk}" >&2
+    if fw_env_write_routing_set "0" "recovery" 2>/dev/null; then
+        echo "armbian-ota: env rebuilt (full routing set, ota_in_progress=0)" >&2
+    else
+        echo "armbian-ota: WARNING env rebuild failed; continuing boot" >&2
+    fi
+    return 0
+}
+
+ota_env_boot_rebuild
 
 [ -f "${MARKER_SRC}" ] || exit 0
 

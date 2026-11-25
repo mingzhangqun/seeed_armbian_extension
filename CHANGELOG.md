@@ -11,6 +11,12 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **Recovery rebuilds a both-bad env on every normal boot.** The Rescue
+  rebuild needs the `ota_role` routing only a healthy env can set, so a
+  dual-bad env killed remote OTA (261124 batch); the init-bottom marker
+  hook now probes and rebuilds, anchored on the overlay lower root.
+  Fail-open.
+
 - **README passphrase claim was stale.** "Validated non-empty only"
   predates the secure-storage hard gate: the build fails any passphrase
   whose length is not exactly 64; the hex charset stays documentation-only.
