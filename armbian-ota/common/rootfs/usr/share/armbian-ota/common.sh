@@ -173,11 +173,9 @@ ota_check_board_release() {
     [ -n "${board}" ] || error_exit "OTA package metadata missing BOARD; refusing"
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
-    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-release 2>/dev/null | head -n1)"
-    # Release truth: identity-file stamp; legacy falls back to /etc/armbian-release.
+    # Snapshot only: armbian-release is package-owned and can drift.
+    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
     sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
-    [ -n "${sys_release}" ] ||
-        sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-release 2>/dev/null | head -n1)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -196,12 +194,9 @@ ota_check_image_variant() {
     local package_variant system_variant
 
     package_variant="$(package_env_get_value "IMAGE_VARIANT" || true)"
-    # Legacy devices pre-date the armbian-image-release stamp.
     system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
-    [ -n "${system_variant}" ] ||
-        system_variant="$(sed -n 's/^IMAGE_VARIANT=//p' /etc/armbian-ota-image 2>/dev/null | head -n1)"
     if [ -z "${package_variant}" ] || [ -z "${system_variant}" ]; then
-        log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping legacy variant gate"
+        log_warn "IMAGE_VARIANT missing (package=${package_variant:-unknown}, device=${system_variant:-unknown}); skipping variant gate"
         return 0
     fi
     [ "${package_variant}" = "${system_variant}" ] ||
@@ -320,10 +315,6 @@ OTA_RUNTIME_VERSION="1.4"
 # images without zstd then refuse zst packages at negotiation.
 OTA_RUNTIME_FORMATS="gz xz"
 command -v zstd >/dev/null 2>&1 && OTA_RUNTIME_FORMATS="${OTA_RUNTIME_FORMATS} zst"
-OTA_HOOK_API="1"
-OTA_HOOK_DEFAULT_NAME="ota-hook.sh"
-# Pre-1.2 packages may still carry the narrow "apply hook" name/declaration.
-OTA_HOOK_LEGACY_NAME="ota-apply-hook.sh"
 
 # Magic-byte sniff: the payload's first bytes must match its suffix so a
 # renamed archive cannot bypass format negotiation.
@@ -378,34 +369,7 @@ ota_check_package_requirements() {
     fi
 }
 
-# Resolve the hook filename for a staged work dir: declared name wins (OTA_HOOK,
-# legacy OTA_APPLY_HOOK accepted), then conventional ota-hook.sh, then the
-# legacy ota-apply-hook.sh. Empty when the package carries no hook.
-ota_resolve_hook_name() {
-    local work_dir="$1" declared
-
-    # Read the staged package.env directly: this must not depend on the
-    # metadata cache being loaded (mirrors the initramfs implementation).
-    if [ -f "${work_dir}/package.env" ]; then
-        declared="$(sed -n 's/^OTA_HOOK=//p' "${work_dir}/package.env" | head -n1)"
-        if [ -z "${declared}" ]; then
-            declared="$(sed -n 's/^OTA_APPLY_HOOK=//p' "${work_dir}/package.env" | head -n1)"
-        fi
-    fi
-    if [ -n "${declared}" ] && [ -f "${work_dir}/${declared}" ]; then
-        printf '%s\n' "${declared}"
-        return 0
-    fi
-    if [ -f "${work_dir}/${OTA_HOOK_DEFAULT_NAME}" ]; then
-        printf '%s\n' "${OTA_HOOK_DEFAULT_NAME}"
-        return 0
-    fi
-    if [ -f "${work_dir}/${OTA_HOOK_LEGACY_NAME}" ]; then
-        printf '%s\n' "${OTA_HOOK_LEGACY_NAME}"
-        return 0
-    fi
-    return 1
-}
+# ota_resolve_hook_name lives in posix.sh (shared with the initramfs).
 
 # Source the staged hook (definition-only convention: hooks must contain
 # nothing but function definitions -- the script is sourced at every phase).
@@ -424,18 +388,7 @@ ota_source_hook() {
     return 0
 }
 
-# Call the named hook function if the hook defined it; a no-op otherwise.
-# The function's return code is passed through.
-ota_call_hook() {
-    local fn="$1"
-    shift
-
-    if ! type "${fn}" >/dev/null 2>&1; then
-        return 0
-    fi
-    log_info "OTA hook point: ${fn}"
-    "${fn}" "$@"
-}
+# ota_call_hook lives in posix.sh (shared with the initramfs).
 
 # Phase-1 hook point (live system): hook_after_unpack runs once extraction,
 # checksum and negotiation all passed, before state=prepared is written.
@@ -462,6 +415,7 @@ OTA_SYSPW_FILE="/tmp/syspw"
 
 COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${COMMON_LIB_DIR}/state.sh"
+. "${COMMON_LIB_DIR}/posix.sh"
 unset COMMON_LIB_DIR
 
 ota_source_library() {
@@ -503,6 +457,11 @@ log_error() {
 error_exit() {
     log_error "$@"
     exit 1
+}
+
+# posix.sh logging adapter (shared with the busybox initramfs).
+ota_lib_log() {
+    log_info "$@"
 }
 
 ensure_root() {
@@ -661,6 +620,22 @@ load_staged_package_env() {
     return 0
 }
 
+# Shared extract+verify pipeline for the A/B and recovery backends: every
+# gate added here applies to both flavors identically.
+ota_stage_and_verify() {
+    local package_path="$1"
+    local dest_dir="$2"
+
+    extract_ota_package "${package_path}" "${dest_dir}"
+    ota_assert_dual_payload "${dest_dir}"
+    ota_assert_payload_matches_system "${dest_dir}"
+    ota_verify_payload "${dest_dir}" \
+        "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
+        "${OTA_PAYLOAD_BOOT_TAR}" "${OTA_PAYLOAD_BOOT_SHA}" "${OTA_PAYLOAD_BOOT_ITB}"
+    ota_check_package_requirements "${dest_dir}"
+    ota_run_phase1_hooks "${dest_dir}"
+}
+
 verify_sha256() {
     local payload="$1"
     local sha_file="$2"
@@ -708,12 +683,36 @@ verify_payload_archives() {
     fi
 }
 
-ota_is_fit_image() {
-    local image="$1" magic
+# ota_is_fit_image lives in posix.sh (shared with the initramfs).
 
-    [ -f "${image}" ] || return 1
-    magic="$(dd if="${image}" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [ "${magic}" = "d00dfeed" ]
+# ===== raw-FIT layout probes (recovery backend + health check) ==============
+
+# First PARTLABEL=boot device with no filesystem (raw signed FIT at
+# offset 0); empty <disk> probes unscoped (advisory callers only).
+ota_raw_boot_part() {
+    local disk="$1" dev
+
+    for dev in $(blkid -t PARTLABEL=boot -o device 2>/dev/null); do
+        [ -z "${disk}" ] || case "${dev}" in
+            "${disk}"p[0-9]*) ;;
+            *) continue ;;
+        esac
+        [ -z "$(blkid -s TYPE -o value "${dev}" 2>/dev/null)" ] || continue
+        printf '%s\n' "${dev}"
+        return 0
+    done
+    return 1
+}
+
+# Exact FIT size from the FDT header (magic + 4-byte big-endian totalsize);
+# reading the whole partition would stage stale padding into backups.
+ota_fit_size_bytes() {
+    local dev="$1" header
+
+    header="$(dd if="${dev}" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [ "${#header}" -ge 16 ] || return 1
+    [ "${header:0:8}" = "d00dfeed" ] || return 1
+    printf '%d' "0x${header:8:8}" 2>/dev/null || return 1
 }
 
 # ===== Encrypted payload: signature verification + decryption =====

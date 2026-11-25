@@ -144,14 +144,7 @@ ab_start_ota() {
     ab_check_space "${package_path}"
 
     temp_work="$(make_ota_work_dir "ab-package")"
-    extract_ota_package "${package_path}" "${temp_work}"
-    ota_assert_dual_payload "${temp_work}"
-    ota_assert_payload_matches_system "${temp_work}"
-    ota_verify_payload "${temp_work}" \
-        "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
-        "${OTA_PAYLOAD_BOOT_TAR}" "${OTA_PAYLOAD_BOOT_SHA}" "${OTA_PAYLOAD_BOOT_ITB}"
-    ota_check_package_requirements "${temp_work}"
-    ota_run_phase1_hooks "${temp_work}"
+    ota_stage_and_verify "${package_path}" "${temp_work}"
 
     ab_update_target_partition "${temp_work}" "${target_root_label}" "${target_boot_label}" "${package_path}" "${current_slot}"
     rm -rf "${temp_work}"
@@ -230,16 +223,34 @@ ab_reconcile() {
 }
 
 ab_rollback() {
-    local last_success
+    local last_success current_slot rollback_slot
     ab_require_tools
 
     if [ "$(ab_env_get ota_in_progress)" != "1" ]; then
-        log_info "No A/B OTA in progress, nothing to rollback"
-        return 0
+        # Env flag may be zeroed by a dual-bad rebuild; state file is
+        # authoritative then.
+        current_slot="$(ab_get_current_root_slot 2>/dev/null || true)"
+        case "${current_slot}" in
+            a|b) ;;
+            *)
+                log_info "No A/B OTA in progress, nothing to rollback"
+                return 0
+                ;;
+        esac
+        rollback_slot="$(ab_env_rebuild_slot "${current_slot}")"
+        if [ "${rollback_slot}" = "${current_slot}" ]; then
+            log_info "No A/B OTA in progress, nothing to rollback"
+            return 0
+        fi
+        last_success="${rollback_slot}"
+        # Undo the rebuild's boot_success re-point before rolling back.
+        ab_env_set "boot_success=${last_success}" ||
+            error_exit "Failed to restore boot_success after env rebuild"
+    else
+        last_success="$(ab_env_get boot_success)"
+        [ -n "${last_success}" ] || last_success="a"
     fi
 
-    last_success="$(ab_env_get boot_success)"
-    [ -n "${last_success}" ] || last_success="a"
     ab_env_rollback || error_exit "Failed to restore A/B boot state"
     state_mark_completed "ab" "rollback" "${last_success}" "" ||
         error_exit "Failed to record A/B rollback state"

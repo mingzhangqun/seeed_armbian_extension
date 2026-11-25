@@ -12,11 +12,7 @@
 get_dev_and_uuid_by_label() {
     label="$1"
     disk="${2:-}"
-    if [ -n "${disk}" ]; then
-        dev="$(blkid -t LABEL="${label}" -o device 2>/dev/null | grep -E "^${disk}p[0-9]+$" | head -n1)"
-    else
-        dev="$(blkid -t LABEL="${label}" -o device 2>/dev/null | head -n1)"
-    fi
+    dev="$(ota_blkid_first_on_disk "LABEL=${label}" "${disk}")"
     [ -n "${dev}" ] || return 1
     uuid="$(blkid -s UUID -o value "${dev}" 2>/dev/null | head -n1)"
     [ -n "${uuid}" ] || return 1
@@ -30,19 +26,7 @@ get_uuid_by_label() {
 }
 
 # Restrict lookups to the boot disk; clones duplicate labels/UUIDs.
-
-# First blkid device match for KEY=value, restricted to partitions of $disk
-# (mmcblkNpX / nvmeXn1pY naming) when a disk is given.
-first_match_on_disk() {
-    local filter="$1" disk="$2"
-
-    if [ -n "${disk}" ]; then
-        blkid -t "${filter}" -o device 2>/dev/null |
-            grep -E "^${disk}p[0-9]+$" | head -n1
-    else
-        blkid -t "${filter}" -o device 2>/dev/null | head -n1
-    fi
-}
+# ota_blkid_first_on_disk lives in posix.sh (shared with the A/B runtime).
 
 # ===== helper: get LUKS UUID for encrypted root backing device =====
 # Anchored: prefer the container the initramfs actually unlocked (its sysfs
@@ -50,27 +34,19 @@ first_match_on_disk() {
 # container restricted to the boot disk. Unanchored first-match remains the
 # last resort for images without the cmdline tokens.
 get_luks_uuid_for_root() {
-    local root_luks_dev disk _dm _slave
+    local root_luks_dev disk
 
     root_luks_dev=""
     if [ -e /dev/mapper/armbian-root ]; then
-        for _dm in /sys/class/block/dm-*; do
-            [ -e "${_dm}" ] || continue
-            [ "$(cat "${_dm}/dm/name" 2>/dev/null)" = "armbian-root" ] || continue
-            for _slave in "${_dm}/slaves/"*; do
-                [ -e "${_slave}" ] || continue
-                root_luks_dev="/dev/$(sed -n 's/^DEVNAME=//p' "${_slave}/uevent" 2>/dev/null | head -n1)"
-                break
-            done
-            break
-        done
+        # Shared resolver maps the mapper to its backing partition.
+        root_luks_dev="$(find_user_data__raw_partition_of /dev/mapper/armbian-root 2>/dev/null || true)"
     fi
 
     if [ -z "${root_luks_dev}" ] || [ "$(blkid -s TYPE -o value "${root_luks_dev}" 2>/dev/null || true)" != "crypto_LUKS" ]; then
         disk="$(fw_env_boot_disk || true)"
-        root_luks_dev="$(first_match_on_disk "PARTLABEL=rootfs" "${disk}" || true)"
+        root_luks_dev="$(ota_blkid_first_on_disk "PARTLABEL=rootfs" "${disk}" || true)"
         if [ -z "${root_luks_dev}" ] || [ "$(blkid -s TYPE -o value "${root_luks_dev}" 2>/dev/null || true)" != "crypto_LUKS" ]; then
-            root_luks_dev="$(first_match_on_disk "TYPE=crypto_LUKS" "${disk}" || true)"
+            root_luks_dev="$(ota_blkid_first_on_disk "TYPE=crypto_LUKS" "${disk}" || true)"
         fi
     fi
 
@@ -128,12 +104,7 @@ file_size_bytes() {
     wc -c < "${file}" 2>/dev/null | awk '{print $1}'
 }
 
-is_fit_image() {
-    file="$1"
-
-    magic="$(dd if="${file}" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [ "${magic}" = "d00dfeed" ]
-}
+# ota_is_fit_image lives in posix.sh (shared with the rootfs runtime).
 
 # ===== detect firmware mode and root/boot devices =====
 # Sets globals: ROOT_DEV, ROOT_UUID, BOOT_DEV, BOOT_UUID, HAS_BOOT_PART,
@@ -191,7 +162,7 @@ ota_detect_devices() {
             luks_root_dev=""
             case "${cmdline_root}" in
                 UUID=*)
-                    luks_root_dev="$(first_match_on_disk "UUID=${cmdline_root#UUID=}" "$(fw_env_boot_disk || true)")"
+                    luks_root_dev="$(ota_blkid_first_on_disk "UUID=${cmdline_root#UUID=}" "$(fw_env_boot_disk || true)")"
                     ;;
                 LABEL=*)
                     luks_root_dev="$(get_dev_and_uuid_by_label "${cmdline_root#LABEL=}" "$(fw_env_boot_disk || true)" || true)"
@@ -270,7 +241,7 @@ ota_detect_devices() {
                     _cdev=""
                     _i=0
                     while [ "${_i}" -lt 10 ]; do
-                        _cdev="$(first_match_on_disk "UUID=${_cuuid}" "$(fw_env_boot_disk || true)")"
+                        _cdev="$(ota_blkid_first_on_disk "UUID=${_cuuid}" "$(fw_env_boot_disk || true)")"
                         [ -n "${_cdev}" ] && break
                         sleep 1
                         _i=$((_i + 1))

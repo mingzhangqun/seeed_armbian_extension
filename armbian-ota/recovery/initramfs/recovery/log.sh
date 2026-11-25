@@ -26,6 +26,11 @@ log_tail() {
     done
 }
 
+# posix.sh logging adapter (shared with the bash rootfs runtime).
+ota_lib_log() {
+    log "$@"
+}
+
 # ===== heartbeat for long-running operations =====
 HEARTBEAT_PID=""
 

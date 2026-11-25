@@ -4,8 +4,8 @@
 #
 # Sourced by 99-ota-apply; /bin/sh + busybox.
 #
-# Expects globals from the orchestrator: ROOT_MNT, BOOT_MNT, STATE_DIR,
-# STATE_FILE, OTA_DIR, ROOTFS_TAR, BOOT_TAR, BOOT_ITB.
+# Expects globals from the orchestrator: ROOT_MNT, BOOT_MNT,
+# OTA_STAGING_DIR, OTA_DIR, ROOTFS_TAR, BOOT_TAR, BOOT_ITB.
 # Reads globals from ota_detect_devices: ROOT_DEV, ROOT_UUID, BOOT_DEV,
 # BOOT_UUID, HAS_BOOT_PART, AUTO_DECRYPT_MODE.
 # Sets globals: HAS_BOOT_TAR, HAS_BOOT_ITB, DO_BOOT_OTA, BOOT_MNT (reassigned).
@@ -111,32 +111,18 @@ extract_tar() {
     return 1
 }
 
-# ===== package-provided OTA hook (OTA_HOOK_API=1) =====
+# ===== package-provided OTA hook (OTA_HOOK_API=1, posix.sh) =====
 # Fixed call points around the built-in phase-2 flow (docs/10-ota-package-formats.md):
 # hook_pre_apply / hook_apply / hook_post_apply are invoked by 99-ota-apply.
 # Hook scripts are sourced in every phase and must be definition-only.
-OTA_HOOK_API="1"
-
-# Resolve the staged hook filename: declared OTA_HOOK (legacy OTA_APPLY_HOOK
-# accepted) wins, then conventional ota-hook.sh, then the legacy name.
-ota_hook_name_staged() {
-    hook_name=""
-
-    if [ -f "${OTA_DIR}/package.env" ]; then
-        hook_name="$(sed -n 's/^OTA_HOOK=//p' "${OTA_DIR}/package.env" | head -n1)"
-        [ -z "${hook_name}" ] && hook_name="$(sed -n 's/^OTA_APPLY_HOOK=//p' "${OTA_DIR}/package.env" | head -n1)"
-    fi
-    [ -n "${hook_name}" ] && [ -f "${OTA_DIR}/${hook_name}" ] || hook_name="ota-hook.sh"
-    [ -f "${OTA_DIR}/${hook_name}" ] || hook_name="ota-apply-hook.sh"
-    [ -f "${OTA_DIR}/${hook_name}" ] || return 1
-    printf '%s\n' "${hook_name}"
-}
+# ota_resolve_hook_name / ota_call_hook / OTA_HOOK_* constants come from
+# posix.sh (shared with the rootfs runtime).
 
 # Source the staged hook once; sets OTA_HOOK_PATH. rc 1 = package has no hook.
 ota_source_staged_hook() {
     OTA_HOOK_PATH=""
 
-    hook_name="$(ota_hook_name_staged)" || return 1
+    hook_name="$(ota_resolve_hook_name "${OTA_DIR}")" || return 1
     OTA_HOOK_PATH="${OTA_DIR}/${hook_name}"
     log "OTA hook loaded: ${hook_name} (API ${OTA_HOOK_API})"
     # shellcheck disable=SC1090
@@ -147,13 +133,18 @@ ota_source_staged_hook() {
     return 0
 }
 
-# Call $1 if the hook defined it; no-op otherwise, rc passthrough.
-ota_call_hook() {
-    fn="$1"
+# Persist the pre-OTA armbianEnv past the RAM copy: a power cut between the
+# boot clear and ota_patch_config loses both other copies. First capture wins.
+ota_save_pre_ota_env() {
+    src="$1"
 
-    type "${fn}" >/dev/null 2>&1 || return 0
-    log "OTA hook point: ${fn}"
-    "${fn}"
+    cp "${src}" "${LOGDIR}/armbianEnv.pre-ota" || return 1
+    if [ ! -f "${OTA_STAGING_DIR}/armbianEnv.pre-ota" ]; then
+        mkdir -p "${OTA_STAGING_DIR}" 2>/dev/null
+        cp "${src}" "${OTA_STAGING_DIR}/armbianEnv.pre-ota" 2>/dev/null ||
+            log "WARN: cannot persist pre-OTA armbianEnv to staging; RAM copy only"
+    fi
+    return 0
 }
 
 # Capture the pre-OTA armbianEnv before a hook can reformat anything, so
@@ -161,14 +152,14 @@ ota_call_hook() {
 # (which owns this capture) is replaced by hook_apply.
 ota_capture_pre_ota_env() {
     if [ -f "${ROOT_MNT}/boot/armbianEnv.txt" ]; then
-        cp "${ROOT_MNT}/boot/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota" &&
+        ota_save_pre_ota_env "${ROOT_MNT}/boot/armbianEnv.txt" &&
             log "captured pre-OTA armbianEnv.txt from rootfs /boot"
     fi
     if [ "${HAS_BOOT_PART:-0}" -eq 1 ]; then
         mkdir -p /mnt/preenv
         if mount -t ext4 -o ro "${BOOT_DEV}" /mnt/preenv 2>/dev/null; then
             if [ -f /mnt/preenv/armbianEnv.txt ]; then
-                cp /mnt/preenv/armbianEnv.txt "${LOGDIR}/armbianEnv.pre-ota" &&
+                ota_save_pre_ota_env /mnt/preenv/armbianEnv.txt &&
                     log "captured pre-OTA armbianEnv.txt from boot partition"
             fi
             umount /mnt/preenv 2>/dev/null || true
@@ -178,62 +169,14 @@ ota_capture_pre_ota_env() {
     return 0
 }
 
-set_env_key() {
-    file="$1"
-    key="$2"
-    value="$3"
-
-    if grep -q "^${key}=" "${file}"; then
-        sed -i "s|^${key}=.*$|${key}=${value}|" "${file}"
-    else
-        printf '\n%s=%s\n' "${key}" "${value}" >> "${file}"
-    fi
-}
+# set_env_key / ota_fit_readback_verify live in posix.sh (shared with the
+# A/B runtime).
 
 # Verify the exact FIT extent, not the whole partition's padding. Read complete
 # 1 MiB blocks plus one tail block, streaming them into the digest instead of
 # relying on a pipe's final status. A failed or short read produces a different
-# digest and aborts the write transaction.
-ota_fit_readback_verify() (
-    # This is a POSIX library with shared globals. Keep this helper's state in
-    # a subshell: other apply helpers also use fit_* names. Keep the digest
-    # outside the read pipeline so its counter updates survive in this shell.
-    fit_target="$1"
-    fit_size="$2"
-    fit_expected_sha="$3"
-    fit_status="${LOGDIR}/fit-readback.status.$$"
-    fit_sha_file="${LOGDIR}/fit-readback.sha256.$$"
-    rm -f "${fit_status}" "${fit_sha_file}" 2>/dev/null || true
-
-    fit_remaining="${fit_size}"
-    fit_offset=0
-    {
-        while [ "${fit_remaining}" -gt 0 ]; do
-            fit_chunk="${fit_remaining}"
-            [ "${fit_chunk}" -gt 1048576 ] && fit_chunk=1048576
-            if [ "${fit_chunk}" -eq 1048576 ]; then
-                dd if="${fit_target}" bs=1M skip=$((fit_offset / 1048576)) \
-                    count=1 iflag=fullblock status=none || break
-            else
-                dd if="${fit_target}" bs=1 skip="${fit_offset}" count="${fit_chunk}" \
-                    iflag=fullblock status=none || break
-            fi
-            fit_offset=$((fit_offset + fit_chunk))
-            fit_remaining=$((fit_remaining - fit_chunk))
-        done
-        printf '%s\n' "${fit_remaining}" > "${fit_status}"
-    } | sha256sum | awk '{print $1}' > "${fit_sha_file}"
-
-    fit_actual_sha="$(cat "${fit_sha_file}" 2>/dev/null)"
-    fit_read_rc=1
-    [ -f "${fit_status}" ] && fit_read_rc="$(cat "${fit_status}" 2>/dev/null)"
-    rm -f "${fit_status}" "${fit_sha_file}" 2>/dev/null || true
-    if [ "${fit_read_rc}" != "0" ] || [ "${fit_actual_sha}" != "${fit_expected_sha}" ]; then
-        log "ERROR: written FIT readback failed or does not match source"
-        return 1
-    fi
-    return 0
-)
+# digest and aborts the write transaction. (ota_fit_readback_verify lives in
+# posix.sh, shared with the A/B slot writer.)
 
 write_raw_boot_itb() {
     image="$1"
@@ -251,7 +194,7 @@ write_raw_boot_itb() {
         return 1
     }
 
-    if ! is_fit_image "${image}"; then
+    if ! ota_is_fit_image "${image}"; then
         log "ERROR: refusing to write invalid FIT image: ${image}"
         return 1
     fi
@@ -282,87 +225,11 @@ write_raw_boot_itb() {
     if command -v sha256sum >/dev/null 2>&1; then
         log "verifying written FIT against boot.sha256 ..."
         source_sha="$(sha256sum "${image}" | awk '{print $1}')"
-        ota_fit_readback_verify "${target}" "${image_size}" "${source_sha}" || return 1
+        ota_fit_readback_verify "${target}" "${image_size}" "${source_sha}" "${LOGDIR}" || return 1
         log "boot.itb verified after write (sha256=${source_sha})"
     else
         log "WARN: sha256sum unavailable in initramfs; skipping post-write verification"
     fi
-}
-
-# ===== validate recovery state on mounted rootfs =====
-# Returns 1 (caller unmounts+skips) when state/payload is not applicable.
-ota_validate_recovery_state() {
-    if [ ! -f "${STATE_FILE}" ]; then
-        log "no OTA state file at ${STATE_FILE}, unmount and skip"
-        return 1
-    fi
-
-    if ! grep -q '^OTA_MODE=recovery$' "${STATE_FILE}" 2>/dev/null ||
-       ! grep -q '^STATUS=prepared$' "${STATE_FILE}" 2>/dev/null; then
-        log "OTA state is not recovery/prepared, unmount and skip"
-        return 1
-    fi
-
-    # check OTA payload: rootfs.tar.gz is required, boot.tar.gz is optional
-    if [ ! -d "${OTA_DIR}" ] || [ ! -f "${ROOTFS_TAR}" ]; then
-        log "no rootfs OTA payload at ${OTA_DIR}, unmount and skip"
-        return 1
-    fi
-
-    # Payload/system encryption match (phase-2 backstop; phase 1 already
-    # rejects the mismatched pairs before anything is touched). The .enc blob
-    # stays staged after the phase-1 decrypt, so its presence still marks an
-    # encrypted package here.
-    if [ -f "${OTA_DIR}/rootfs.tar.xz.enc" ] || [ -f "${OTA_DIR}/rootfs.tar.gz.enc" ]; then
-        pkg_encrypted=1
-    else
-        pkg_encrypted=0
-    fi
-    if [ "${pkg_encrypted}" != "${AUTO_DECRYPT_MODE:-0}" ]; then
-        log "ERROR: payload/system encryption mismatch (encrypted payload=${pkg_encrypted}, auto-decrypt mode=${AUTO_DECRYPT_MODE:-0}), abort"
-        return 1
-    fi
-
-    # If a payload manifest shipped (encrypted payload was decrypted in phase 1),
-    # re-check the plaintext rootfs tar sha256 against it before applying, so a
-    # tamper of the transaction store between phase 1 and phase 2 is caught.
-    if [ -f "${OTA_DIR}/payload.manifest" ]; then
-        if ! command -v sha256sum >/dev/null 2>&1; then
-            log "ERROR: sha256sum unavailable in initramfs; cannot re-check plaintext rootfs sha; abort"
-            return 1
-        fi
-        expected_root_sha="$(sed -n 's/^OTA_PAYLOAD_ROOTFS_SHA256=//p' "${OTA_DIR}/payload.manifest" | head -n1)"
-        if [ -n "${expected_root_sha}" ]; then
-            actual_root_sha="$(sha256sum "${ROOTFS_TAR}" | awk '{print $1}')"
-            if [ "${actual_root_sha}" != "${expected_root_sha}" ]; then
-                log "ERROR: plaintext rootfs sha256 (${actual_root_sha}) != manifest (${expected_root_sha}); possible tamper, abort"
-                return 1
-            fi
-            log "recovery: plaintext rootfs sha256 matches payload manifest"
-        fi
-    fi
-
-    HAS_BOOT_TAR=0
-    [ -f "${BOOT_TAR}" ] && HAS_BOOT_TAR=1
-    HAS_BOOT_ITB=0
-    [ -f "${BOOT_ITB}" ] && HAS_BOOT_ITB=1
-
-    # Package-requested deferral of the built-in boot refresh
-    # (OTA_BOOT_REFRESH=0 in package.env): ota_apply_boot is skipped so the
-    # package hook owns a per-file atomic swap instead
-    # (recovery/hooks/boot-atomic-swap.sh). Absent key keeps legacy behavior.
-    OTA_BOOT_HOOK_MODE=0
-    if [ "${HAS_BOOT_TAR}" -eq 1 ]; then
-        bsw_flag="$(sed -n 's/^OTA_BOOT_REFRESH=//p' "${OTA_DIR}/package.env" 2>/dev/null | head -n1)"
-        if [ "${bsw_flag}" = "0" ]; then
-            OTA_BOOT_HOOK_MODE=1
-            HAS_BOOT_TAR=0
-            log "boot refresh deferred to OTA hook (package.env OTA_BOOT_REFRESH=0)"
-        fi
-    fi
-
-    log "found rootfs OTA payload, HAS_BOOT_PART=${HAS_BOOT_PART}, HAS_BOOT_TAR=${HAS_BOOT_TAR}, HAS_BOOT_ITB=${HAS_BOOT_ITB}, hook_mode=${OTA_BOOT_HOOK_MODE}"
-    return 0
 }
 
 # ===== rebuild rootfs via mkfs (fast path over rm -rf clean) =====
@@ -431,7 +298,7 @@ ota_apply_rootfs() {
     # ota_apply_boot is authoritative and overwrites this copy.
     # Must run before the mkfs rebuild: formatting drops the old /boot.
     if [ "${HAS_BOOT_TAR:-0}" -ne 1 ] && [ -f "${ROOT_MNT}/boot/armbianEnv.txt" ]; then
-        if cp "${ROOT_MNT}/boot/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota"; then
+        if ota_save_pre_ota_env "${ROOT_MNT}/boot/armbianEnv.txt"; then
             log "captured pre-OTA armbianEnv.txt from rootfs /boot"
         else
             log "WARN: failed to capture pre-OTA armbianEnv.txt from rootfs /boot"
@@ -512,7 +379,7 @@ ota_apply_boot() {
     # Hook mode: hook_pre_apply already performed the atomic boot swap and
     # left BOOT_MNT/DO_BOOT_OTA in place for ota_patch_config. Skip the
     # built-in extract entirely -- recomputing DO_BOOT_OTA here would clobber
-    # the handoff (OTA_BOOT_HOOK_MODE set in ota_validate_recovery_state).
+    # the handoff (OTA_BOOT_HOOK_MODE set in run_campaign).
     if [ "${OTA_BOOT_HOOK_MODE:-0}" -eq 1 ]; then
         if [ "${DO_BOOT_OTA:-0}" -eq 1 ] && [ -n "${BOOT_MNT:-}" ]; then
             log "boot OTA handled by hook (BOOT_MNT=${BOOT_MNT} mounted for config patch)"
@@ -544,7 +411,7 @@ ota_apply_boot() {
         # the clear below deletes it (hard ordering: capture -> clear ->
         # extract; inverting it loses the user's overlays, section 7 step 6).
         if [ -f "${BOOT_MNT}/armbianEnv.txt" ]; then
-            if cp "${BOOT_MNT}/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota"; then
+            if ota_save_pre_ota_env "${BOOT_MNT}/armbianEnv.txt"; then
                 log "captured pre-OTA armbianEnv.txt from boot partition"
             else
                 log "WARN: failed to capture pre-OTA armbianEnv.txt from boot partition"
@@ -621,11 +488,11 @@ ota_patch_config() {
 
         if [ "${AUTO_DECRYPT_MODE}" -eq 1 ]; then
             log "  - set rootdev=/dev/mapper/armbian-root"
-            set_env_key "${ARM_ENV}" rootdev /dev/mapper/armbian-root
+            ota_env_set_key "${ARM_ENV}" rootdev /dev/mapper/armbian-root
         else
             if [ -n "${ROOT_UUID}" ]; then
                 log "  - set rootdev=UUID=${ROOT_UUID}"
-                set_env_key "${ARM_ENV}" rootdev "UUID=${ROOT_UUID}"
+                ota_env_set_key "${ARM_ENV}" rootdev "UUID=${ROOT_UUID}"
             else
                 log "  - WARN: ROOT_UUID empty, skip rootdev change"
             fi
@@ -648,11 +515,11 @@ ota_patch_config() {
         if [ -f "${DIST_ENV}" ]; then
             log "syncing ${DIST_ENV} with new rootdev"
             if [ "${AUTO_DECRYPT_MODE}" -eq 1 ]; then
-                set_env_key "${DIST_ENV}" rootdev /dev/mapper/armbian-root
+                ota_env_set_key "${DIST_ENV}" rootdev /dev/mapper/armbian-root
             elif [ -n "${ROOT_UUID}" ]; then
-                set_env_key "${DIST_ENV}" rootdev "UUID=${ROOT_UUID}"
+                ota_env_set_key "${DIST_ENV}" rootdev "UUID=${ROOT_UUID}"
             fi
-            set_env_key "${DIST_ENV}" verbosity 6
+            ota_env_set_key "${DIST_ENV}" verbosity 6
         else
             log "  - ${DIST_ENV} missing, copying from ${ARM_ENV}"
             cp -a "${ARM_ENV}" "${DIST_ENV}"
@@ -663,16 +530,19 @@ ota_patch_config() {
         # build-verified order (the RK3588 GPU stack overlay must stay
         # first-class for the desktop to come up); entries only present in
         # the old value are appended, deduplicated.
+        # Staging copy wins over RAM: it survives the power-cut window
+        # between the boot clear and this merge (ota_save_pre_ota_env).
         OTA_OLD_ENV="${LOGDIR}/armbianEnv.pre-ota"
+        if [ -f "${OTA_STAGING_DIR}/armbianEnv.pre-ota" ]; then
+            OTA_OLD_ENV="${OTA_STAGING_DIR}/armbianEnv.pre-ota"
+        fi
         if [ -f "${OTA_OLD_ENV}" ] && grep -q '^overlays=' "${OTA_OLD_ENV}"; then
-            old_overlays="$(sed -n 's/^overlays=//p' "${OTA_OLD_ENV}" | tail -n 1)"
-            new_overlays="$(sed -n 's/^overlays=//p' "${ARM_ENV}" | tail -n 1)"
-            merged_overlays="$(printf '%s\n%s\n' "${new_overlays}" "${old_overlays}" |
-                tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ' |
-                sed 's/[[:space:]]*$//')"
+            old_overlays="$(ota_env_get_key "${OTA_OLD_ENV}" overlays)"
+            new_overlays="$(ota_env_get_key "${ARM_ENV}" overlays)"
+            merged_overlays="$(ota_merge_overlays "${new_overlays}" "${old_overlays}")"
             if [ -n "${merged_overlays}" ]; then
                 log "  - merge overlays: baseline='${new_overlays}' + pre-OTA='${old_overlays}' -> '${merged_overlays}'"
-                set_env_key "${ARM_ENV}" overlays "${merged_overlays}"
+                ota_env_set_key "${ARM_ENV}" overlays "${merged_overlays}"
             else
                 log "  - pre-OTA overlays value empty, keep baseline overlays"
             fi

@@ -152,6 +152,7 @@ copy_exec_first /usr/sbin /usr/sbin/mke2fs /sbin/mke2fs
 copy_ota_lib state.sh
 copy_ota_lib find-userdata.sh
 copy_ota_lib fwenv.sh
+copy_ota_lib posix.sh
 # fwenv.sh reads the boot-mode stamp at SOURCE time to pick the fs vs
 # raw-FIT boot routes, and 99-ota-apply sources fwenv.sh before any rootfs
 # mount -- inside this initramfs the bare-path cat finds nothing without a

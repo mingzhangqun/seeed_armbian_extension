@@ -170,9 +170,12 @@ ensure_fw_env_config() {
 }
 
 configure_ab_boot_environment() {
+    local init_slot
+
     ensure_fw_env_config "${boot_a_dev}" || return 1
-    ab_env_initialize_default "${CURRENT_SLOT}" || return 1
-    ab_env_repair_defaults "${CURRENT_SLOT}" || return 1
+    init_slot="$(ab_env_rebuild_slot "${CURRENT_SLOT}")"
+    ab_env_initialize_default "${init_slot}" || return 1
+    ab_env_repair_defaults "${init_slot}" || return 1
     ab_env_set \
         "distro_bootpart_a=${BOOT_A_PART}" \
         "distro_bootpart_b=${BOOT_B_PART}" \
@@ -206,8 +209,8 @@ root_b_uuid=${root_b_uuid}
 EOF
 }
 
-# Already initialized: healthy boots exit here; an unreadable env (both
-# copies bad) re-runs the full init, rebuilding via fw_setenv -f.
+# Already initialized: healthy boots exit here; a dual-bad env re-runs
+# full init via fw_setenv -f (state-aware: pending trial rolls back).
 if [ "${1:-}" != "--force" ] && [ -f "${AB_UBOOT_INITIALIZED_FILE}" ]; then
     if ab_env_healthy; then
         exit 0

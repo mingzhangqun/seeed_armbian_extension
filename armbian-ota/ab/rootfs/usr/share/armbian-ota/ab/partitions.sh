@@ -6,6 +6,13 @@
     return 1
 }
 . "${OTA_RUNTIME_DIR}/fwenv.sh"
+# ota_blkid_first_on_disk lives in posix.sh (sourced with common.sh on CLI
+# paths; direct env.sh consumers re-source it here, which is idempotent).
+[ -r "${OTA_RUNTIME_DIR}/posix.sh" ] || {
+    echo "ERROR: POSIX helper library not found: ${OTA_RUNTIME_DIR}/posix.sh" >&2
+    return 1
+}
+. "${OTA_RUNTIME_DIR}/posix.sh"
 
 BOOT_A_LABEL="armbi_boota"
 BOOT_B_LABEL="armbi_bootb"
@@ -102,25 +109,12 @@ ab_boot_disk() {
     fw_env_boot_disk ""
 }
 
-# First blkid device match for KEY=value, restricted to partitions of $disk
-# (mmcblkNpX / nvmeXn1pY naming) when a disk is given.
-ab_blkid_first_on_disk() {
-    local filter="$1" disk="$2"
-
-    if [ -n "${disk}" ]; then
-        blkid -t "${filter}" -o device 2>/dev/null |
-            grep -E "^${disk}p[0-9]+$" | head -n1
-    else
-        blkid -t "${filter}" -o device 2>/dev/null | head -n1
-    fi
-}
-
 ab_get_part_by_label() {
     local label="$1" dev partlabel disk
 
     disk="$(ab_boot_disk || true)"
 
-    dev="$(ab_blkid_first_on_disk "LABEL=${label}" "${disk}")"
+    dev="$(ota_blkid_first_on_disk "LABEL=${label}" "${disk}")"
     if [ -n "${dev}" ]; then
         ab_resolve_physical_part_dev "${dev}"
         return 0
@@ -128,7 +122,7 @@ ab_get_part_by_label() {
 
     partlabel="$(ab_get_slot_partlabel_by_fslabel "${label}")"
     if [ -n "${partlabel}" ]; then
-        dev="$(ab_blkid_first_on_disk "PARTLABEL=${partlabel}" "${disk}")"
+        dev="$(ota_blkid_first_on_disk "PARTLABEL=${partlabel}" "${disk}")"
         if [ -n "${dev}" ]; then
             ab_resolve_physical_part_dev "${dev}"
             return 0

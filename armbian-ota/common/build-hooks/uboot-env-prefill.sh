@@ -81,7 +81,7 @@ function ota_uboot_env_prefill_compose() {
             # Plain A/B: stamp the fs branch; plain FIT boots stay a manual console action.
             printf 'ab_boot_mode=filesystem\n' > "${mode_override_env}"
         fi
-        ota_ab_merge_uboot_env_files "${final_env}" "${src_env}" "${mode_override_env}"
+        ota_merge_uboot_env_files "${final_env}" "${src_env}" "${mode_override_env}"
         rm -f "${mode_override_env}"
         return 0
     fi
@@ -94,6 +94,9 @@ function ota_uboot_env_prefill_compose() {
     ota_raw_boot_enabled && OTA_BOOT_MODE="raw-fit"
     OTA_RESCUE_ROOT_DEFAULT="LABEL=armbi_root"
     ota_encrypted_rootfs_enabled && OTA_RESCUE_ROOT_DEFAULT="/dev/mapper/armbian-root"
+    # fwenv.sh sources find-userdata.sh; point it at the extension tree copy
+    # (the device path does not exist in the build container).
+    export OTA_FIND_USERDATA_PATH="${OTA_SUPPORT_DIR}/common/rootfs/usr/share/armbian-ota/find-userdata.sh"
     # shellcheck source=/dev/null
     source "${OTA_SUPPORT_DIR}/common/rootfs/usr/share/armbian-ota/fwenv.sh"
 
@@ -118,7 +121,7 @@ function ota_uboot_env_prefill_compose() {
         printf '%s\n' "bootcmd=${OTA_ENV_BOOTCMD}"
     } > "${routing_env}"
 
-    ota_ab_merge_uboot_env_files "${final_env}" "${default_env}" "${routing_env}"
+    ota_merge_uboot_env_files "${final_env}" "${default_env}" "${routing_env}"
     rm -f "${routing_env}"
 }
 

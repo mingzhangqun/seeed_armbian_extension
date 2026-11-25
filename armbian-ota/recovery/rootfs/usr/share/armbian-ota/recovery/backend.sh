@@ -27,6 +27,7 @@ OTA_BACKUP_ZSTD_LEVEL="${OTA_BACKUP_ZSTD_LEVEL:--3}"
 OTA_BACKUP_BOOT_EXCLUDES="recovery lost+found"
 
 . /usr/share/armbian-ota/fwenv.sh
+. /usr/share/armbian-ota/payload-id.sh
 
 recovery_require_tools() {
     ota_require_runtime tar sha256sum mount umount mountpoint sed grep awk \
@@ -43,7 +44,7 @@ recovery_require_transaction_store() {
 recovery_system_field() {
     local key="$1"
 
-    sed -n "s/^${key}=//p" /etc/armbian-release 2>/dev/null | head -n1
+    sed -n "s/^${key}=//p" /etc/armbian-image-release 2>/dev/null | head -n1
 }
 
 recovery_lower_source() {
@@ -51,34 +52,7 @@ recovery_lower_source() {
         findmnt -n -o SOURCE / 2>/dev/null
 }
 
-# ===== payload identity (keep in sync with package-create.sh build side) =====
-
-# Deterministic tree hash over a boot staging tree: every file's sha256 in
-# sorted path order, folded into one digest. payload-id itself is excluded so
-# the ID never hashes its own container (section 4).
-ota_payload_tree_hash() {
-    local tree_dir="$1"
-
-    (
-        cd "${tree_dir}" || exit 1
-        find . -type f ! -name payload-id -print0 | LC_ALL=C sort -z |
-            xargs -0 -r sha256sum
-    ) | awk '{print $1"  "substr($2,3)}' | sha256sum | awk '{print $1}'
-}
-
-ota_compute_payload_id() {
-    local rootfs_tar="$1"
-    local boot_tree="$2"
-    local board="$3" release="$4" kernel="$5" version="$6"
-
-    local root_sha boot_sha
-    root_sha="$(sha256sum "${rootfs_tar}" | awk '{print $1}')"
-    boot_sha="$(ota_payload_tree_hash "${boot_tree}")"
-
-    printf 'armbian-ota-payload-v1|R=%s|B=%s|BOARD=%s|RELEASE=%s|KERNEL=%s|VERSION=%s|HAS_ROOTFS=1\n' \
-        "${root_sha}" "${boot_sha}" "${board}" "${release}" "${kernel}" "${version}" |
-        sha256sum | awk '{print $1}'
-}
+# ===== payload identity: sourced from /usr/share/armbian-ota/payload-id.sh =====
 
 # payload.env identity card (section 4); single writer for staged packages
 # (defensive regen) and backup payloads.
@@ -137,7 +111,7 @@ recovery_check_space() {
         local lower_used boot_used raw_dev fit_sz
         lower_used="$(du -sb /media/root-ro 2>/dev/null | awk '{print $1}')"
         raw_dev="$(recovery_raw_boot_dev || true)"
-        if [ -n "${raw_dev}" ] && fit_sz="$(recovery_fit_size_bytes "${raw_dev}" 2>/dev/null)"; then
+        if [ -n "${raw_dev}" ] && fit_sz="$(ota_fit_size_bytes "${raw_dev}" 2>/dev/null)"; then
             # raw-FIT layout: the backup stages exactly the FIT bytes
             boot_used="${fit_sz}"
         else
@@ -199,16 +173,12 @@ recovery_stage_payload() {
 
     mkdir -p "${OTA_STAGING_DIR}"
     rm -rf "${incoming}"
+    # New campaign: drop a previous campaign's persisted pre-OTA env (the
+    # retry path never passes through here, so its copy survives the cut).
+    rm -f "${OTA_STAGING_DIR}/armbianEnv.pre-ota"
 
     log_info "Staging payload ${payload_id} (extract + full sha256 verification)"
-    extract_ota_package "${package_path}" "${incoming}"
-    ota_assert_dual_payload "${incoming}"
-    ota_assert_payload_matches_system "${incoming}"
-    ota_verify_payload "${incoming}" \
-        "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
-        "${OTA_PAYLOAD_BOOT_TAR}" "${OTA_PAYLOAD_BOOT_SHA}" "${OTA_PAYLOAD_BOOT_ITB}"
-    ota_check_package_requirements "${incoming}"
-    ota_run_phase1_hooks "${incoming}"
+    ota_stage_and_verify "${package_path}" "${incoming}"
 
     # payload.env: identity card of the staged directory (section 4). The
     # build stamps it; regenerate defensively if absent.
@@ -232,40 +202,14 @@ recovery_stage_payload() {
 
 # ===== lazy backup creation (15.2 step 3, 15.3) ==============================
 
-# The raw-FIT (secure boot) boot partition: PARTLABEL=boot on the boot disk
-# whose blkid TYPE is empty (no filesystem -- the signed FIT sits at offset
-# 0). Empty on ext4-boot layouts. Fail-closed: without a boot-disk anchor no
-# device is returned at all -- cloned disks duplicate PARTLABEL=boot and an
-# unscoped first match would read (and on rollback flash) the WRONG disk's
-# FIT; the caller then falls through to the ext4 branch and fails loudly.
+# Fail-closed raw-FIT boot partition: no disk anchor, no device -- clones
+# duplicate PARTLABEL=boot and an unscoped match reads the WRONG disk's FIT.
 recovery_raw_boot_dev() {
-    local disk dev fstype
+    local disk
 
     disk="$(fw_env_boot_disk "$(recovery_lower_source)" 2>/dev/null || true)"
     [ -n "${disk}" ] || return 1
-    for dev in $(blkid -t PARTLABEL=boot -o device 2>/dev/null); do
-        fstype="$(blkid -s TYPE -o value "${dev}" 2>/dev/null || true)"
-        [ -z "${fstype}" ] || continue
-        case "${dev}" in
-            "${disk}"p[0-9]*) ;;
-            *) continue ;;
-        esac
-        printf '%s\n' "${dev}"
-        return 0
-    done
-    return 1
-}
-
-# Exact FIT payload size from the FDT header: 4-byte magic (d00dfeed) then a
-# 4-byte big-endian totalsize. Reading the whole partition instead would
-# stage gigabytes of stale padding into the backup.
-recovery_fit_size_bytes() {
-    local dev="$1" header
-
-    header="$(dd if="${dev}" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [ "${#header}" -ge 16 ] || return 1
-    [ "${header:0:8}" = "d00dfeed" ] || return 1
-    printf '%d' "0x${header:8:8}" 2>/dev/null || return 1
+    ota_raw_boot_part "${disk}"
 }
 
 recovery_backup_valid_structurally() {
@@ -347,9 +291,13 @@ recovery_create_backup() {
     mkdir -p "${boot_tree}"
     raw_boot_dev="$(recovery_raw_boot_dev || true)"
     if [ -n "${raw_boot_dev}" ]; then
-        fit_size="$(recovery_fit_size_bytes "${raw_boot_dev}")" || {
+        fit_size="$(ota_fit_size_bytes "${raw_boot_dev}")" || {
             rm -rf "${work}"
             error_exit "Backup: no FIT header on raw boot partition ${raw_boot_dev}"
+        }
+        [ "${fit_size}" -gt 0 ] || {
+            rm -rf "${work}"
+            error_exit "Backup: zero FIT totalsize on ${raw_boot_dev} (corrupt header)"
         }
         log_info "Reading FIT (${fit_size} bytes) from ${raw_boot_dev} -> boot.itb"
         if ! dd if="${raw_boot_dev}" of="${work}/boot.itb" \
@@ -360,6 +308,13 @@ recovery_create_backup() {
         truncate -s "${fit_size}" "${work}/boot.itb" || {
             rm -rf "${work}"
             error_exit "Backup: failed to trim boot.itb to FIT size"
+        }
+        # Read-back: boot.sha256 is self-consistent, so without this a
+        # corrupted dd read would publish a "verified" bad backup.
+        ota_fit_readback_verify "${raw_boot_dev}" "${fit_size}" \
+            "$(sha256sum "${work}/boot.itb" | awk '{print $1}')" "${OTA_STAGING_DIR}" || {
+            rm -rf "${work}"
+            error_exit "Backup: FIT readback does not match ${raw_boot_dev}"
         }
         ln "${work}/boot.itb" "${boot_tree}/boot.itb" || {
             rm -rf "${work}"
@@ -386,8 +341,7 @@ recovery_create_backup() {
     # 3) identity, then the boot checksum target (tar on ext4 layouts, the
     #    FIT itself on raw-FIT ones -- ota_payload_verify_full just runs
     #    sha256sum -c boot.sha256, which covers whichever file this names)
-    payload_id="$(ota_compute_payload_id "${work}/rootfs.tar.zst" "${boot_tree}" \
-        "${board}" "${release}" "${kernel}" "${version}")"
+    payload_id="$(ota_compute_payload_id "${work}/rootfs.tar.zst" "${boot_tree}")"
     if [ -n "${raw_boot_dev}" ]; then
         (cd "${work}" && sha256sum boot.itb > boot.sha256)
     else
@@ -448,6 +402,11 @@ recovery_arm_env() {
         log_warn "U-Boot env CRC bad at arm time; rebuilding full routing set before arming"
         fw_env_write_routing_set "1" "recovery" ||
             error_exit "Failed to rebuild routing env (bad CRC); transaction NOT started"
+    elif ! fw_env_routing_set_ok; then
+        # CRC-valid but drifted: rewrite, never arm an unknown bootcmd.
+        log_warn "U-Boot env routing set drifts from expected layout; rewriting before arming"
+        fw_env_write_routing_set "1" "recovery" ||
+            error_exit "Failed to rewrite drifted routing env; transaction NOT started"
     else
         fw_env_set_multi "ota_in_progress=1" "ota_boot_next=recovery" ||
             error_exit "Failed to arm U-Boot env (ota_in_progress=1, ota_boot_next=recovery); transaction NOT started"
@@ -501,20 +460,8 @@ recovery_start_ota() {
 
 # ===== terminal commit (health pass or mark-success) ==========================
 
-recovery_verify_payload_full() {
-    local dir="$1"
-
-    [ -d "${dir}" ] || return 1
-    [ -f "${dir}/payload.env" ] || return 1
-    (cd "${dir}" && sha256sum -c rootfs.sha256 >/dev/null 2>&1) || {
-        log_warn "Backup verification: rootfs.sha256 failed for ${dir}"
-        return 1
-    }
-    (cd "${dir}" && sha256sum -c boot.sha256 >/dev/null 2>&1) || {
-        log_warn "Backup verification: boot.sha256 failed for ${dir}"
-        return 1
-    }
-}
+# ota_payload_verify_full lives in posix.sh (shared with the initramfs
+# exhaustion decision point).
 
 # Roll the backup pointer to the freshly confirmed payload (15.5): verify the
 # complete candidate first, then state, delete the old directory second. A
@@ -531,7 +478,7 @@ recovery_roll_backup() {
         log_error "Confirmed payload ${candidate_id} is not staged; keeping backup ${old_backup:-none}"
         return 1
     }
-    recovery_verify_payload_full "${new_dir}" || {
+    ota_payload_verify_full "${new_dir}" || {
         log_error "Confirmed payload ${candidate_id} failed full verification; keeping backup ${old_backup:-none}"
         return 1
     }
@@ -567,6 +514,9 @@ recovery_commit_success() {
         error_exit "Cannot resolve boot disk for fw_env; env NOT cleared"
     fw_env_set "ota_in_progress" "0" ||
         error_exit "Failed to clear ota_in_progress; next boot routes to Rescue (harmless, will self-reconcile)"
+    # Same one-shot flip as the rescue path: leave ota_boot_next clean.
+    fw_env_set "ota_boot_next" "normal" ||
+        log_warn "Failed to reset ota_boot_next; inert while ota_in_progress=0"
 
     rm -rf "${OTA_STAGING_DIR}"/* 2>/dev/null || true
     log_info "OTA transaction committed: INSTALLED_ID=${candidate_id} RESTORE_MODE=${restore_mode}"
@@ -593,9 +543,8 @@ recovery_rollback() {
     error_exit "Rollback is not a user command in recovery mode; recovery happens automatically when retries are exhausted (v0.8 design section 15.4)"
 }
 
-# CLI dispatch target (armbian-ota reconcile): in recovery mode the env
-# reconciliation runs on every boot inside armbian-ota-health-recovery,
-# so there is nothing to trigger manually.
+# CLI dispatch target (armbian-ota reconcile): recovery mode reconciles
+# on every boot inside armbian-ota-health-recovery; nothing to trigger.
 recovery_reconcile() {
     log_info "Recovery mode reconciles on every boot (armbian-ota-health-recovery); nothing to do"
 }
