@@ -27,6 +27,7 @@ OTA_BACKUP_ZSTD_LEVEL="${OTA_BACKUP_ZSTD_LEVEL:--3}"
 OTA_BACKUP_BOOT_EXCLUDES="recovery lost+found"
 
 . /usr/share/armbian-ota/fwenv.sh
+. /usr/share/armbian-ota/payload-id.sh
 
 recovery_require_tools() {
     ota_require_runtime tar sha256sum mount umount mountpoint sed grep awk \
@@ -43,7 +44,7 @@ recovery_require_transaction_store() {
 recovery_system_field() {
     local key="$1"
 
-    sed -n "s/^${key}=//p" /etc/armbian-release 2>/dev/null | head -n1
+    sed -n "s/^${key}=//p" /etc/armbian-image-release 2>/dev/null | head -n1
 }
 
 recovery_lower_source() {
@@ -51,34 +52,7 @@ recovery_lower_source() {
         findmnt -n -o SOURCE / 2>/dev/null
 }
 
-# ===== payload identity (keep in sync with package-create.sh build side) =====
-
-# Deterministic tree hash over a boot staging tree: every file's sha256 in
-# sorted path order, folded into one digest. payload-id itself is excluded so
-# the ID never hashes its own container (section 4).
-ota_payload_tree_hash() {
-    local tree_dir="$1"
-
-    (
-        cd "${tree_dir}" || exit 1
-        find . -type f ! -name payload-id -print0 | LC_ALL=C sort -z |
-            xargs -0 -r sha256sum
-    ) | awk '{print $1"  "substr($2,3)}' | sha256sum | awk '{print $1}'
-}
-
-ota_compute_payload_id() {
-    local rootfs_tar="$1"
-    local boot_tree="$2"
-    local board="$3" release="$4" kernel="$5" version="$6"
-
-    local root_sha boot_sha
-    root_sha="$(sha256sum "${rootfs_tar}" | awk '{print $1}')"
-    boot_sha="$(ota_payload_tree_hash "${boot_tree}")"
-
-    printf 'armbian-ota-payload-v1|R=%s|B=%s|BOARD=%s|RELEASE=%s|KERNEL=%s|VERSION=%s|HAS_ROOTFS=1\n' \
-        "${root_sha}" "${boot_sha}" "${board}" "${release}" "${kernel}" "${version}" |
-        sha256sum | awk '{print $1}'
-}
+# ===== payload identity: sourced from /usr/share/armbian-ota/payload-id.sh =====
 
 # payload.env identity card (section 4); single writer for staged packages
 # (defensive regen) and backup payloads.
@@ -386,8 +360,7 @@ recovery_create_backup() {
     # 3) identity, then the boot checksum target (tar on ext4 layouts, the
     #    FIT itself on raw-FIT ones -- ota_payload_verify_full just runs
     #    sha256sum -c boot.sha256, which covers whichever file this names)
-    payload_id="$(ota_compute_payload_id "${work}/rootfs.tar.zst" "${boot_tree}" \
-        "${board}" "${release}" "${kernel}" "${version}")"
+    payload_id="$(ota_compute_payload_id "${work}/rootfs.tar.zst" "${boot_tree}")"
     if [ -n "${raw_boot_dev}" ]; then
         (cd "${work}" && sha256sum boot.itb > boot.sha256)
     else
