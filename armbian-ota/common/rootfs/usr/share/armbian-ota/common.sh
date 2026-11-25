@@ -783,12 +783,61 @@ ota_get_security_part() {
     echo "${dev}"
 }
 
+# ===== OP-TEE keybox mechanism (shared with ab/security.sh) ==================
+
+# Restart tee-supplicant in the current rootfs namespace: a stale initramfs
+# instance still holds /dev/teepriv0, blocking keybox_app's TA access.
+# Sets OTA_TEE_PID; rc 1 = supplicant unusable. Logs go to tmpfs only.
+ota_start_tee_supplicant() {
+    OTA_TEE_PID=""
+
+    [ -x /usr/bin/tee-supplicant ] || return 0
+
+    local tee_log
+    tee_log="$(make_ota_temp_file tee-supplicant)"
+    pkill -9 -x tee-supplicant >/dev/null 2>&1 || true
+    sleep 1
+    /usr/bin/tee-supplicant >"${tee_log}" 2>&1 &
+    OTA_TEE_PID="$!"
+    sleep 1
+    if ! kill -0 "${OTA_TEE_PID}" 2>/dev/null; then
+        [ -s "${tee_log}" ] && log_error "tee-supplicant log: $(tail -n1 "${tee_log}")"
+        rm -f "${tee_log}"
+        return 1
+    fi
+    rm -f "${tee_log}"
+    return 0
+}
+
+ota_stop_tee_supplicant() {
+    if [ -n "${OTA_TEE_PID}" ] && kill -0 "${OTA_TEE_PID}" 2>/dev/null; then
+        kill "${OTA_TEE_PID}" >/dev/null 2>&1 || true
+        wait "${OTA_TEE_PID}" 2>/dev/null || true
+    fi
+    OTA_TEE_PID=""
+}
+
+# One keybox_app invocation with the supplicant up: rc 2 = supplicant
+# unusable, 1 = keybox_app failed. keybox_app writes its result to
+# OTA_SYSPW_FILE.
+ota_run_keybox_app() {
+    local keybox_log rc=0
+
+    ota_start_tee_supplicant || return 2
+    keybox_log="$(make_ota_temp_file keybox)"
+    /usr/bin/keybox_app "$@" >"${keybox_log}" 2>&1 || rc=$?
+    [ "${rc}" -eq 0 ] || log_error "keybox_app failed: $(tail -n1 "${keybox_log}" 2>/dev/null)"
+    rm -f "${keybox_log}"
+    ota_stop_tee_supplicant
+    return "${rc}"
+}
+
 # Retrieve the LUKS passphrase into out_file (mode 600). Read-only (no keybox
 # migration): OTA only needs the current passphrase to derive the payload key.
 # Mirrors the initramfs decryption-disk.sh raw / SSKR behavior.
 ota_get_security_passphrase_file() {
     local out_file="$1"
-    local security_dev marker tee_log keybox_log tee_pid
+    local security_dev marker
 
     [ -n "${out_file}" ] || return 1
     : > "${out_file}" || return 1
@@ -811,26 +860,11 @@ ota_get_security_passphrase_file() {
 
     if [ "${marker}" = "SSKR" ]; then
         [ -x /usr/bin/keybox_app ] || { log_error "SSKR marker but /usr/bin/keybox_app missing"; return 1; }
-        tee_log="$(make_ota_temp_file tee-supplicant)"
-        keybox_log="$(make_ota_temp_file keybox)"
-        if [ -x /usr/bin/tee-supplicant ]; then
-            pkill -9 -x tee-supplicant >/dev/null 2>&1 || true
-            sleep 1
-            /usr/bin/tee-supplicant >"${tee_log}" 2>&1 &
-            tee_pid="$!"
-            sleep 1
-        fi
         rm -f "${OTA_SYSPW_FILE}" 2>/dev/null || true
-        if ! /usr/bin/keybox_app >"${keybox_log}" 2>&1; then
-            [ -n "${tee_pid}" ] && kill "${tee_pid}" 2>/dev/null || true
-            log_error "keybox_app read failed: $(tail -n1 "${keybox_log}" 2>/dev/null)"
-            rm -f "${tee_log}" "${keybox_log}"
-            return 1
-        fi
-        [ -n "${tee_pid}" ] && { kill "${tee_pid}" 2>/dev/null || true; wait "${tee_pid}" 2>/dev/null || true; }
-        [ -s "${OTA_SYSPW_FILE}" ] || { log_error "keybox_app produced no passphrase"; rm -f "${tee_log}" "${keybox_log}"; return 1; }
-        cp "${OTA_SYSPW_FILE}" "${out_file}" || { rm -f "${OTA_SYSPW_FILE}" "${tee_log}" "${keybox_log}"; return 1; }
-        rm -f "${OTA_SYSPW_FILE}" "${tee_log}" "${keybox_log}"
+        ota_run_keybox_app || { rm -f "${OTA_SYSPW_FILE}" 2>/dev/null || true; return 1; }
+        [ -s "${OTA_SYSPW_FILE}" ] || { log_error "keybox_app produced no passphrase"; return 1; }
+        cp "${OTA_SYSPW_FILE}" "${out_file}" || return 1
+        rm -f "${OTA_SYSPW_FILE}" 2>/dev/null || true
         return 0
     fi
 
