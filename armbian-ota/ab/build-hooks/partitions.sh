@@ -2,9 +2,7 @@
 
 function extension_prepare_config__install_overlayroot_userdata() {
     display_alert "A/B partition OTA" "install overlayroot, busybox-static, libubootenv-tool and zstd" "info"
-    ota_install_overlayroot_dependencies
-    # Mirror zstd, else zst packages are refused on A/B devices.
-    add_packages_to_image libubootenv-tool zstd
+    ota_install_ota_dependencies
 }
 
 function pre_prepare_partitions__ab_part_ota() {
@@ -101,12 +99,7 @@ function format_partitions__ab_part_ota() {
     fi
 
     if [[ -n "${AB_USERDATA_PART_INDEX}" ]]; then
-        local userdata_dev="${LOOP}p${AB_USERDATA_PART_INDEX}"
-        if ota_encrypted_rootfs_enabled; then
-            ota_partition_format_luks_ext4 "A/B partition OTA" "${userdata_dev}" \
-                "armbian-ab-userdata-build" "armbi_usrdata" "userdata"
-        else
-            ota_partition_format_ext4 "A/B partition OTA" "${userdata_dev}" "armbi_usrdata" "userdata"
-        fi
+        ota_format_userdata_partition "A/B partition OTA" "${LOOP}p${AB_USERDATA_PART_INDEX}" \
+            "armbian-ab-userdata-build"
     fi
 }

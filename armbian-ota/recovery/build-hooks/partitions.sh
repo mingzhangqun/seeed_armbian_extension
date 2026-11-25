@@ -1,10 +1,7 @@
 # Recovery partition layout and policy
 
 function extension_prepare_config__install_recovery_ota() {
-    ota_install_overlayroot_dependencies
-    # zstd packs/unpacks the lazy backup and OTA payloads; fw_env tools come
-    # from the distro repo, same as A/B.
-    add_packages_to_image libubootenv-tool zstd
+    ota_install_ota_dependencies
 }
 
 function pre_prepare_partitions__recovery_ota() {
@@ -113,11 +110,6 @@ function format_partitions__recovery_ota() {
         return 0
     fi
 
-    local userdata_dev="${LOOP}p${RECOVERY_USERDATA_PART_INDEX}"
-    if ota_encrypted_rootfs_enabled; then
-        ota_partition_format_luks_ext4 "Recovery OTA" "${userdata_dev}" \
-            "armbian-recovery-userdata-build" "armbi_usrdata" "userdata"
-    else
-        ota_partition_format_ext4 "Recovery OTA" "${userdata_dev}" "armbi_usrdata" "userdata"
-    fi
+    ota_format_userdata_partition "Recovery OTA" "${LOOP}p${RECOVERY_USERDATA_PART_INDEX}" \
+        "armbian-recovery-userdata-build"
 }

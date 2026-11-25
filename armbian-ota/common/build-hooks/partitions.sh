@@ -33,8 +33,10 @@ function ota_raw_boot_enabled() {
     return 1
 }
 
-function ota_install_overlayroot_dependencies() {
-    add_packages_to_image overlayroot busybox-static
+# Runtime packages every flavor needs: overlayroot + busybox for the
+# overlay layout, distro fw_env tools, zstd for payload compression.
+function ota_install_ota_dependencies() {
+    add_packages_to_image overlayroot busybox-static libubootenv-tool zstd
 }
 
 # Partition-size policy
@@ -122,4 +124,17 @@ function ota_partition_format_luks_ext4() {
     }
     run_host_command_logged cryptsetup luksClose "${mapper_name}" ||
         exit_with_error "Failed to close encrypted ${description}" "${mapper_dev}"
+}
+
+# Userdata partition: LUKS+ext4 when the flavor encrypts, else plain ext4.
+# Label armbi_usrdata is the runtime resolver contract; the mapper name is
+# flavor-scoped so parallel A/B and recovery builds never collide.
+function ota_format_userdata_partition() {
+    local title="$1" dev="$2" mapper_name="$3"
+
+    if ota_encrypted_rootfs_enabled; then
+        ota_partition_format_luks_ext4 "${title}" "${dev}" "${mapper_name}" "armbi_usrdata" "userdata"
+    else
+        ota_partition_format_ext4 "${title}" "${dev}" "armbi_usrdata" "userdata"
+    fi
 }
