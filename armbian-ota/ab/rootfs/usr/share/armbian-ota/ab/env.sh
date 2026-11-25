@@ -83,6 +83,35 @@ ab_env_healthy() {
     ! fw_env_crc_bad
 }
 
+# State-file read without state.sh side effects (state_init would seed an
+# idle file and flip service conditions).
+AB_STATE_FILE="${AB_STATE_FILE:-/var/lib/armbian-ota/ota-state.env}"
+
+ab_env_state_value() {
+    local key="$1"
+
+    grep -E "^${key}=" "${AB_STATE_FILE}" 2>/dev/null | tail -n1 | cut -d'=' -f2-
+}
+
+# Rebuild slot: the pending state file's source slot, else the running slot.
+ab_env_rebuild_slot() {
+    local current_slot="$1" status source_slot
+
+    status="$(ab_env_state_value STATUS)"
+    source_slot="$(ab_env_state_value CURRENT_SLOT)"
+    if [ "${status}" = "ready_to_boot" ] || [ "${status}" = "boot_verifying" ]; then
+        case "${source_slot}" in
+            a|b)
+                if [ "${source_slot}" != "${current_slot}" ]; then
+                    printf '%s\n' "${source_slot}"
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+    printf '%s\n' "${current_slot}"
+}
+
 ab_env_initialize_default() {
     local current_slot="$1"
 

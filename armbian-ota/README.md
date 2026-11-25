@@ -271,7 +271,7 @@ Encrypted A/B (auto-decrypt or secure boot):
 ### U-Boot Environment Variables
 
 
-The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy), size `0x8000` each, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. Every shipped U-Boot is patched for the redundant layout (`-r` prefill, unconditional two-entry `fw_env.config`): writes alternate between the copies, so a torn write never destroys the last good copy. A both-bad rebuild runs `fw_setenv -f /etc/u-boot-initial-env` — every boot on A/B (`armbian-ota-init-uboot`), every normal boot on recovery (`99-ota-normal-marker`; the Rescue gate needs a healthy env).
+The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and `0x3f0000` (redundant copy), size `0x8000` each, pre-filled at build time (`uboot-env-prefill.sh`) and completed on first boot by `armbian-ota-init-uboot`. Every shipped U-Boot is patched for the redundant layout (`-r` prefill, unconditional two-entry `fw_env.config`): writes alternate between the copies, so a torn write never destroys the last good copy. A both-bad rebuild runs `fw_setenv -f /etc/u-boot-initial-env` — every boot on A/B (`armbian-ota-init-uboot`), every normal boot on recovery (`99-ota-normal-marker`; the Rescue gate needs a healthy env). The A/B rebuild is state-aware: a pending trial rolls back to the state file's source slot. Recovery rewrites a CRC-valid but drifted routing set before arming (`fw_env_routing_set_ok`).
 
 | Variable | Purpose |
 |----------|---------|
@@ -291,7 +291,7 @@ The persistent U-Boot environment lives at raw offsets `0x3f8000` (primary) and 
    - Boot: on secure boot, verifies and dd-writes `boot.itb` to the inactive raw boot partition; otherwise unpacks `boot.tar.gz` onto the inactive ext4 boot partition. `armbianEnv.txt` rootdev/cryptdevice, overlay lists, and fstab/crypttab are patched for the target slot.
 2. Switches the slot: `ota_in_progress=1`, `boot_slot=<target>`, `slot_retry_left=slot_retry_max`, then asks for a reboot.
 3. On the next boots, `ab_preboot` decrements `slot_retry_left`; `armbian-ota-firstboot.service` (guarded on `ota_in_progress=1`) runs `armbian-ota-health-check`: correct slot active, `/proc/version` readable, `/proc` `/sys` `/dev` mounted, root writable.
-4. Success → `mark-success` (writes `boot_success=<slot>`, clears `ota_in_progress`). Failure → `OnFailure=` pulls in `armbian-ota-rollback.service`, which restores the previous slot and reboots. If the system is too broken to reach systemd, `ab_preboot` exhausts `slot_retry_left` (3 attempts) and U-Boot itself rolls back to `boot_success` — rollback works at two independent layers.
+4. Success → `mark-success` (writes `boot_success=<slot>`, clears `ota_in_progress`). Failure → `OnFailure=` pulls in `armbian-ota-rollback.service`, which restores the previous slot and reboots (state-file fallback when a rebuild zeroed the env flag). If the system is too broken to reach systemd, `ab_preboot` exhausts `slot_retry_left` (3 attempts) and U-Boot itself rolls back to `boot_success` — rollback works at two independent layers.
 
 ### Usage
 

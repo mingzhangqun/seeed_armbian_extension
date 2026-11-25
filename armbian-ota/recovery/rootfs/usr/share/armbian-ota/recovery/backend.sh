@@ -448,6 +448,11 @@ recovery_arm_env() {
         log_warn "U-Boot env CRC bad at arm time; rebuilding full routing set before arming"
         fw_env_write_routing_set "1" "recovery" ||
             error_exit "Failed to rebuild routing env (bad CRC); transaction NOT started"
+    elif ! fw_env_routing_set_ok; then
+        # CRC-valid but drifted: rewrite, never arm an unknown bootcmd.
+        log_warn "U-Boot env routing set drifts from expected layout; rewriting before arming"
+        fw_env_write_routing_set "1" "recovery" ||
+            error_exit "Failed to rewrite drifted routing env; transaction NOT started"
     else
         fw_env_set_multi "ota_in_progress=1" "ota_boot_next=recovery" ||
             error_exit "Failed to arm U-Boot env (ota_in_progress=1, ota_boot_next=recovery); transaction NOT started"

@@ -11,6 +11,14 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **A/B env rebuild is state-aware.** A dual-bad env during a boot trial
+  confirmed the trial slot and killed the rollback chain; the rebuild now
+  persists the state file's source slot, and `rollback` falls back to the
+  state file when a rebuild zeroed the env flag.
+- **Recovery arms only against the expected routing set.** CRC-valid drift
+  (stale prefill, foreign blob) now triggers a full rewrite
+  (`fw_env_routing_set_ok`); the normal-boot probe also settles
+  `ota_boot_next` to `normal` (was `recovery`).
 - **Recovery rebuilds a both-bad env on every normal boot.** The Rescue
   rebuild needs the `ota_role` routing only a healthy env can set, so a
   dual-bad env killed remote OTA (261124 batch); the init-bottom marker

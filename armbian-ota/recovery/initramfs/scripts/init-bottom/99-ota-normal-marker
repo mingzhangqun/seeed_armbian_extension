@@ -53,7 +53,7 @@ ota_env_boot_rebuild() {
     fw_env_crc_bad || return 0
 
     echo "armbian-ota: env unreadable; rebuilding routing set on ${disk}" >&2
-    if fw_env_write_routing_set "0" "recovery" 2>/dev/null; then
+    if fw_env_write_routing_set "0" "normal" 2>/dev/null; then
         echo "armbian-ota: env rebuilt (full routing set, ota_in_progress=0)" >&2
     else
         echo "armbian-ota: WARNING env rebuild failed; continuing boot" >&2
