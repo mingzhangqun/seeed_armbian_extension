@@ -83,9 +83,10 @@ ab_env_healthy() {
     ! fw_env_crc_bad
 }
 
-# State-file read without state.sh side effects (state_init would seed an
-# idle file and flip service conditions).
-AB_STATE_FILE="${AB_STATE_FILE:-/var/lib/armbian-ota/ota-state.env}"
+# State-file read without state_init side effects (state_init would seed an
+# idle file and flip service conditions). Every env.sh consumer sources
+# common.sh first, so state.sh's OTA_STATE_FILE is already set.
+AB_STATE_FILE="${AB_STATE_FILE:-${OTA_STATE_FILE}}"
 
 ab_env_state_value() {
     local key="$1"
