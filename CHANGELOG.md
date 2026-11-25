@@ -16,11 +16,13 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   dual-bad env killed remote OTA (261124 batch); the init-bottom marker
   hook now probes and rebuilds, anchored on the overlay lower root.
   Fail-open.
-
 - **`ota_boot_next` resets to `normal` when a transaction settles.** The
   handoff one-shot flips it back before trying normal; both settle paths
   now reset it.
-
+- **One device-resolution walk.** Four private mapper-to-partition
+  resolvers converge into `find_user_data__raw_partition_of`; mapper
+  anchors now resolve in `fw_env_boot_disk`, and `payload.sh`'s
+  `ota_call_hook` forwards hook arguments (it dropped them).
 - **README passphrase claim was stale.** "Validated non-empty only"
   predates the secure-storage hard gate: the build fails any passphrase
   whose length is not exactly 64; the hex charset stays documentation-only.

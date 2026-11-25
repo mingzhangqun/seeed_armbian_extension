@@ -38,23 +38,11 @@ ota_env_boot_rebuild() {
     . /usr/share/armbian-ota/fwenv.sh 2>/dev/null || return 0
     . /usr/share/armbian-ota/find-userdata.sh 2>/dev/null || return 0
 
-    # Anchor on the overlay lower root; real mapper nodes need maj:min.
+    # Anchor on the overlay lower root (mapper or raw partition alike).
     lower_src="$(awk '$2 == "/media/root-ro" { print $1; exit }' /proc/mounts 2>/dev/null | sed 's~\[.*\]~~')"
     [ -n "${lower_src}" ] || return 0
 
-    majmin="$(awk '$5 == "/media/root-ro" { print $3; exit }' /proc/self/mountinfo 2>/dev/null)"
-    [ -n "${majmin}" ] || return 0
-    base="$(basename "$(readlink -f "/sys/dev/block/${majmin}" 2>/dev/null)" 2>/dev/null)"
-    [ -n "${base}" ] || return 0
-    raw_part=""
-    if [ -f "/sys/class/block/${base}/partition" ]; then
-        raw_part="/dev/${base}"
-    elif [ -d "/sys/class/block/${base}/slaves" ]; then
-        slave="$(ls "/sys/class/block/${base}/slaves" 2>/dev/null | head -n1)"
-        if [ -n "${slave}" ] && [ -f "/sys/class/block/${slave}/partition" ]; then
-            raw_part="/dev/${slave}"
-        fi
-    fi
+    raw_part="$(find_user_data__raw_partition_of "${lower_src}" 2>/dev/null)" || return 0
     [ -n "${raw_part}" ] || return 0
 
     disk="$(find_user_data__parent_disk "${raw_part}" 2>/dev/null)" || return 0

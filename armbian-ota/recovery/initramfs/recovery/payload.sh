@@ -150,10 +150,11 @@ ota_source_staged_hook() {
 # Call $1 if the hook defined it; no-op otherwise, rc passthrough.
 ota_call_hook() {
     fn="$1"
+    shift
 
     type "${fn}" >/dev/null 2>&1 || return 0
     log "OTA hook point: ${fn}"
-    "${fn}"
+    "${fn}" "$@"
 }
 
 # Capture the pre-OTA armbianEnv before a hook can reformat anything, so
