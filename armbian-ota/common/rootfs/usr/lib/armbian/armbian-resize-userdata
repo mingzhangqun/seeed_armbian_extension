@@ -2,7 +2,6 @@
 
 set -euo pipefail
 
-SERVICE_NAME="armbian-resize-userdata.service"
 USERDATA_PARTLABEL="userdata"
 USERDATA_FSLABEL="armbi_usrdata"
 LUKS_PASSPHRASE_FILE="/run/armbian-luks-passphrase"

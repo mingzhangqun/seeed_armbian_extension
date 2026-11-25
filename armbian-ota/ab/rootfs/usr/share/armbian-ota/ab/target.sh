@@ -97,9 +97,8 @@ ab_reformat_target_root() {
         return 1
     fi
 
-    # A killed transaction can leave the inactive target root mounted (its
-    # orphan extract may still write). umount success implies writers are
-    # gone; wait them out instead of failing the transaction.
+    # A killed transaction can leave the target root mounted with a writing
+    # orphan extract; wait for a clean umount instead of failing.
     while read -r residue_mnt; do
         [ -n "${residue_mnt}" ] || continue
         log_warn "Detaching stale target-root mount: ${residue_mnt}"
@@ -204,23 +203,8 @@ ab_update_armbian_env() {
     fi
 }
 
-# Effective (last-wins) value of a key in an env file, empty if absent.
-_ab_env_get_key() {
-    local env_file="$1" key="$2"
-
-    [ -f "${env_file}" ] || return 0
-    sed -n "s/^${key}=//p" "${env_file}" | tail -n 1
-}
-
-_ab_set_env_key() {
-    local env_file="$1" key="$2" value="$3"
-
-    if grep -q "^${key}=" "${env_file}"; then
-        sed -i "s|^${key}=.*$|${key}=${value}|" "${env_file}" || return 1
-    else
-        printf '\n%s=%s\n' "${key}" "${value}" >> "${env_file}" || return 1
-    fi
-}
+# ota_env_get_key / ota_env_set_key live in posix.sh (shared
+# with the recovery initramfs).
 
 # Overlays value from the running slot's env — the only place user edits
 # live, since the target slot only ever received OTA baselines. Falls back
@@ -231,7 +215,7 @@ _ab_capture_current_overlays() {
     local env_file="/boot/armbianEnv.txt" slot dev mnt
 
     if [ -f "${env_file}" ]; then
-        _ab_env_get_key "${env_file}" overlays
+        ota_env_get_key "${env_file}" overlays
         return 0
     fi
 
@@ -256,7 +240,7 @@ _ab_capture_current_overlays() {
         if ! mountpoint -q "${mnt}" 2>/dev/null; then rm -rf "${mnt}"; fi
         return 0
     fi
-    _ab_env_get_key "${mnt}/armbianEnv.txt" overlays
+    ota_env_get_key "${mnt}/armbianEnv.txt" overlays
     umount "${mnt}" 2>/dev/null || log_warn "Failed to unmount ${mnt}"
     rm -rf "${mnt}"
 }
@@ -278,13 +262,11 @@ ab_merge_env_overlays() {
         return 0
     }
 
-    merged="$(printf '%s\n%s\n' "$(_ab_env_get_key "${env_file}" overlays)" "${old_overlays}" |
-        tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ' |
-        sed 's/[[:space:]]*$//')"
+    merged="$(ota_merge_overlays "$(ota_env_get_key "${env_file}" overlays)" "${old_overlays}")"
     [ -n "${merged}" ] || return 0
 
     log_info "Merged overlays into target env: ${merged}"
-    _ab_set_env_key "${env_file}" overlays "${merged}"
+    ota_env_set_key "${env_file}" overlays "${merged}"
 }
 
 ab_write_target_boot_itb() {
@@ -317,36 +299,11 @@ ab_write_target_boot_itb() {
         error_exit "Failed to write FIT boot image to ${target}"
     sync
 
-    # Compare the exact FIT extent with the source already verified at staging.
-    # Full-block reads reject a silent short read; the side file carries dd's
-    # status past sha256sum without depending on the caller's pipefail policy.
-    local readback_status readback_sha
-    readback_status="${OTA_TMP_DIR}/ab-fit-readback.status"
-    readback_sha="${OTA_TMP_DIR}/ab-fit-readback.sha256"
-    rm -f "${readback_status}" "${readback_sha}"
-    (
-        remaining="${image_size}"
-        offset=0
-        while [ "${remaining}" -gt 0 ]; do
-            chunk="${remaining}"
-            [ "${chunk}" -gt 1048576 ] && chunk=1048576
-            if [ "${chunk}" -eq 1048576 ]; then
-                dd if="${target}" bs=1M skip=$((offset / 1048576)) \
-                    count=1 iflag=fullblock status=none || exit 1
-            else
-                dd if="${target}" bs=1 skip="${offset}" count="${chunk}" \
-                    iflag=fullblock status=none || exit 1
-            fi
-            offset=$((offset + chunk))
-            remaining=$((remaining - chunk))
-        done
-        printf '0\n' >"${readback_status}"
-    ) | sha256sum | awk '{print $1}' >"${readback_sha}"
-    [ -f "${readback_status}" ] && [ "$(cat "${readback_status}")" = "0" ] ||
-        error_exit "Failed to read back FIT boot image from ${target}"
-    [ "$(cat "${readback_sha}")" = "$(sha256sum "${image}" | awk '{print $1}')" ] ||
+    # Exact-extent readback: posix.sh ota_fit_readback_verify (shared with the
+    # rescue raw-FIT writer; chunked full-block reads, status side file).
+    ota_fit_readback_verify "${target}" "${image_size}" \
+        "$(sha256sum "${image}" | awk '{print $1}')" "${OTA_TMP_DIR}" ||
         error_exit "Written FIT boot image does not match source: ${target}"
-    rm -f "${readback_status}" "${readback_sha}"
 }
 
 ab_update_target_bootfs() {

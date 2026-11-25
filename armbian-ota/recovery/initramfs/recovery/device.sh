@@ -12,11 +12,7 @@
 get_dev_and_uuid_by_label() {
     label="$1"
     disk="${2:-}"
-    if [ -n "${disk}" ]; then
-        dev="$(blkid -t LABEL="${label}" -o device 2>/dev/null | grep -E "^${disk}p[0-9]+$" | head -n1)"
-    else
-        dev="$(blkid -t LABEL="${label}" -o device 2>/dev/null | head -n1)"
-    fi
+    dev="$(ota_blkid_first_on_disk "LABEL=${label}" "${disk}")"
     [ -n "${dev}" ] || return 1
     uuid="$(blkid -s UUID -o value "${dev}" 2>/dev/null | head -n1)"
     [ -n "${uuid}" ] || return 1
@@ -30,19 +26,7 @@ get_uuid_by_label() {
 }
 
 # Restrict lookups to the boot disk; clones duplicate labels/UUIDs.
-
-# First blkid device match for KEY=value, restricted to partitions of $disk
-# (mmcblkNpX / nvmeXn1pY naming) when a disk is given.
-first_match_on_disk() {
-    local filter="$1" disk="$2"
-
-    if [ -n "${disk}" ]; then
-        blkid -t "${filter}" -o device 2>/dev/null |
-            grep -E "^${disk}p[0-9]+$" | head -n1
-    else
-        blkid -t "${filter}" -o device 2>/dev/null | head -n1
-    fi
-}
+# ota_blkid_first_on_disk lives in posix.sh (shared with the A/B runtime).
 
 # ===== helper: get LUKS UUID for encrypted root backing device =====
 # Anchored: prefer the container the initramfs actually unlocked (its sysfs
@@ -60,9 +44,9 @@ get_luks_uuid_for_root() {
 
     if [ -z "${root_luks_dev}" ] || [ "$(blkid -s TYPE -o value "${root_luks_dev}" 2>/dev/null || true)" != "crypto_LUKS" ]; then
         disk="$(fw_env_boot_disk || true)"
-        root_luks_dev="$(first_match_on_disk "PARTLABEL=rootfs" "${disk}" || true)"
+        root_luks_dev="$(ota_blkid_first_on_disk "PARTLABEL=rootfs" "${disk}" || true)"
         if [ -z "${root_luks_dev}" ] || [ "$(blkid -s TYPE -o value "${root_luks_dev}" 2>/dev/null || true)" != "crypto_LUKS" ]; then
-            root_luks_dev="$(first_match_on_disk "TYPE=crypto_LUKS" "${disk}" || true)"
+            root_luks_dev="$(ota_blkid_first_on_disk "TYPE=crypto_LUKS" "${disk}" || true)"
         fi
     fi
 
@@ -178,7 +162,7 @@ ota_detect_devices() {
             luks_root_dev=""
             case "${cmdline_root}" in
                 UUID=*)
-                    luks_root_dev="$(first_match_on_disk "UUID=${cmdline_root#UUID=}" "$(fw_env_boot_disk || true)")"
+                    luks_root_dev="$(ota_blkid_first_on_disk "UUID=${cmdline_root#UUID=}" "$(fw_env_boot_disk || true)")"
                     ;;
                 LABEL=*)
                     luks_root_dev="$(get_dev_and_uuid_by_label "${cmdline_root#LABEL=}" "$(fw_env_boot_disk || true)" || true)"
@@ -257,7 +241,7 @@ ota_detect_devices() {
                     _cdev=""
                     _i=0
                     while [ "${_i}" -lt 10 ]; do
-                        _cdev="$(first_match_on_disk "UUID=${_cuuid}" "$(fw_env_boot_disk || true)")"
+                        _cdev="$(ota_blkid_first_on_disk "UUID=${_cuuid}" "$(fw_env_boot_disk || true)")"
                         [ -n "${_cdev}" ] && break
                         sleep 1
                         _i=$((_i + 1))

@@ -35,6 +35,19 @@ ota_resolve_hook_name() {
     return 1
 }
 
+# First blkid match for KEY=value, scoped to partitions of $disk; clones
+# duplicate labels/UUIDs, so callers pass the boot disk.
+ota_blkid_first_on_disk() {
+    local filter="$1" disk="$2"
+
+    if [ -n "${disk}" ]; then
+        blkid -t "${filter}" -o device 2>/dev/null |
+            grep -E "^${disk}p[0-9]+$" | head -n1
+    else
+        blkid -t "${filter}" -o device 2>/dev/null | head -n1
+    fi
+}
+
 # Call the named hook function if the hook defined it; a no-op otherwise.
 # The function's return code is passed through.
 ota_call_hook() {
@@ -45,6 +58,78 @@ ota_call_hook() {
     ota_lib_log "OTA hook point: ${fn}"
     "${fn}" "$@"
 }
+
+# Effective (last-wins) value of a key in an env file, empty if absent.
+ota_env_get_key() {
+    local env_file="$1" key="$2"
+
+    [ -f "${env_file}" ] || return 0
+    sed -n "s/^${key}=//p" "${env_file}" | tail -n 1
+}
+
+# Set (replace or append) a key in an env file; rc 1 on write failure.
+ota_env_set_key() {
+    local env_file="$1" key="$2" value="$3"
+
+    if grep -q "^${key}=" "${env_file}"; then
+        sed -i "s|^${key}=.*$|${key}=${value}|" "${env_file}" || return 1
+    else
+        printf '\n%s=%s\n' "${key}" "${value}" >> "${env_file}" || return 1
+    fi
+}
+
+# Merge two whitespace-separated overlay lists: baseline entries keep their
+# order, old-only entries are appended, deduplicated.
+ota_merge_overlays() {
+    local new="$1" old="$2"
+
+    printf '%s\n%s\n' "${new}" "${old}" |
+        tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ' |
+        sed 's/[[:space:]]*$//'
+}
+
+# Chunked exact-extent read streamed into sha256sum; the status side file
+# carries the read result (POSIX sh has no pipefail). $4 is the scratch dir.
+ota_fit_readback_verify() (
+    fit_target="$1"
+    fit_size="$2"
+    fit_expected_sha="$3"
+    fit_dir="$4"
+    fit_status="${fit_dir}/fit-readback.status.$$"
+    fit_sha_file="${fit_dir}/fit-readback.sha256.$$"
+
+    [ -d "${fit_dir}" ] || mkdir -p "${fit_dir}" 2>/dev/null || return 1
+    rm -f "${fit_status}" "${fit_sha_file}" 2>/dev/null || true
+
+    fit_remaining="${fit_size}"
+    fit_offset=0
+    {
+        while [ "${fit_remaining}" -gt 0 ]; do
+            fit_chunk="${fit_remaining}"
+            [ "${fit_chunk}" -gt 1048576 ] && fit_chunk=1048576
+            if [ "${fit_chunk}" -eq 1048576 ]; then
+                dd if="${fit_target}" bs=1M skip=$((fit_offset / 1048576)) \
+                    count=1 iflag=fullblock status=none || break
+            else
+                dd if="${fit_target}" bs=1 skip="${fit_offset}" count="${fit_chunk}" \
+                    iflag=fullblock status=none || break
+            fi
+            fit_offset=$((fit_offset + fit_chunk))
+            fit_remaining=$((fit_remaining - fit_chunk))
+        done
+        printf '%s\n' "${fit_remaining}" > "${fit_status}"
+    } | sha256sum | awk '{print $1}' > "${fit_sha_file}"
+
+    fit_actual_sha="$(cat "${fit_sha_file}" 2>/dev/null)"
+    fit_read_rc=1
+    [ -f "${fit_status}" ] && fit_read_rc="$(cat "${fit_status}" 2>/dev/null)"
+    rm -f "${fit_status}" "${fit_sha_file}" 2>/dev/null || true
+    if [ "${fit_read_rc}" != "0" ] || [ "${fit_actual_sha}" != "${fit_expected_sha}" ]; then
+        ota_lib_log "ERROR: written FIT readback failed or does not match source"
+        return 1
+    fi
+    return 0
+)
 
 # FIT image check: d00dfeed magic in the first 4 bytes.
 ota_is_fit_image() {

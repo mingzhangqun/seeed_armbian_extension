@@ -31,9 +31,7 @@
 # BOOT_TAR/BOOT_MNT/LOGDIR globals. Definition-only, no side effects on
 # source.
 
-bsw_env_get() { # $1=key $2=env file
-    sed -n "s/^$1=//p" "$2" 2>/dev/null | tail -n1
-}
+# ota_env_get_key lives in posix.sh (sourced by the 99-ota-apply shell).
 
 # Classify a payload-relative path for this board:
 # "critical" (swap last), "normal" (swap), or "skip" (leave alone).
@@ -157,11 +155,11 @@ hook_pre_apply() {
     bsw_prefix=""
     if [ -f "${BOOT_MNT}/armbianEnv.txt" ]; then
         cp "${BOOT_MNT}/armbianEnv.txt" "${LOGDIR}/armbianEnv.pre-ota"
-        bsw_fdtfile="$(bsw_env_get fdtfile "${BOOT_MNT}/armbianEnv.txt")"
-        bsw_prefix="$(bsw_env_get overlay_prefix "${BOOT_MNT}/armbianEnv.txt")"
+        bsw_fdtfile="$(ota_env_get_key "${BOOT_MNT}/armbianEnv.txt" fdtfile)"
+        bsw_prefix="$(ota_env_get_key "${BOOT_MNT}/armbianEnv.txt" overlay_prefix)"
     fi
-    [ -n "${bsw_fdtfile}" ] || bsw_fdtfile="$(bsw_env_get fdtfile "${bsw_work}/armbianEnv.txt")"
-    [ -n "${bsw_prefix}" ] || bsw_prefix="$(bsw_env_get overlay_prefix "${bsw_work}/armbianEnv.txt")"
+    [ -n "${bsw_fdtfile}" ] || bsw_fdtfile="$(ota_env_get_key "${bsw_work}/armbianEnv.txt" fdtfile)"
+    [ -n "${bsw_prefix}" ] || bsw_prefix="$(ota_env_get_key "${bsw_work}/armbianEnv.txt" overlay_prefix)"
     if [ -z "${bsw_fdtfile}" ]; then
         log "ERROR boot-swap: cannot resolve fdtfile from device or payload env"
         rm -rf "${bsw_work}"

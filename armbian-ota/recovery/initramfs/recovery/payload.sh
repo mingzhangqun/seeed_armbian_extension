@@ -155,62 +155,14 @@ ota_capture_pre_ota_env() {
     return 0
 }
 
-set_env_key() {
-    file="$1"
-    key="$2"
-    value="$3"
-
-    if grep -q "^${key}=" "${file}"; then
-        sed -i "s|^${key}=.*$|${key}=${value}|" "${file}"
-    else
-        printf '\n%s=%s\n' "${key}" "${value}" >> "${file}"
-    fi
-}
+# set_env_key / ota_fit_readback_verify live in posix.sh (shared with the
+# A/B runtime).
 
 # Verify the exact FIT extent, not the whole partition's padding. Read complete
 # 1 MiB blocks plus one tail block, streaming them into the digest instead of
 # relying on a pipe's final status. A failed or short read produces a different
-# digest and aborts the write transaction.
-ota_fit_readback_verify() (
-    # This is a POSIX library with shared globals. Keep this helper's state in
-    # a subshell: other apply helpers also use fit_* names. Keep the digest
-    # outside the read pipeline so its counter updates survive in this shell.
-    fit_target="$1"
-    fit_size="$2"
-    fit_expected_sha="$3"
-    fit_status="${LOGDIR}/fit-readback.status.$$"
-    fit_sha_file="${LOGDIR}/fit-readback.sha256.$$"
-    rm -f "${fit_status}" "${fit_sha_file}" 2>/dev/null || true
-
-    fit_remaining="${fit_size}"
-    fit_offset=0
-    {
-        while [ "${fit_remaining}" -gt 0 ]; do
-            fit_chunk="${fit_remaining}"
-            [ "${fit_chunk}" -gt 1048576 ] && fit_chunk=1048576
-            if [ "${fit_chunk}" -eq 1048576 ]; then
-                dd if="${fit_target}" bs=1M skip=$((fit_offset / 1048576)) \
-                    count=1 iflag=fullblock status=none || break
-            else
-                dd if="${fit_target}" bs=1 skip="${fit_offset}" count="${fit_chunk}" \
-                    iflag=fullblock status=none || break
-            fi
-            fit_offset=$((fit_offset + fit_chunk))
-            fit_remaining=$((fit_remaining - fit_chunk))
-        done
-        printf '%s\n' "${fit_remaining}" > "${fit_status}"
-    } | sha256sum | awk '{print $1}' > "${fit_sha_file}"
-
-    fit_actual_sha="$(cat "${fit_sha_file}" 2>/dev/null)"
-    fit_read_rc=1
-    [ -f "${fit_status}" ] && fit_read_rc="$(cat "${fit_status}" 2>/dev/null)"
-    rm -f "${fit_status}" "${fit_sha_file}" 2>/dev/null || true
-    if [ "${fit_read_rc}" != "0" ] || [ "${fit_actual_sha}" != "${fit_expected_sha}" ]; then
-        log "ERROR: written FIT readback failed or does not match source"
-        return 1
-    fi
-    return 0
-)
+# digest and aborts the write transaction. (ota_fit_readback_verify lives in
+# posix.sh, shared with the A/B slot writer.)
 
 write_raw_boot_itb() {
     image="$1"
@@ -259,7 +211,7 @@ write_raw_boot_itb() {
     if command -v sha256sum >/dev/null 2>&1; then
         log "verifying written FIT against boot.sha256 ..."
         source_sha="$(sha256sum "${image}" | awk '{print $1}')"
-        ota_fit_readback_verify "${target}" "${image_size}" "${source_sha}" || return 1
+        ota_fit_readback_verify "${target}" "${image_size}" "${source_sha}" "${LOGDIR}" || return 1
         log "boot.itb verified after write (sha256=${source_sha})"
     else
         log "WARN: sha256sum unavailable in initramfs; skipping post-write verification"
@@ -522,11 +474,11 @@ ota_patch_config() {
 
         if [ "${AUTO_DECRYPT_MODE}" -eq 1 ]; then
             log "  - set rootdev=/dev/mapper/armbian-root"
-            set_env_key "${ARM_ENV}" rootdev /dev/mapper/armbian-root
+            ota_env_set_key "${ARM_ENV}" rootdev /dev/mapper/armbian-root
         else
             if [ -n "${ROOT_UUID}" ]; then
                 log "  - set rootdev=UUID=${ROOT_UUID}"
-                set_env_key "${ARM_ENV}" rootdev "UUID=${ROOT_UUID}"
+                ota_env_set_key "${ARM_ENV}" rootdev "UUID=${ROOT_UUID}"
             else
                 log "  - WARN: ROOT_UUID empty, skip rootdev change"
             fi
@@ -549,11 +501,11 @@ ota_patch_config() {
         if [ -f "${DIST_ENV}" ]; then
             log "syncing ${DIST_ENV} with new rootdev"
             if [ "${AUTO_DECRYPT_MODE}" -eq 1 ]; then
-                set_env_key "${DIST_ENV}" rootdev /dev/mapper/armbian-root
+                ota_env_set_key "${DIST_ENV}" rootdev /dev/mapper/armbian-root
             elif [ -n "${ROOT_UUID}" ]; then
-                set_env_key "${DIST_ENV}" rootdev "UUID=${ROOT_UUID}"
+                ota_env_set_key "${DIST_ENV}" rootdev "UUID=${ROOT_UUID}"
             fi
-            set_env_key "${DIST_ENV}" verbosity 6
+            ota_env_set_key "${DIST_ENV}" verbosity 6
         else
             log "  - ${DIST_ENV} missing, copying from ${ARM_ENV}"
             cp -a "${ARM_ENV}" "${DIST_ENV}"
@@ -566,14 +518,12 @@ ota_patch_config() {
         # the old value are appended, deduplicated.
         OTA_OLD_ENV="${LOGDIR}/armbianEnv.pre-ota"
         if [ -f "${OTA_OLD_ENV}" ] && grep -q '^overlays=' "${OTA_OLD_ENV}"; then
-            old_overlays="$(sed -n 's/^overlays=//p' "${OTA_OLD_ENV}" | tail -n 1)"
-            new_overlays="$(sed -n 's/^overlays=//p' "${ARM_ENV}" | tail -n 1)"
-            merged_overlays="$(printf '%s\n%s\n' "${new_overlays}" "${old_overlays}" |
-                tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ' |
-                sed 's/[[:space:]]*$//')"
+            old_overlays="$(ota_env_get_key "${OTA_OLD_ENV}" overlays)"
+            new_overlays="$(ota_env_get_key "${ARM_ENV}" overlays)"
+            merged_overlays="$(ota_merge_overlays "${new_overlays}" "${old_overlays}")"
             if [ -n "${merged_overlays}" ]; then
                 log "  - merge overlays: baseline='${new_overlays}' + pre-OTA='${old_overlays}' -> '${merged_overlays}'"
-                set_env_key "${ARM_ENV}" overlays "${merged_overlays}"
+                ota_env_set_key "${ARM_ENV}" overlays "${merged_overlays}"
             else
                 log "  - pre-OTA overlays value empty, keep baseline overlays"
             fi
