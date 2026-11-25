@@ -81,7 +81,7 @@ function ota_uboot_env_prefill_compose() {
             # Plain A/B: stamp the fs branch; plain FIT boots stay a manual console action.
             printf 'ab_boot_mode=filesystem\n' > "${mode_override_env}"
         fi
-        ota_ab_merge_uboot_env_files "${final_env}" "${src_env}" "${mode_override_env}"
+        ota_merge_uboot_env_files "${final_env}" "${src_env}" "${mode_override_env}"
         rm -f "${mode_override_env}"
         return 0
     fi
@@ -121,7 +121,7 @@ function ota_uboot_env_prefill_compose() {
         printf '%s\n' "bootcmd=${OTA_ENV_BOOTCMD}"
     } > "${routing_env}"
 
-    ota_ab_merge_uboot_env_files "${final_env}" "${default_env}" "${routing_env}"
+    ota_merge_uboot_env_files "${final_env}" "${default_env}" "${routing_env}"
     rm -f "${routing_env}"
 }
 

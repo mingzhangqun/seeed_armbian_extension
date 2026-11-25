@@ -8,7 +8,7 @@ readonly OTA_COMMON_INITRAMFS="${OTA_SUPPORT_DIR}/common/initramfs"
 function ota_recovery_write_initial_env() {
     local root_dir="$1" default_env
 
-    default_env="$(ota_ab_default_env_file_for_rootfs "${root_dir}")" || {
+    default_env="$(ota_default_env_file_for_rootfs "${root_dir}")" || {
         display_alert "Recovery OTA runtime" "U-Boot default env not found; fw_setenv merge base not installed" "err"
         return 1
     }
