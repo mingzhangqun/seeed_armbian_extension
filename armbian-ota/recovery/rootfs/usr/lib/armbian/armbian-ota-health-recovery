@@ -42,8 +42,7 @@ ota_health_schedule_reboot() {
 }
 
 # --- early exit: no transaction in flight ------------------------------------
-lower_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-[ -n "${lower_src}" ] || lower_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+lower_src="$(ota_root_mount_source || true)"
 if ! fw_env_ensure_config "${lower_src}" >/dev/null 2>&1; then
     # Cannot see the env at all (tools/config missing): never fail a healthy
     # boot for that; the Rescue side owns env repair.

@@ -25,3 +25,22 @@ ota_compute_payload_id() { # $1 = rootfs tar, $2 = boot staging tree
         "${root_sha}" "${boot_sha}" |
         sha256sum | awk '{print $1}'
 }
+
+# payload.env identity card, single writer for both sides (same sourcing
+# contract as the hash above); the field set is what 99-ota-apply and the
+# metadata gates consume, so it cannot drift between build and device.
+ota_write_payload_env() {
+    local dir="$1" id="$2" fmt="$3" board="$4" release="$5" kernel="$6" version="$7"
+
+    {
+        echo "PAYLOAD_ID=${id}"
+        echo "KIND=full"
+        echo "FMT=${fmt}"
+        echo "HAS_ROOTFS=1"
+        echo "BOARD=${board}"
+        echo "RELEASE=${release}"
+        echo "KERNEL=${kernel}"
+        echo "VERSION=${version}"
+        echo "OTA_MODE=recovery"
+    } > "${dir}/payload.env"
+}

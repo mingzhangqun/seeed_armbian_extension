@@ -123,12 +123,23 @@ ota_check_staging_free_space() {
     log_info "Space gate: staging ${directory} avail=${avail} need=${need} (staged=${payload_bytes}, backup=${extra_bytes}, margin=${margin})"
 }
 
+ota_root_mount_source() {
+    findmnt -n -o SOURCE /media/root-ro 2>/dev/null ||
+        findmnt -n -o SOURCE / 2>/dev/null
+}
+
+# Single key from /etc/armbian-image-release, empty when absent.
+ota_image_release_field() {
+    local key="$1"
+
+    sed -n "s/^${key}=//p" /etc/armbian-image-release 2>/dev/null | head -n1
+}
+
 ota_system_encrypted() {
     local src
 
     [ -s /run/armbian-luks-passphrase ] && return 0
-    src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-    [ -n "${src}" ] || src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    src="$(ota_root_mount_source || true)"
     case "${src}" in
         /dev/mapper/*|/dev/dm-*) return 0 ;;
     esac
@@ -174,8 +185,8 @@ ota_check_board_release() {
     [ -n "${release}" ] || error_exit "OTA package metadata missing RELEASE; refusing"
 
     # Snapshot only: armbian-release is package-owned and can drift.
-    sys_board="$(sed -n 's/^BOARD=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
-    sys_release="$(sed -n 's/^RELEASE=//p' /etc/armbian-image-release 2>/dev/null | head -n1)"
+    sys_board="$(ota_image_release_field BOARD)"
+    sys_release="$(ota_image_release_field RELEASE)"
 
     if [ -n "${sys_board}" ] && [ "${board}" != "${sys_board}" ]; then
         error_exit "OTA package BOARD mismatch: package=${board}, device=${sys_board}"
@@ -730,8 +741,7 @@ ota_manifest_get() {
 ota_get_security_part() {
     local dev root_src part disk
 
-    root_src="$(findmnt -n -o SOURCE /media/root-ro 2>/dev/null || true)"
-    [ -n "${root_src}" ] || root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    root_src="$(ota_root_mount_source || true)"
     [ -n "${root_src}" ] || root_src="$(df / | awk 'NR==2 {print $1}')"
     part="${root_src}"
     case "${root_src}" in

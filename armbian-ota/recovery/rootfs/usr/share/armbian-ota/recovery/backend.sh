@@ -39,38 +39,12 @@ recovery_require_transaction_store() {
         error_exit "Recovery overlayroot backing store is unavailable: ${RECOVERY_OVERLAY_BACKING_DIR}"
 }
 
-# ===== system identity =======================================================
-
-recovery_system_field() {
-    local key="$1"
-
-    sed -n "s/^${key}=//p" /etc/armbian-image-release 2>/dev/null | head -n1
-}
-
-recovery_lower_source() {
-    findmnt -n -o SOURCE /media/root-ro 2>/dev/null ||
-        findmnt -n -o SOURCE / 2>/dev/null
-}
+# ===== system identity =====
+# ota_image_release_field / ota_root_mount_source live in common.sh.
 
 # ===== payload identity: sourced from /usr/share/armbian-ota/payload-id.sh =====
-
-# payload.env identity card (section 4); single writer for staged packages
-# (defensive regen) and backup payloads.
-recovery_write_payload_env() {
-    local dir="$1" id="$2" fmt="$3" board="$4" release="$5" kernel="$6" version="$7"
-
-    {
-        echo "PAYLOAD_ID=${id}"
-        echo "KIND=full"
-        echo "FMT=${fmt}"
-        echo "HAS_ROOTFS=1"
-        echo "BOARD=${board}"
-        echo "RELEASE=${release}"
-        echo "KERNEL=${kernel}"
-        echo "VERSION=${version}"
-        echo "OTA_MODE=recovery"
-    } > "${dir}/payload.env"
-}
+# ota_write_payload_env (payload-id.sh) is the single writer for staged
+# packages (defensive regen) and backup payloads.
 
 # ===== cheap pre-checks (15.2 step 1) ========================================
 
@@ -124,14 +98,14 @@ recovery_check_space() {
 }
 
 # Capacity gate targets: the rootfs partition this system runs from is the one
-# the initramfs will reflash (recovery_lower_source resolves the LUKS mapper on
+# the initramfs will reflash (ota_root_mount_source resolves the LUKS mapper on
 # encrypted builds -- its size IS the usable ext4 capacity, so no header
 # allowance is needed). Boot target is the raw FIT partition on raw-boot
 # layouts, else the /boot partition mount.
 recovery_check_capacity() {
     local root_dev boot_dev
 
-    root_dev="$(recovery_lower_source)"
+    root_dev="$(ota_root_mount_source)"
     [ -b "${root_dev}" ] || {
         log_warn "Capacity gate: rootfs source ${root_dev:-<empty>} is not a block device; skipping"
         return 0
@@ -183,7 +157,7 @@ recovery_stage_payload() {
     # payload.env: identity card of the staged directory (section 4). The
     # build stamps it; regenerate defensively if absent.
     if [ ! -f "${incoming}/payload.env" ]; then
-        recovery_write_payload_env "${incoming}" "${payload_id}" \
+        ota_write_payload_env "${incoming}" "${payload_id}" \
             "${OTA_PAYLOAD_ROOTFS_TAR##*.}" \
             "$(package_env_get_value "BOARD" || true)" \
             "$(package_env_get_value "RELEASE" || true)" \
@@ -207,7 +181,7 @@ recovery_stage_payload() {
 recovery_raw_boot_dev() {
     local disk
 
-    disk="$(fw_env_boot_disk "$(recovery_lower_source)" 2>/dev/null || true)"
+    disk="$(fw_env_boot_disk "$(ota_root_mount_source)" 2>/dev/null || true)"
     [ -n "${disk}" ] || return 1
     ota_raw_boot_part "${disk}"
 }
@@ -247,11 +221,11 @@ recovery_create_backup() {
     recovery_require_transaction_store
     [ -d "${lower_mnt}" ] || error_exit "Backup source ${lower_mnt} missing (overlayroot lower not mounted)"
 
-    lower_dev="$(recovery_lower_source)"
-    board="$(recovery_system_field BOARD)"
-    release="$(recovery_system_field RELEASE)"
+    lower_dev="$(ota_root_mount_source)"
+    board="$(ota_image_release_field BOARD)"
+    release="$(ota_image_release_field RELEASE)"
     kernel="$(uname -r)"
-    version="$(recovery_system_field VERSION)"
+    version="$(ota_image_release_field VERSION)"
 
     log_info "Creating last-good backup from running system (lower=${lower_dev}, ~minutes)"
     mkdir -p "${work}"
@@ -359,7 +333,7 @@ recovery_create_backup() {
     fi
 
     # 4) metadata
-    recovery_write_payload_env "${work}" "${payload_id}" "zst" \
+    ota_write_payload_env "${work}" "${payload_id}" "zst" \
         "${board}" "${release}" "${kernel}" "${version}"
     {
         echo "# last-good backup of the running system"
@@ -384,7 +358,7 @@ recovery_create_backup() {
 recovery_arm_env() {
     local lower_dev disk
 
-    lower_dev="$(recovery_lower_source)"
+    lower_dev="$(ota_root_mount_source)"
     disk="$(fw_env_ensure_config "${lower_dev}")" ||
         error_exit "Cannot resolve boot disk for fw_env (anchor=${lower_dev:-none})"
 
@@ -509,7 +483,7 @@ recovery_commit_success() {
         error_exit "Failed to promote verified last-good payload ${candidate_id}; OTA remains pending for retry"
 
     local lower_dev
-    lower_dev="$(recovery_lower_source)"
+    lower_dev="$(ota_root_mount_source)"
     fw_env_ensure_config "${lower_dev}" >/dev/null ||
         error_exit "Cannot resolve boot disk for fw_env; env NOT cleared"
     fw_env_set "ota_in_progress" "0" ||
@@ -579,7 +553,7 @@ recovery_status() {
     echo "Prepared at: $(state_get START_TIME)"
     echo ""
     echo "U-Boot env:"
-    if fw_env_ensure_config "$(recovery_lower_source)" >/dev/null 2>&1; then
+    if fw_env_ensure_config "$(ota_root_mount_source)" >/dev/null 2>&1; then
         echo "  ota_in_progress=$(fw_env_get ota_in_progress || echo unset)"
         echo "  ota_boot_next=$(fw_env_get ota_boot_next || echo unset)"
     else

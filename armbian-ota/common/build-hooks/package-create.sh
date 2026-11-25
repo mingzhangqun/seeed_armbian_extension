@@ -242,24 +242,16 @@ EOF
 }
 
 # Per-payload identity card staged inside the package (copied verbatim into
-# payloads/<PAYLOAD_ID>/ by the device-side start flow).
-function ota_write_payload_env() {
+# payloads/<PAYLOAD_ID>/ by the device-side start flow). ota_write_payload_env
+# (payload-id.sh, sourced above) is the single writer.
+function ota_stage_payload_env() {
     local ota_temp_dir="$1"
     local manifest_mode="$2"
 
     [[ "${manifest_mode}" == "recovery" && -n "${OTA_RECOVERY_PAYLOAD_ID:-}" ]] || return 0
-
-    cat > "${ota_temp_dir}/payload.env" << EOF
-PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID}
-KIND=full
-FMT=${OTA_PAYLOAD_TAR_SUFFIX#tar.}
-HAS_ROOTFS=1
-BOARD=${BOARD}
-RELEASE=${RELEASE}
-KERNEL=${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}
-VERSION=${IMAGE_VERSION:-${REVISION}}
-OTA_MODE=recovery
-EOF
+    ota_write_payload_env "${ota_temp_dir}" "${OTA_RECOVERY_PAYLOAD_ID}" \
+        "${OTA_PAYLOAD_TAR_SUFFIX#tar.}" "${BOARD}" "${RELEASE}" \
+        "${KERNEL_VERSION:-${IMAGE_INSTALLED_KERNEL_VERSION}}" "${IMAGE_VERSION:-${REVISION}}" || return 1
     display_alert "OTA payload identity" "payload.env staged (PAYLOAD_ID=${OTA_RECOVERY_PAYLOAD_ID})" "info"
 }
 
@@ -785,7 +777,7 @@ function ota_finalize_payload_package() {
     mkdir -p "${DEST}/images/${BOARD}/ota/"
 
     ota_write_package_env "${ota_temp_dir}" "${manifest_mode}"
-    ota_write_payload_env "${ota_temp_dir}" "${manifest_mode}"
+    ota_stage_payload_env "${ota_temp_dir}" "${manifest_mode}"
     ota_write_version_file "${ota_temp_dir}" "${base_image_name}"
 
     if ota_payload_encryption_enabled; then

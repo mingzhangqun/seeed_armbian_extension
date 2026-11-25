@@ -157,21 +157,15 @@ _ab_update_armbian_env_file() {
     [ -f "${env_file}" ] || return 0
 
     if [ "${root_type}" = "crypto_LUKS" ]; then
-        if grep -q '^rootdev=' "${env_file}"; then
-            sed -i 's|^rootdev=.*$|rootdev=/dev/mapper/armbian-root|' "${env_file}" || return 1
-        else
-            printf '\nrootdev=/dev/mapper/armbian-root\n' >> "${env_file}" || return 1
-        fi
-
+        # ota_env_set_key (posix.sh) replaces-or-appends the whole key.
+        ota_env_set_key "${env_file}" rootdev "/dev/mapper/armbian-root" || return 1
         [ -n "${root_uuid}" ] || return 0
-        if grep -q '^cryptdevice=' "${env_file}"; then
-            sed -i "s|^cryptdevice=.*$|cryptdevice=UUID=${root_uuid}:armbian-root|" "${env_file}" || return 1
-        else
-            printf 'cryptdevice=UUID=%s:armbian-root\n' "${root_uuid}" >> "${env_file}" || return 1
-        fi
+        ota_env_set_key "${env_file}" cryptdevice "UUID=${root_uuid}:armbian-root" || return 1
         return 0
     fi
 
+    # Plain targets only rewrite UUID=/PARTUUID= rootdev forms; a device-path
+    # rootdev must survive for layouts that address partitions directly.
     [ -n "${root_uuid}" ] || return 0
     if grep -q '^rootdev=' "${env_file}"; then
         sed -i "s|^rootdev=UUID=.*$|rootdev=UUID=${root_uuid}|" "${env_file}" || return 1
