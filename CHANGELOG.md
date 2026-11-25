@@ -11,6 +11,26 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Fixed
 
+- **A/B env rebuild is state-aware.** A dual-bad env during a boot trial
+  confirmed the trial slot and killed the rollback chain; the rebuild now
+  persists the state file's source slot, and `rollback` falls back to the
+  state file when a rebuild zeroed the env flag.
+- **Recovery arms only against the expected routing set.** CRC-valid drift
+  (stale prefill, foreign blob) now triggers a full rewrite
+  (`fw_env_routing_set_ok`); the normal-boot probe also settles
+  `ota_boot_next` to `normal` (was `recovery`).
+- **Recovery rebuilds a both-bad env on every normal boot.** The Rescue
+  rebuild needs the `ota_role` routing only a healthy env can set, so a
+  dual-bad env killed remote OTA (261124 batch); the init-bottom marker
+  hook now probes and rebuilds, anchored on the overlay lower root.
+  Fail-open.
+- **`ota_boot_next` resets to `normal` when a transaction settles.** The
+  handoff one-shot flips it back before trying normal; both settle paths
+  now reset it.
+- **One device-resolution walk.** Four private mapper-to-partition
+  resolvers converge into `find_user_data__raw_partition_of`; mapper
+  anchors now resolve in `fw_env_boot_disk`, and `payload.sh`'s
+  `ota_call_hook` forwards hook arguments (it dropped them).
 - **CI passes `GITHUB_TOKEN` to the image build.** The aic8800
   latest-release lookup ran unauthenticated (60 req/hour per runner IP,
   403 on shared IPs) and killed builds after a full kernel compile; the
@@ -155,6 +175,10 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
 
 ### Changed
 
+- **Recovery fw_env tools install via apt, same as A/B.** The manual
+  Debian-bookworm deb download is deleted: trixie/resolute/bookworm arm64
+  all carry `libubootenv-tool`, and the pinned 0.3.2-1 binaries differ in
+  behavior from the distro's (079a8eec made `fwenv.sh` cover both).
 - **README leads with the official Armbian board pages.** The not-yet-live
   images page and its releases are no longer advertised; the Documentation
   index lists one entry per line.

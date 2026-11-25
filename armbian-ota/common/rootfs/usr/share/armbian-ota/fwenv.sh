@@ -17,27 +17,17 @@ OTA_FW_ENV_BAD_ERR_RE="bad crc|cannot read environment|failed to read environmen
 
 # Whole-disk device backing partition device $1, via sysfs parent walk.
 # /dev/mmcblk0p3 -> /dev/mmcblk0, /dev/nvme0n1p3 -> /dev/nvme0n1.
+# find-userdata.sh provides the raw-partition resolver; load it once.
+[ -n "${_OTA_FIND_USERDATA_LOADED:-}" ] || {
+    # shellcheck source=/dev/null
+    . /usr/share/armbian-ota/find-userdata.sh
+    _OTA_FIND_USERDATA_LOADED=1
+}
+
 fw_env_parent_disk() {
-    dev="$1"
-    base="$(basename "${dev}")"
-    sys_path="/sys/class/block/${base}"
-
-    if [ -L "${sys_path}" ]; then
-        parent="$(basename "$(readlink -f "${sys_path}/..")")"
-        if [ -d "/sys/class/block/${parent}" ] && [ "${parent}" != "${base}" ]; then
-            case "${parent}" in
-                loop*|ram*|zram*) ;;
-                *) printf '%s\n' "/dev/${parent}"; return 0 ;;
-            esac
-        fi
-    fi
-
-    # name-based fallback when sysfs walk is unavailable
-    case "${base}" in
-        mmcblk*p[0-9]*|nvme*n*p[0-9]*) printf '%s\n' "/dev/$(printf '%s' "${base}" | sed 's/p[0-9]*$//')" ;;
-        sd[a-z][0-9]*|vd[a-z][0-9]*)    printf '%s\n' "/dev/$(printf '%s' "${base}" | sed 's/[0-9]*$//')" ;;
-    esac
-    return 1
+    # Mappers included: resolve to the raw partition, then sysfs parent.
+    raw="$(find_user_data__raw_partition_of "$1")" || return 1
+    find_user_data__parent_disk "${raw}"
 }
 
 fw_env_cmdline_value() {
@@ -255,4 +245,17 @@ fw_env_write_routing_set() {
         "ota_rescue_boot_fit=${OTA_ENV_RESCUE_BOOT_FIT}" \
         "ota_rescue_boot=${OTA_ENV_RESCUE_BOOT}" \
         "bootcmd=${OTA_ENV_BOOTCMD}"
+}
+
+# Drift check for a CRC-valid routing set (stale prefill, foreign blob).
+# Needs OTA_RESCUE_ROOT_DEFAULT set; A/B analog: ab_env_slot_boot_ready.
+fw_env_routing_set_ok() {
+    [ "$(fw_env_get bootcmd)" = "${OTA_ENV_BOOTCMD}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot)" = "${OTA_ENV_NORMAL_BOOT}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot_fs)" = "${OTA_ENV_NORMAL_BOOT_FS}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot_fit)" = "${OTA_ENV_NORMAL_BOOT_FIT}" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot)" = "${OTA_ENV_RESCUE_BOOT}" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot_fs)" = "$(fw_env_splice_root "${OTA_RESCUE_ROOT_DEFAULT}")" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot_fit)" = "${OTA_ENV_RESCUE_BOOT_FIT}" ] || return 1
+    return 0
 }
