@@ -1,6 +1,6 @@
 [Unit]
 Description=Armbian AB OTA Rollback on Failure
-Documentation=https://docs.armbian.com
+Documentation=file:///usr/share/armbian-ota
 DefaultDependencies=no
 After=armbian-ota-firstboot.service
 ConditionPathExists=/var/lib/armbian-ota/ota-state.env
@@ -14,10 +14,8 @@ TimeoutStartSec=60
 StandardOutput=journal+console
 StandardError=journal+console
 
-# This service runs ONLY when health check (firstboot) fails
-# It is NOT enabled directly - only triggered via OnFailure
-# The rollback command also checks ota_in_progress flag
-# It will rollback to the previous working slot if OTA was in progress
+# Never enabled directly: only started via the firstboot OnFailure trigger.
+# The rollback command re-checks ota_in_progress and rolls the previous
+# working slot back only when an OTA is in flight.
 
 [Install]
-# No WantedBy - this service is only started via OnFailure trigger
