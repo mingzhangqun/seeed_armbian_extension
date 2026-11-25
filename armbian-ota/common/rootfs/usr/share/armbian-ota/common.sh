@@ -379,8 +379,7 @@ ota_source_hook() {
 
     OTA_HOOK_NAME=""
     OTA_HOOK_PATH=""
-    ota_resolve_hook_name "${work_dir}" >/dev/null 2>&1 || return 1
-    OTA_HOOK_NAME="$(ota_resolve_hook_name "${work_dir}")"
+    OTA_HOOK_NAME="$(ota_resolve_hook_name "${work_dir}")" || return 1
     OTA_HOOK_PATH="${work_dir}/${OTA_HOOK_NAME}"
     # shellcheck disable=SC1090
     . "${OTA_HOOK_PATH}" 2>/dev/null || error_exit "Failed to source OTA hook ${OTA_HOOK_PATH}"
