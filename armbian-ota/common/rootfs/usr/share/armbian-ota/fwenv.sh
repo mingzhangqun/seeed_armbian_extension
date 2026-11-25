@@ -3,10 +3,8 @@
 # fw_env helpers shared by the normal system (armbian-ota CLI, health
 # service) and the Rescue initramfs (99-ota-apply). POSIX sh + busybox.
 #
-# Routing tokens live in the redundant env pair below partition 1 (config
-# always two entries; every shipped U-Boot is patched for it). Writes are
-# readback-verified; a bad-CRC env is rebuilt from the initial env, never
-# blindly appended to.
+# Routing tokens live in the redundant env pair below partition 1; writes
+# are readback-verified, a bad-CRC env is rebuilt from the initial env.
 
 OTA_FW_ENV_CONFIG="${OTA_FW_ENV_CONFIG:-/etc/fw_env.config}"
 OTA_FW_ENV_OFFSET="0x3f8000"        # CONFIG_ENV_OFFSET (vendor env_blk)
@@ -143,9 +141,8 @@ fw_env_set_multi() {
             return 1
         fi
         rm -f "${set_err}" 2>/dev/null || true
-        # Bad-CRC refusal: rebuild from the initial env (defenv base),
-        # without reading the blob. Failed retry leaves the bad CRC: U-Boot
-        # falls back to the compiled default env (Rescue).
+        # Bad-CRC: rebuild from the initial env without reading the blob; a
+        # failed retry leaves the CRC bad and U-Boot falls back to Rescue.
         echo "fwenv: WARNING rebuilding env from /etc/u-boot-initial-env (bad CRC)" >&2
         fw_setenv -f /etc/u-boot-initial-env -s "${script_file}" || {
             rm -f "${script_file}" 2>/dev/null || true
@@ -246,4 +243,17 @@ fw_env_write_routing_set() {
         "ota_rescue_boot_fit=${OTA_ENV_RESCUE_BOOT_FIT}" \
         "ota_rescue_boot=${OTA_ENV_RESCUE_BOOT}" \
         "bootcmd=${OTA_ENV_BOOTCMD}"
+}
+
+# Drift check for a CRC-valid routing set (stale prefill, foreign blob).
+# Needs OTA_RESCUE_ROOT_DEFAULT set; A/B analog: ab_env_slot_boot_ready.
+fw_env_routing_set_ok() {
+    [ "$(fw_env_get bootcmd)" = "${OTA_ENV_BOOTCMD}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot)" = "${OTA_ENV_NORMAL_BOOT}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot_fs)" = "${OTA_ENV_NORMAL_BOOT_FS}" ] || return 1
+    [ "$(fw_env_get ota_normal_boot_fit)" = "${OTA_ENV_NORMAL_BOOT_FIT}" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot)" = "${OTA_ENV_RESCUE_BOOT}" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot_fs)" = "$(fw_env_splice_root "${OTA_RESCUE_ROOT_DEFAULT}")" ] || return 1
+    [ "$(fw_env_get ota_rescue_boot_fit)" = "${OTA_ENV_RESCUE_BOOT_FIT}" ] || return 1
+    return 0
 }
