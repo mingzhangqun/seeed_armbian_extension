@@ -86,7 +86,7 @@ echo "OTA health: transaction in flight (STATUS=${status} CANDIDATE=${candidate}
 # no boot partition resolvable at all, skip: a false skip drops one advisory
 # check, a false demand reboots a healthy transaction forever.
 ota_health_boot_is_raw_fit() {
-    local mode dev disk found=0
+    local mode disk dev
 
     mode="$(cat /usr/share/armbian-ota/boot-mode 2>/dev/null || true)"
     [ "${mode}" = "raw-fit" ] && return 0
@@ -94,13 +94,13 @@ ota_health_boot_is_raw_fit() {
     # probe only the boot disk: a cloned secure image attached as a second
     # disk carries a raw PARTLABEL=boot and would otherwise flip the verdict
     disk="$(fw_env_boot_disk "${lower_src}" 2>/dev/null || true)"
+    ota_raw_boot_part "${disk}" >/dev/null && return 0
+    # remaining in-scope boot partitions carry filesystems -> ext4 layout
     for dev in $(blkid -t PARTLABEL=boot -o device 2>/dev/null); do
-        [ -z "${disk}" ] || case "${dev}" in "${disk}"p[0-9]*) ;; *) continue ;; esac
-        found=1
-        [ -z "$(blkid -s TYPE -o value "${dev}" 2>/dev/null)" ] && return 0
+        if [ -z "${disk}" ]; then return 1; fi
+        case "${dev}" in "${disk}"p[0-9]*) return 1 ;; esac
     done
-    [ "${found}" = "0" ] && return 0
-    return 1
+    return 0
 }
 
 # --- the six checks -----------------------------------------------------------

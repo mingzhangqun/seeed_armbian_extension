@@ -656,6 +656,22 @@ load_staged_package_env() {
     return 0
 }
 
+# Shared extract+verify pipeline for the A/B and recovery backends: every
+# gate added here applies to both flavors identically.
+ota_stage_and_verify() {
+    local package_path="$1"
+    local dest_dir="$2"
+
+    extract_ota_package "${package_path}" "${dest_dir}"
+    ota_assert_dual_payload "${dest_dir}"
+    ota_assert_payload_matches_system "${dest_dir}"
+    ota_verify_payload "${dest_dir}" \
+        "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
+        "${OTA_PAYLOAD_BOOT_TAR}" "${OTA_PAYLOAD_BOOT_SHA}" "${OTA_PAYLOAD_BOOT_ITB}"
+    ota_check_package_requirements "${dest_dir}"
+    ota_run_phase1_hooks "${dest_dir}"
+}
+
 verify_sha256() {
     local payload="$1"
     local sha_file="$2"
@@ -709,6 +725,36 @@ ota_is_fit_image() {
     [ -f "${image}" ] || return 1
     magic="$(dd if="${image}" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
     [ "${magic}" = "d00dfeed" ]
+}
+
+# ===== raw-FIT layout probes (recovery backend + health check) ==============
+
+# First PARTLABEL=boot device with no filesystem (raw signed FIT at
+# offset 0); empty <disk> probes unscoped (advisory callers only).
+ota_raw_boot_part() {
+    local disk="$1" dev
+
+    for dev in $(blkid -t PARTLABEL=boot -o device 2>/dev/null); do
+        [ -z "${disk}" ] || case "${dev}" in
+            "${disk}"p[0-9]*) ;;
+            *) continue ;;
+        esac
+        [ -z "$(blkid -s TYPE -o value "${dev}" 2>/dev/null)" ] || continue
+        printf '%s\n' "${dev}"
+        return 0
+    done
+    return 1
+}
+
+# Exact FIT size from the FDT header (magic + 4-byte big-endian totalsize);
+# reading the whole partition would stage stale padding into backups.
+ota_fit_size_bytes() {
+    local dev="$1" header
+
+    header="$(dd if="${dev}" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [ "${#header}" -ge 16 ] || return 1
+    [ "${header:0:8}" = "d00dfeed" ] || return 1
+    printf '%d' "0x${header:8:8}" 2>/dev/null || return 1
 }
 
 # ===== Encrypted payload: signature verification + decryption =====

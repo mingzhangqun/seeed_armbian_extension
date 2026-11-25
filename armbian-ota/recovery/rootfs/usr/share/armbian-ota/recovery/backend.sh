@@ -111,7 +111,7 @@ recovery_check_space() {
         local lower_used boot_used raw_dev fit_sz
         lower_used="$(du -sb /media/root-ro 2>/dev/null | awk '{print $1}')"
         raw_dev="$(recovery_raw_boot_dev || true)"
-        if [ -n "${raw_dev}" ] && fit_sz="$(recovery_fit_size_bytes "${raw_dev}" 2>/dev/null)"; then
+        if [ -n "${raw_dev}" ] && fit_sz="$(ota_fit_size_bytes "${raw_dev}" 2>/dev/null)"; then
             # raw-FIT layout: the backup stages exactly the FIT bytes
             boot_used="${fit_sz}"
         else
@@ -175,14 +175,7 @@ recovery_stage_payload() {
     rm -rf "${incoming}"
 
     log_info "Staging payload ${payload_id} (extract + full sha256 verification)"
-    extract_ota_package "${package_path}" "${incoming}"
-    ota_assert_dual_payload "${incoming}"
-    ota_assert_payload_matches_system "${incoming}"
-    ota_verify_payload "${incoming}" \
-        "${OTA_PAYLOAD_ROOTFS_TAR}" "${OTA_PAYLOAD_ROOTFS_SHA}" \
-        "${OTA_PAYLOAD_BOOT_TAR}" "${OTA_PAYLOAD_BOOT_SHA}" "${OTA_PAYLOAD_BOOT_ITB}"
-    ota_check_package_requirements "${incoming}"
-    ota_run_phase1_hooks "${incoming}"
+    ota_stage_and_verify "${package_path}" "${incoming}"
 
     # payload.env: identity card of the staged directory (section 4). The
     # build stamps it; regenerate defensively if absent.
@@ -206,40 +199,14 @@ recovery_stage_payload() {
 
 # ===== lazy backup creation (15.2 step 3, 15.3) ==============================
 
-# The raw-FIT (secure boot) boot partition: PARTLABEL=boot on the boot disk
-# whose blkid TYPE is empty (no filesystem -- the signed FIT sits at offset
-# 0). Empty on ext4-boot layouts. Fail-closed: without a boot-disk anchor no
-# device is returned at all -- cloned disks duplicate PARTLABEL=boot and an
-# unscoped first match would read (and on rollback flash) the WRONG disk's
-# FIT; the caller then falls through to the ext4 branch and fails loudly.
+# Fail-closed raw-FIT boot partition: no disk anchor, no device -- clones
+# duplicate PARTLABEL=boot and an unscoped match reads the WRONG disk's FIT.
 recovery_raw_boot_dev() {
-    local disk dev fstype
+    local disk
 
     disk="$(fw_env_boot_disk "$(recovery_lower_source)" 2>/dev/null || true)"
     [ -n "${disk}" ] || return 1
-    for dev in $(blkid -t PARTLABEL=boot -o device 2>/dev/null); do
-        fstype="$(blkid -s TYPE -o value "${dev}" 2>/dev/null || true)"
-        [ -z "${fstype}" ] || continue
-        case "${dev}" in
-            "${disk}"p[0-9]*) ;;
-            *) continue ;;
-        esac
-        printf '%s\n' "${dev}"
-        return 0
-    done
-    return 1
-}
-
-# Exact FIT payload size from the FDT header: 4-byte magic (d00dfeed) then a
-# 4-byte big-endian totalsize. Reading the whole partition instead would
-# stage gigabytes of stale padding into the backup.
-recovery_fit_size_bytes() {
-    local dev="$1" header
-
-    header="$(dd if="${dev}" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    [ "${#header}" -ge 16 ] || return 1
-    [ "${header:0:8}" = "d00dfeed" ] || return 1
-    printf '%d' "0x${header:8:8}" 2>/dev/null || return 1
+    ota_raw_boot_part "${disk}"
 }
 
 recovery_backup_valid_structurally() {
@@ -321,7 +288,7 @@ recovery_create_backup() {
     mkdir -p "${boot_tree}"
     raw_boot_dev="$(recovery_raw_boot_dev || true)"
     if [ -n "${raw_boot_dev}" ]; then
-        fit_size="$(recovery_fit_size_bytes "${raw_boot_dev}")" || {
+        fit_size="$(ota_fit_size_bytes "${raw_boot_dev}")" || {
             rm -rf "${work}"
             error_exit "Backup: no FIT header on raw boot partition ${raw_boot_dev}"
         }
