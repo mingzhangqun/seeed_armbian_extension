@@ -373,8 +373,8 @@ ota_apply_rootfs() {
 }
 
 # ===== boot OTA: mount boot partition, extract boot.tar.gz, write boot.itb =====
-# Returns 1 on boot.itb failure (caller unmounts+aborts). boot.tar.gz extract
-# failure is logged but does not abort (matches legacy behavior).
+# Returns 1 on mount/extract/boot.itb/marker failure; the caller fails the
+# campaign and reboots into the retry ladder.
 ota_apply_boot() {
     # Hook mode: hook_pre_apply already performed the atomic boot swap and
     # left BOOT_MNT/DO_BOOT_OTA in place for ota_patch_config. Skip the
@@ -392,56 +392,58 @@ ota_apply_boot() {
     DO_BOOT_OTA=0
     [ "$HAS_BOOT_PART" -eq 1 ] && [ "$HAS_BOOT_TAR" -eq 1 ] && DO_BOOT_OTA=1
 
-    if [ "$DO_BOOT_OTA" -eq 1 ]; then
-        log "boot OTA enabled (separate boot partition + ${BOOT_TAR##*/} present)"
-
-        mkdir -p "${BOOT_MNT}"
-        log "mounting ${BOOT_DEV} -> ${BOOT_MNT} ..."
-        if ! mount -t ext4 -o rw "${BOOT_DEV}" "${BOOT_MNT}"; then
-            log "ERROR: mount ${BOOT_DEV} failed, skip boot OTA"
-            BOOT_MNT=""
-            DO_BOOT_OTA=0
-        fi
-    else
+    if [ "$DO_BOOT_OTA" -eq 0 ]; then
         log "boot OTA disabled (no separate boot partition or no boot payload)"
+        return 0
     fi
 
-    if [ "$DO_BOOT_OTA" -eq 1 ]; then
-        # The separate boot partition holds the live env; capture it BEFORE
-        # the clear below deletes it (hard ordering: capture -> clear ->
-        # extract; inverting it loses the user's overlays, section 7 step 6).
-        if [ -f "${BOOT_MNT}/armbianEnv.txt" ]; then
-            if ota_save_pre_ota_env "${BOOT_MNT}/armbianEnv.txt"; then
-                log "captured pre-OTA armbianEnv.txt from boot partition"
-            else
-                log "WARN: failed to capture pre-OTA armbianEnv.txt from boot partition"
-            fi
-        fi
+    log "boot OTA enabled (separate boot partition + ${BOOT_TAR##*/} present)"
 
-        # v0.8: wipe normal boot files (everything except recovery/ and
-        # lost+found/, hidden files included) so the partition content after
-        # OTA is exactly the package plus the rescuer. Never mkfs here --
-        # recovery/ lives in this filesystem.
-        ota_clear_normal_boot "${BOOT_MNT}" || {
-            log "ERROR: failed to clear normal boot files"
-            return 1
-        }
+    mkdir -p "${BOOT_MNT}"
+    log "mounting ${BOOT_DEV} -> ${BOOT_MNT} ..."
+    if ! mount -t ext4 -o rw "${BOOT_DEV}" "${BOOT_MNT}"; then
+        # Fatal for the same reason the extract gate below is: skipping
+        # the boot refresh commits "new rootfs + old boot", and the
+        # marker check would only surface it a boot cycle later.
+        log "ERROR: mount ${BOOT_DEV} failed"
+        BOOT_MNT=""
+        return 1
+    fi
 
-        log "extracting ${BOOT_TAR} -> ${BOOT_MNT} ..."
-        start_heartbeat "extracting ${BOOT_TAR##*/} to ${BOOT_MNT}"
-        if ! extract_tar "${BOOT_TAR}" "${BOOT_MNT}" "boot"; then
-            stop_heartbeat
-            log "ERROR: extract ${BOOT_TAR##*/} failed -- FATAL (legacy warn-and-continue removed: it produced 'new rootfs + old boot')"
-            return 1
+    # The separate boot partition holds the live env; capture it BEFORE
+    # the clear below deletes it (hard ordering: capture -> clear ->
+    # extract; inverting it loses the user's overlays, section 7 step 6).
+    if [ -f "${BOOT_MNT}/armbianEnv.txt" ]; then
+        if ota_save_pre_ota_env "${BOOT_MNT}/armbianEnv.txt"; then
+            log "captured pre-OTA armbianEnv.txt from boot partition"
+        else
+            log "WARN: failed to capture pre-OTA armbianEnv.txt from boot partition"
         fi
+    fi
+
+    # v0.8: wipe normal boot files (everything except recovery/ and
+    # lost+found/, hidden files included) so the partition content after
+    # OTA is exactly the package plus the rescuer. Never mkfs here --
+    # recovery/ lives in this filesystem.
+    ota_clear_normal_boot "${BOOT_MNT}" || {
+        log "ERROR: failed to clear normal boot files"
+        return 1
+    }
+
+    log "extracting ${BOOT_TAR} -> ${BOOT_MNT} ..."
+    start_heartbeat "extracting ${BOOT_TAR##*/} to ${BOOT_MNT}"
+    if ! extract_tar "${BOOT_TAR}" "${BOOT_MNT}" "boot"; then
         stop_heartbeat
-
-        # v0.8: the package must prove its identity on the partition it just
-        # wrote; a mismatch means the extract was partial or wrong.
-        ota_verify_boot_marker "${BOOT_MNT}" || return 1
-
-        sync
+        log "ERROR: extract ${BOOT_TAR##*/} failed -- FATAL (legacy warn-and-continue removed: it produced 'new rootfs + old boot')"
+        return 1
     fi
+    stop_heartbeat
+
+    # v0.8: the package must prove its identity on the partition it just
+    # wrote; a mismatch means the extract was partial or wrong.
+    ota_verify_boot_marker "${BOOT_MNT}" || return 1
+
+    sync
 
     if [ "${HAS_BOOT_ITB}" -eq 1 ]; then
         RAW_BOOT_DEV="$(find_raw_boot_dev || true)"
