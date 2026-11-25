@@ -9,10 +9,6 @@ function extension_prepare_config__install_userdata_resize_tools() {
 }
 
 function pre_umount_final_image__896_install_resize_userdata_service() {
-    local title="OTA userdata"
-
-    display_alert "${title}" "Enabling armbian-resize-userdata service" "info"
-    chroot "${MOUNT}" systemctl enable armbian-resize-userdata.service || {
-        display_alert "${title}" "Failed to enable armbian-resize-userdata.service" "warn"
-    }
+    display_alert "OTA userdata" "Enabling armbian-resize-userdata service" "info"
+    ota_enable_rootfs_service "${MOUNT}" armbian-resize-userdata.service "OTA userdata"
 }

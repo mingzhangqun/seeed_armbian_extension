@@ -2,14 +2,6 @@
 # Image Naming Helpers
 #
 
-function ota_image_layout_suffix() {
-    if [[ "${AB_PART_OTA}" == "yes" ]]; then
-        echo "_AB_PART"
-    else
-        echo ""
-    fi
-}
-
 function ota_get_package_type_label() {
     if [[ "${AB_PART_OTA}" == "yes" ]]; then
         echo "AB_PART_OTA"
@@ -36,10 +28,6 @@ function ota_image_kernel_version_without_family() {
     echo "${kernel_version}"
 }
 
-function ota_image_feature_suffix() {
-    echo "${EXTRA_IMAGE_SUFFIX:-}"
-}
-
 function ota_image_base_name_from_kernel() {
     local kernel_version_for_image="$1"
     local vendor_version_prelude="${VENDOR}_${IMAGE_VERSION:-"${REVISION}"}_"
@@ -54,7 +42,7 @@ function ota_image_base_name_from_kernel() {
     fi
 
     local feature_suffix
-    feature_suffix="$(ota_image_feature_suffix)"
+    feature_suffix="${EXTRA_IMAGE_SUFFIX:-}"
     if [[ -n "${feature_suffix}" ]]; then
         base_image_name="${base_image_name}${feature_suffix}"
     fi
@@ -69,10 +57,8 @@ function ota_image_base_name_from_kernel() {
         base_image_name="${base_image_name}_nfsboot"
     fi
 
-    local ota_suffix
-    ota_suffix="$(ota_image_layout_suffix)"
-    if [[ -n "${ota_suffix}" ]]; then
-        base_image_name="${base_image_name}${ota_suffix}"
+    if [[ "${AB_PART_OTA}" == "yes" ]]; then
+        base_image_name="${base_image_name}_AB_PART"
     fi
 
     echo "${base_image_name}"

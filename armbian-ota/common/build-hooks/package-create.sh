@@ -832,6 +832,26 @@ function ota_finalize_payload_package() {
 
 # Build Hooks (execution order)
 
+# Packaging steps between temp-dir creation and the single cleanup site.
+function ota_payload_packaging_pipeline() {
+    local ota_temp_dir="$1"
+    local ota_security_mode="$2"
+    local resolved_boot_partition=""
+
+    ota_resolve_boot_partition "${ota_security_mode}" resolved_boot_partition || return 1
+    ota_report_payload_sources "${ota_security_mode}" "${resolved_boot_partition}"
+
+    ota_create_payload_archives "${ota_temp_dir}" "${ota_security_mode}" \
+        "${resolved_boot_partition}" || return 1
+
+    if ota_payload_encryption_enabled; then
+        ota_require_host_tools openssl od || return 1
+        ota_encrypt_rootfs_payload "${ota_temp_dir}" || return 1
+    fi
+
+    ota_finalize_payload_package "${ota_temp_dir}" "${ota_security_mode}" || return 1
+}
+
 function pre_umount_final_image__901_create_ota_payload_pkg() {
 
     display_alert "pre_umount_final_image__901 Extracting partition images from loop device" "Detecting and extracting partitions from ${LOOP}" "info"
@@ -851,58 +871,29 @@ function pre_umount_final_image__901_create_ota_payload_pkg() {
         display_alert "Encrypted auto-decrypt OTA" "Non-secure boot mode: use mapper rootfs and package plain boot partition" "info"
     fi
 
-    ota_require_host_tools \
-        tar mount umount mountpoint lsblk grep sort blkid blockdev stat find wc \
-        sha256sum md5sum awk cp head basename cat date mkdir rm || return 1
-
-    if [[ "${OTA_PAYLOAD_COMP}" == "xz" ]] && ! ota_require_host_tools xz; then
-        return 1
-    fi
-    if [[ "${OTA_PAYLOAD_COMP}" == "zstd" ]] && ! ota_require_host_tools zstd; then
-        return 1
-    fi
+    local -a required_tools=(
+        tar mount umount mountpoint lsblk grep sort blkid blockdev stat find wc
+        sha256sum md5sum awk cp head basename cat date mkdir rm
+    )
+    case "${OTA_PAYLOAD_COMP}" in
+        xz)   required_tools+=(xz) ;;
+        zstd) required_tools+=(zstd) ;;
+    esac
+    ota_require_host_tools "${required_tools[@]}" || return 1
 
     # Create a fresh temporary directory for OTA package building.
     local ota_temp_dir="${WORKDIR}/ota_package_build_$$"
     ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
     mkdir -p "${ota_temp_dir}" || return 1
 
-    # Check if loop device exists
     if [[ ! -b "${LOOP}" ]]; then
         display_alert "Error: Loop device not found" "${LOOP}" "err"
         ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
         return 1
     fi
 
-    local resolved_boot_partition=""
-
-    ota_resolve_boot_partition "${ota_security_mode}" resolved_boot_partition || {
-        ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-        return 1
-    }
-    ota_report_payload_sources "${ota_security_mode}" "${resolved_boot_partition}"
-
-    ota_create_payload_archives "${ota_temp_dir}" "${ota_security_mode}" \
-        "${resolved_boot_partition}" || {
-        ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-        return 1
-    }
-
-    if ota_payload_encryption_enabled; then
-        ota_require_host_tools openssl od || {
-            ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-            return 1
-        }
-        ota_encrypt_rootfs_payload "${ota_temp_dir}" || {
-            ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-            return 1
-        }
-    fi
-
-    ota_finalize_payload_package "${ota_temp_dir}" "${ota_security_mode}" || {
-        ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
-        return 1
-    }
-
+    ota_payload_packaging_pipeline "${ota_temp_dir}" "${ota_security_mode}"
+    local rc=$?
     ota_cleanup_payload_temp_dir "${ota_temp_dir}" || return 1
+    return "${rc}"
 }
