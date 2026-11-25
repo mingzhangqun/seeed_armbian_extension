@@ -278,6 +278,9 @@ reconcile_success_and_clear() {
     log "success reconciliation passed; clearing ota_in_progress"
     fw_env_set "ota_in_progress" "0" ||
         rescue_shell "cannot clear ota_in_progress"
+    # The handoff one-shot flipped it back to recovery; reset.
+    fw_env_set "ota_boot_next" "normal" ||
+        rescue_shell "cannot reset ota_boot_next"
     ota_sync_reboot
 }
 

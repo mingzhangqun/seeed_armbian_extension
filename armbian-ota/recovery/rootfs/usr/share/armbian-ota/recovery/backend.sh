@@ -567,6 +567,9 @@ recovery_commit_success() {
         error_exit "Cannot resolve boot disk for fw_env; env NOT cleared"
     fw_env_set "ota_in_progress" "0" ||
         error_exit "Failed to clear ota_in_progress; next boot routes to Rescue (harmless, will self-reconcile)"
+    # Same one-shot flip as the rescue path: leave ota_boot_next clean.
+    fw_env_set "ota_boot_next" "normal" ||
+        log_warn "Failed to reset ota_boot_next; inert while ota_in_progress=0"
 
     rm -rf "${OTA_STAGING_DIR}"/* 2>/dev/null || true
     log_info "OTA transaction committed: INSTALLED_ID=${candidate_id} RESTORE_MODE=${restore_mode}"

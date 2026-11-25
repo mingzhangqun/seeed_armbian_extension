@@ -17,6 +17,10 @@ m-dev integration line since 1.2.0: OTA infrastructure themes (recovery-infra
   hook now probes and rebuilds, anchored on the overlay lower root.
   Fail-open.
 
+- **`ota_boot_next` resets to `normal` when a transaction settles.** The
+  handoff one-shot flips it back before trying normal; both settle paths
+  now reset it.
+
 - **README passphrase claim was stale.** "Validated non-empty only"
   predates the secure-storage hard gate: the build fails any passphrase
   whose length is not exactly 64; the hex charset stays documentation-only.
